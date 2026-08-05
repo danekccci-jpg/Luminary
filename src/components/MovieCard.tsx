@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Star, Play } from 'lucide-react';
+import { Star, Play, Film } from 'lucide-react';
 import { Movie } from '../types';
-import { catalogService } from '../services/catalog';
+import { tmdbService } from '../services/tmdb';
 
 interface MovieCardProps {
   movie: Movie;
@@ -13,29 +13,21 @@ export const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, index = 0 
   const [hovered, setHovered] = useState(false);
   const displayTitle = movie.title || movie.name || 'Без названия';
 
-  // Poster URL through image proxy (luminary-img://)
-  const primaryUrl = catalogService.getImageUrl(movie.poster_path);
-  const [imgSrc, setImgSrc] = useState(primaryUrl || '');
-  const [usedFallback, setUsedFallback] = useState(!primaryUrl);
-  const [fallbackDataUri, setFallbackDataUri] = useState('');
-
-  // Preload placeholder SVG for this title
-  useEffect(() => {
-    if (!primaryUrl || usedFallback) {
-      catalogService.getPosterPlaceholder(displayTitle).then(setFallbackDataUri);
-    }
-  }, [primaryUrl, usedFallback, displayTitle]);
+  // TMDB-First: прямой постер с CDN (image.tmdb.org — быстрый, CORS разрешён),
+  // без IPC-проксирования.
+  const posterUrl = tmdbService.getImageUrl(movie.poster_path, 'w500');
+  const [imgSrc, setImgSrc] = useState(posterUrl || '');
+  const [showPlaceholder, setShowPlaceholder] = useState(!posterUrl);
 
   // Set initial image
   useEffect(() => {
-    if (primaryUrl) {
-      setImgSrc(primaryUrl);
-      setUsedFallback(false);
-    } else if (fallbackDataUri) {
-      setImgSrc(fallbackDataUri);
-      setUsedFallback(true);
+    if (posterUrl) {
+      setImgSrc(posterUrl);
+      setShowPlaceholder(false);
+    } else {
+      setShowPlaceholder(true);
     }
-  }, [primaryUrl, fallbackDataUri]);
+  }, [posterUrl]);
 
   const year = movie.release_date
     ? new Date(movie.release_date).getFullYear()
@@ -45,12 +37,9 @@ export const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, index = 0 
   const rating = movie.vote_average?.toFixed(1) || '—';
   const isHighRated = parseFloat(rating) >= 8.0;
 
-  const handleImgError = async () => {
-    if (usedFallback) return;
-    setUsedFallback(true);
-    const placeholder = await catalogService.getPosterPlaceholder(displayTitle);
-    setFallbackDataUri(placeholder);
-    setImgSrc(placeholder);
+  /** Постер не загрузился (404/сеть) — показываем градиентную заглушку. */
+  const handleImgError = () => {
+    setShowPlaceholder(true);
   };
 
   // Determine tag display
@@ -68,7 +57,7 @@ export const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, index = 0 
         borderRadius: '20px',
         overflow: 'hidden',
         cursor: 'pointer',
-        background: 'rgba(255,255,255,0.04)',
+        background: '#121318',
         border: hovered
           ? '1px solid rgba(0,242,254,0.4)'
           : '1px solid rgba(255,255,255,0.06)',
@@ -81,20 +70,72 @@ export const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, index = 0 
       }}
     >
       <div style={{ position: 'relative', aspectRatio: '2/3', overflow: 'hidden' }}>
-        <img
-          src={imgSrc || fallbackDataUri}
-          alt={displayTitle}
-          loading="lazy"
-          onError={handleImgError}
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            transform: hovered ? 'scale(1.08)' : 'scale(1)',
-            transition: 'transform 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
-            background: 'linear-gradient(135deg, #0a0a0d, #12141c)',
-          }}
-        />
+        {showPlaceholder ? (
+          /* ── Gradient placeholder: icon + title (poster unavailable) ── */
+          <div
+            style={{
+              width: '100%',
+              height: '100%',
+              background:
+                'linear-gradient(145deg, #121318 0%, #1a1030 55%, #0a0a0d 100%)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '0.6rem',
+              padding: '1rem',
+              transform: hovered ? 'scale(1.08)' : 'scale(1)',
+              transition: 'transform 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
+            }}
+          >
+            <div
+              style={{
+                width: '46px',
+                height: '46px',
+                borderRadius: '14px',
+                background: 'linear-gradient(135deg, #00c6fb 0%, #8A2BE2 100%)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: '0 0 18px rgba(0,198,251,0.35)',
+                flexShrink: 0,
+              }}
+            >
+              <Film size={20} color="#fff" />
+            </div>
+            <div
+              style={{
+                fontSize: '0.7rem',
+                fontWeight: 700,
+                color: 'rgba(240,242,248,0.72)',
+                textAlign: 'center',
+                lineHeight: 1.35,
+                overflow: 'hidden',
+                display: '-webkit-box',
+                WebkitLineClamp: 3,
+                WebkitBoxOrient: 'vertical',
+                wordBreak: 'break-word',
+              }}
+            >
+              {displayTitle}
+            </div>
+          </div>
+        ) : (
+          <img
+            src={imgSrc}
+            alt={displayTitle}
+            loading="lazy"
+            onError={handleImgError}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              transform: hovered ? 'scale(1.08)' : 'scale(1)',
+              transition: 'transform 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
+              background: 'linear-gradient(135deg, #121318, #1a1030)',
+            }}
+          />
+        )}
 
         {/* Hover overlay */}
         <div

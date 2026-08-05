@@ -12,7 +12,85 @@ export interface TorrServerStatus {
   version?: string;
   error?: string;
   binaryPath?: string;
+  /** Сервис в процессе запуска (spawn прошёл, /echo ещё не ответил). */
+  starting?: boolean;
+  /** Последние строки лога при ошибке старта — для плашки в UI. */
+  errorLog?: string;
 }
+
+export interface NormalizedLink {
+  ok: boolean;
+  link?: string;
+  error?: string;
+}
+
+/**
+ * Валидация и нормализация торрент-ссылки перед отправкой в TorrServer.
+ * Всеядный режим: принимает magnet-URI (в т.ч. без '?'), http(s)-ссылки на
+ * .torrent, голый BTIH-хэш (40 hex SHA-1 / 32 Base32) и хэш с префиксами
+ * (urn:btih:, btih:, xt=urn:btih:). Всё, что содержит верный BTIH или
+ * HTTP-адрес файла, уходит в TorrServer API — не блокируем сомнительные.
+ */
+export function normalizeTorrentLink(link: string, title: string): NormalizedLink {
+  if (!link || typeof link !== 'string') {
+    return { ok: false, error: 'Некорректная торрент-ссылка' };
+  }
+  const raw = link.trim();
+  if (!raw) return { ok: false, error: 'Некорректная торрент-ссылка' };
+
+  const dn = encodeURIComponent(title || 'Movie Stream');
+
+  // 1) HTTP(S): .torrent-файл или страница раздачи — отправляем как есть
+  if (/^https?:\/\//i.test(raw)) {
+    return { ok: true, link: raw };
+  }
+
+  // 2) Magnet (даже без '?', любой регистр)
+  if (/^magnet:/i.test(raw)) {
+    const btih = extractBtih(raw);
+    if (btih) {
+      // Пересобираем с гарантированным xt=urn:btih: и сохраняем прочие параметры (dn/tr/...)
+      const body = raw.replace(/^magnet:/i, '').replace(/^\?/, '');
+      const others = body
+        .split('&')
+        .filter(Boolean)
+        .filter((p) => !/^xt=/i.test(p));
+      return {
+        ok: true,
+        link: `magnet:?xt=urn:btih:${btih}${others.length ? '&' + others.join('&') : ''}`,
+      };
+    }
+    // magnet без распознанного btih — всё равно отправляем (TorrServer сам разберёт)
+    return { ok: true, link: raw };
+  }
+
+  // 3) BTIH-хэш: голый или с префиксом (urn:btih:, btih:, xt=urn:btih:)
+  const btih = extractBtih(raw);
+  if (btih) {
+    return { ok: true, link: `magnet:?xt=urn:btih:${btih}&dn=${dn}` };
+  }
+
+  // 4) Ничего похожего на торрент — блокируем с понятной ошибкой
+  return { ok: false, error: 'Некорректная торрент-ссылка' };
+}
+
+/**
+ * Извлечь BTIH-хэш из произвольной строки: 40 hex (SHA-1) или 32 Base32.
+ * Ищет хэш внутри magnet/префиксов — не требует «чистой» строки.
+ */
+function extractBtih(input: string): string | null {
+  const hex = input.match(/\b[a-fA-F0-9]{40}\b/);
+  if (hex) return hex[0].toLowerCase();
+  const b32 = input.match(/\b[A-Za-z2-7]{32}\b/);
+  if (b32) return b32[0].toUpperCase();
+  return null;
+}
+
+/** Сколько последних строк лога держим в памяти для UI. */
+const LOG_BUFFER_MAX = 500;
+/** Защита от бесконечных авто-рестартов. */
+const MAX_AUTO_RESTARTS = 3;
+const RESTART_COOLDOWN_MS = 15000;
 
 export class TorrServerManager {
   private childProcess: ChildProcess | null = null;
@@ -21,11 +99,190 @@ export class TorrServerManager {
   private binaryPath: string = '';
   private dataDir: string = '';
 
+  // ── Сквозное логирование ──
+  private logPath: string = '';
+  private logBuffer: string[] = [];
+
+  // ── Автовосстановление по логам ──
+  private startingFlag = false;
+  private restartCount = 0;
+  private lastRestartAt = 0;
+  private appliedNetworkFix = false;
+  private appliedRamCache = false;
+  private lastStartError = '';
+  private lastStartErrorLog = '';
+
   constructor(port: number = 8090) {
     this.port = port;
     this.dataDir = path.join(app.getPath('userData'), 'torrserver_data');
     if (!fs.existsSync(this.dataDir)) {
       fs.mkdirSync(this.dataDir, { recursive: true });
+    }
+    this.logPath = path.join(app.getPath('userData'), 'torrserver.log');
+    this.appendLog('════════ Luminary TorrServer session started ════════');
+  }
+
+  /** Флаг «идёт запуск» — для статуса «Запуск сервиса...» в UI. */
+  public isStarting(): boolean {
+    return this.startingFlag;
+  }
+
+  /** Последняя ошибка старта (текст) — для плашки в UI. */
+  public getLastError(): { error: string; errorLog: string } {
+    return { error: this.lastStartError, errorLog: this.lastStartErrorLog };
+  }
+
+  /** Последние N строк лога — для IPC torrserver:get-logs. */
+  public getLogs(lines: number = 100): string[] {
+    return this.logBuffer.slice(-Math.max(1, Math.min(lines, LOG_BUFFER_MAX)));
+  }
+
+  /**
+   * Записать строку в torrserver.log (userData) + дублировать в консоль Electron.
+   * Параллельно анализирует строку на известные сбои → автовосстановление.
+   */
+  private appendLog(line: string) {
+    const ts = new Date().toISOString();
+    const entry = `[${ts}] ${line}`;
+    console.log('[TorrServer Log]', line);
+    try {
+      fs.appendFileSync(this.logPath, entry + '\n');
+    } catch {
+      /* файл лога недоступен — не критично */
+    }
+    this.logBuffer.push(entry);
+    if (this.logBuffer.length > LOG_BUFFER_MAX) {
+      this.logBuffer.splice(0, this.logBuffer.length - LOG_BUFFER_MAX);
+    }
+    this.analyzeLogLine(line);
+  }
+
+  // ── Диагностика сбоев по логам → автовосстановление ──
+
+  /** Найти PID, занимающий порт (macOS/Linux через lsof). */
+  private async killProcessOnPort(port: number): Promise<boolean> {
+    try {
+      const out = execSync(`lsof -ti tcp:${port}`, { stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 })
+        .toString()
+        .trim();
+      const pids = out.split('\n').map((s) => s.trim()).filter(Boolean);
+      for (const pid of pids) {
+        try {
+          process.kill(Number(pid), 'SIGKILL');
+          console.log(`[TorrServer] Killed stale process on port ${port} (pid ${pid})`);
+        } catch {
+          /* процесс уже умер */
+        }
+      }
+      return pids.length > 0;
+    } catch {
+      return false; // порт свободен или lsof недоступен
+    }
+  }
+
+  /** Плановый авто-перезапуск (защита от зацикливания). */
+  private scheduleRestart(reason: string) {
+    const now = Date.now();
+    if (now - this.lastRestartAt < RESTART_COOLDOWN_MS || this.restartCount >= MAX_AUTO_RESTARTS) {
+      console.warn(`[TorrServer] Auto-restart skipped (${reason}) — cooldown/limit reached`);
+      return;
+    }
+    this.restartCount++;
+    this.lastRestartAt = now;
+    console.log(`[TorrServer] Auto-restart due to: ${reason}`);
+    this.stopServer()
+      .catch(() => {})
+      .then(() => {
+        setTimeout(() => {
+          this.startServer().catch(() => {});
+        }, 1500);
+      });
+  }
+
+  /** P2P-сбой (DHT/UPnP/nat-pmp) → сброс сетевых настроек. */
+  private async applyNetworkSettings() {
+    if (this.appliedNetworkFix) return;
+    this.appliedNetworkFix = true;
+    console.log('[TorrServer] P2P issue in logs — resetting network: DHT/UPnP on, PeersListenPort=43211');
+    try {
+      await this.settingsRequest('set', {
+        DisableDHT: false,
+        DisableUPNP: false,
+        DisablePEX: false,
+        DisableUTP: false,
+        PeersListenPort: 43211,
+      });
+    } catch (e: any) {
+      console.warn('[TorrServer] Network settings reset warning:', e.message);
+    }
+  }
+
+  /** Ошибка записи дискового кэша → чистый RAM-кэш (200 MB, без диска). */
+  private async applyRamCache() {
+    if (this.appliedRamCache) return;
+    this.appliedRamCache = true;
+    console.log('[TorrServer] Disk cache error in logs — switching to pure RAM cache (200 MB)');
+    try {
+      await this.settingsRequest('set', {
+        CacheSize: 209715200, // ~200 MB
+        UseDisk: false,
+        TorrentsSavePath: '',
+      });
+    } catch (e: any) {
+      console.warn('[TorrServer] RAM cache switch warning:', e.message);
+    }
+  }
+
+  /** Анализ строки лога: EACCES / port-in-use / P2P-DHT / дисковый кэш. */
+  private analyzeLogLine(line: string) {
+    const lower = line.toLowerCase();
+
+    // 1) EACCES / permission denied → chmod 755 бинарника (macOS quarantine)
+    if (/eacces|permission denied/.test(lower)) {
+      if (this.binaryPath && process.platform !== 'win32') {
+        try {
+          fs.chmodSync(this.binaryPath, 0o755);
+          console.log('[TorrServer] chmod 755 re-applied (EACCES detected)');
+        } catch {
+          /* ignore */
+        }
+      }
+      // Ошибка записи файлов буфера → RAM-кэш
+      if (/file write error|permission denied.*(?:write|create|open|file)/.test(lower)) {
+        this.applyRamCache();
+      }
+    }
+
+    // 2) Порт занят → убить зависший процесс и перезапустить.
+    //    На macOS bind может пройти из-за SO_REUSEPORT, но два инстанса
+    //    конфликтуют на уровне БД (bboltDB lock) → тоже лечим перезапуском.
+    if (/address already in use|bind: address|eaddrnotavail/.test(lower)) {
+      this.killProcessOnPort(this.port)
+        .then((killed) => {
+          if (killed) this.scheduleRestart('port-in-use');
+          else this.scheduleRestart('bind-failed');
+        })
+        .catch(() => this.scheduleRestart('bind-failed'));
+      return;
+    }
+    if (/bboltdb|database is locked|another process/i.test(lower)) {
+      this.killProcessOnPort(this.port)
+        .then((killed) => {
+          if (killed) this.scheduleRestart('db-lock');
+          else this.scheduleRestart('db-error');
+        })
+        .catch(() => this.scheduleRestart('db-error'));
+      return;
+    }
+
+    // 3) P2P / DHT / UPnP / NAT-PMP сбои → сброс сетевых настроек
+    if (/dht.*0 nodes|dht.*no nodes|upnp.*error|nat.?pmp.*fail|upnp.*fail|port mapping.*fail/i.test(lower)) {
+      this.applyNetworkSettings();
+    }
+
+    // 4) Дисковый кэш → чистый RAM-кэш
+    if (/file write error|disk cache|buffer write error/i.test(lower)) {
+      this.applyRamCache();
     }
   }
 
@@ -51,6 +308,24 @@ export class TorrServerManager {
     return path.join(app.getPath('userData'), 'bin');
   }
 
+  /**
+   * Bundled binary ships inside the app via extraResources
+   * → process.resourcesPath/torrserver/<binary> (never app.asar).
+   */
+  public getBundledBinaryPath(): string {
+    return path.join(process.resourcesPath, 'torrserver', this.getBinaryName());
+  }
+
+  /** Re-assert executable permissions (macOS may strip them after updates / quarantine). */
+  private ensureExecutable(binPath: string): void {
+    if (process.platform === 'win32') return;
+    try {
+      fs.chmodSync(binPath, 0o755);
+    } catch (err: any) {
+      console.warn(`[TorrServer] chmod warning for ${binPath}:`, err.message);
+    }
+  }
+
   public async getOrDownloadBinary(): Promise<string> {
     const binDir = this.getBinaryDir();
     if (!fs.existsSync(binDir)) {
@@ -60,28 +335,38 @@ export class TorrServerManager {
     const binaryName = this.getBinaryName();
     const targetPath = path.join(binDir, binaryName);
 
-    if (fs.existsSync(targetPath)) {
-      // Re-assert exec perms on every launch (macOS may strip after updates / quarantine)
-      if (process.platform !== 'win32') {
-        try {
-          fs.chmodSync(targetPath, 0o755);
-        } catch {
-          /* non-fatal */
+    // 1) Prefer the bundled binary from extraResources (process.resourcesPath),
+    //    NOT from inside app.asar (Electron cannot exec files from asar).
+    const bundledPath = this.getBundledBinaryPath();
+    if (fs.existsSync(bundledPath)) {
+      try {
+        if (!fs.existsSync(targetPath) || fs.statSync(bundledPath).size !== fs.statSync(targetPath).size) {
+          fs.copyFileSync(bundledPath, targetPath);
         }
+        this.ensureExecutable(targetPath);
+        this.binaryPath = targetPath;
+        console.log(`[TorrServer] Using bundled binary from extraResources: ${bundledPath}`);
+        return targetPath;
+      } catch (err: any) {
+        console.warn('[TorrServer] Failed to use bundled binary, falling back to download:', err.message);
       }
+    }
+
+    // 2) Already downloaded in userData/bin
+    if (fs.existsSync(targetPath)) {
+      this.ensureExecutable(targetPath);
       this.binaryPath = targetPath;
       return targetPath;
     }
 
+    // 3) First launch — download from official GitHub Releases
     const downloadUrl = `https://github.com/YouROK/TorrServer/releases/latest/download/${binaryName}`;
     console.log(`[TorrServer] Downloading binary from ${downloadUrl}...`);
     console.log(`[TorrServer] Destination: ${targetPath}`);
 
     try {
       await this.downloadFile(downloadUrl, targetPath);
-      if (process.platform !== 'win32') {
-        fs.chmodSync(targetPath, 0o755);
-      }
+      this.ensureExecutable(targetPath);
       this.binaryPath = targetPath;
       return targetPath;
     } catch (err: any) {
@@ -138,9 +423,19 @@ export class TorrServerManager {
   }
 
   public async startServer(): Promise<TorrServerStatus> {
-    const isRunning = await this.checkHealth();
-    if (isRunning) {
-      console.log(`[TorrServer] Already running on http://${this.host}:${this.port}`);
+    // Стабильная проверка: сервер считается «уже работающим» только если /echo
+    // отвечает 200 несколько раз подряд. Это исключает гонку stop→start,
+    // когда умирающий процесс ещё отвечает, но вскоре пропадёт.
+    let stableRunning = true;
+    for (let i = 0; i < 3; i++) {
+      if (!(await this.checkHealth())) { stableRunning = false; break; }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    if (stableRunning) {
+      // /echo уже отвечает 200 — сервер работает (наш или внешний).
+      // НЕ запускаем spawn повторно — статус сразу online.
+      console.log(`[TorrServer] Already running on http://${this.host}:${this.port} — status online, spawn skipped`);
+      this.startingFlag = false;
       await this.configureServer(512);
       return { running: true, port: this.port, version: 'MatriX (Pre-running)' };
     }
@@ -148,24 +443,49 @@ export class TorrServerManager {
     try {
       const binPath = await this.getOrDownloadBinary();
 
-      // macOS: force executable permissions (quarantine may strip them)
+      // ── macOS: снимаем Quarantine-атрибут (Gatekeeper блокирует исполнение) ──
       if (process.platform === 'darwin') {
         try {
-          execSync(`chmod +x "${binPath}"`, { stdio: 'ignore' });
-          console.log('[TorrServer] macOS: exec permissions enforced');
+          execSync(`xattr -r -d com.apple.quarantine "${binPath}" || true`, { stdio: 'ignore' });
+          console.log('[TorrServer] Quarantine attribute cleared (xattr)');
         } catch {
-          /* non-fatal */
+          /* атрибут может отсутствовать — не критично */
         }
       }
 
-      console.log(`[TorrServer] Spawning process: ${binPath}`);
-
-      // macOS: bind to all interfaces + higher readahead for stable streaming
-      const baseArgs = ['-p', this.port.toString(), '-d', this.dataDir];
-      if (process.platform === 'darwin') {
-        baseArgs.push('--ip', '0.0.0.0', '--readahead', '50');
+      // ── Жёсткая очистка перед стартом: убить зависшие инстансы и bboltDB-локи ──
+      if (this.childProcess) {
+        await this.stopServer().catch(() => {});
       }
-      const args = baseArgs;
+      try {
+        execSync('killall -9 TorrServer || true', { stdio: 'ignore' });
+        console.log('[TorrServer] Killed stale TorrServer processes (killall -9)');
+      } catch {
+        /* процесса нет — ок */
+      }
+      try {
+        execSync(`lsof -ti:${this.port} | xargs kill -9 || true`, { stdio: 'ignore' });
+        console.log(`[TorrServer] Port ${this.port} cleared (lsof kill)`);
+      } catch {
+        /* порт свободен — ок */
+      }
+
+      // Explicitly re-assert exec permissions right before spawn (macOS/Linux)
+      this.ensureExecutable(binPath);
+      console.log('[TorrServer] Exec permissions enforced (chmod 755)');
+
+      console.log(`[TorrServer] Spawning process: ${binPath}`);
+      this.startingFlag = true;
+
+      // NOTE: только флаги из `TorrServer --help` — текущий релиз НЕ поддерживает
+      // `--readahead` (unknown argument → exit code 2). Readahead настраивается
+      // через API /settings (ReaderReadAHead). 
+      // `--ip 0.0.0.0` — HTTP API + P2P-сокеты на всех интерфейсах (иначе на macOS
+      // входящие P2P-подключения/UPNP-проброс не работают → скорость 0.0 MB/s).
+      const args = ['--port', this.port.toString(), '--ip', '0.0.0.0', '--path', this.dataDir];
+      const argLog = args.join(' ');
+      console.log(`[TorrServer] Args: ${argLog}`);
+      this.appendLog(`SPAWN ${binPath} ${argLog}`);
 
       this.childProcess = spawn(binPath, args, {
         cwd: path.dirname(binPath),
@@ -179,61 +499,159 @@ export class TorrServerManager {
         },
       });
 
+      // ── Сквозное логирование: весь вывод → torrserver.log + консоль (мгновенно) ──
       this.childProcess.stdout?.on('data', (data) => {
-        console.log(`[TorrServer stdout]: ${data.toString().trim()}`);
+        const lines = data.toString().trim().split('\n');
+        for (const l of lines) if (l) this.appendLog(l);
       });
 
       this.childProcess.stderr?.on('data', (data) => {
-        console.log(`[TorrServer stderr]: ${data.toString().trim()}`);
+        const lines = data.toString().trim().split('\n');
+        for (const l of lines) if (l) this.appendLog(l);
       });
 
       this.childProcess.on('exit', (code, signal) => {
         console.log(`[TorrServer] Exited with code ${code}, signal ${signal}`);
+        this.startingFlag = false;
+        this.appendLog(`EXIT code=${code} signal=${signal}`);
         this.childProcess = null;
       });
 
       this.childProcess.on('error', (err) => {
         console.error('[TorrServer] Spawn error:', err.message);
+        this.startingFlag = false;
+        this.appendLog(`SPAWN ERROR: ${err.message}`);
+        // EACCES при запуске → chmod и повторный запуск
+        if (/eacces|permission denied/i.test(err.message)) {
+          if (this.binaryPath && process.platform !== 'win32') {
+            try { fs.chmodSync(this.binaryPath, 0o755); } catch { /* ignore */ }
+          }
+          this.scheduleRestart('spawn-eacces');
+        }
       });
 
-      // Health-check /echo on 127.0.0.1:8090 before considering the server ready
-      for (let i = 0; i < 30; i++) {
-        await new Promise((r) => setTimeout(r, 200));
+      // Health-check /echo on 127.0.0.1:<port> — 20 attempts × 500 ms = 10 сек.
+      // Status flips to Online only after the server answers 200 OK.
+      let ready = false;
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 500));
         if (await this.checkHealth()) {
-          console.log(`[TorrServer] Responsive on port ${this.port} (/echo OK)`);
-          await this.configureServer(512);
-          return { running: true, port: this.port, binaryPath: binPath };
+          ready = true;
+          break;
         }
       }
 
+      if (ready) {
+        this.startingFlag = false;
+        this.restartCount = 0;
+        this.lastStartError = '';
+        this.lastStartErrorLog = '';
+        console.log(`[TorrServer] Responsive on port ${this.port} (/echo OK)`);
+        this.appendLog('HEALTHCHECK /echo OK — server ready');
+        // Сразу: безопасная часть конфига (БЕЗ смены P2P-порта — ранняя смена
+        // ломает инициализацию BT-клиента → 500 «BT client not connected»).
+        await this.configureServer(512, false);
+        // Через 20 сек: фиксированный P2P-порт 43211 + полный конфиг,
+        // когда BT-клиент полностью инициализирован.
+        setTimeout(() => {
+          this.configureServer(512, true).catch(() => {});
+        }, 20000);
+        return { running: true, port: this.port, binaryPath: binPath };
+      }
+
+      // ── Таймаут 10 сек: принудительно убиваем процесс и собираем лог для UI ──
+      this.startingFlag = false;
+      console.error(`[TorrServer] /echo timeout after 10s — killing process and reading log`);
+      if (this.childProcess?.pid) {
+        try { this.childProcess.kill('SIGKILL'); } catch { /* ignore */ }
+        this.childProcess = null;
+      }
+      const tail = this.getLogs(8).join('\n');
+      this.lastStartError =
+        'TorrServer не запустился за 10 секунд. Возможно, бинарник заблокирован Gatekeeper или порт занят.';
+      this.lastStartErrorLog = tail;
       return {
         running: false,
         port: this.port,
-        error: 'TorrServer failed to respond on /echo within timeout',
+        error: this.lastStartError,
+        errorLog: tail,
       };
     } catch (err: any) {
+      this.startingFlag = false;
       console.error('[TorrServer] Start error:', err);
-      return { running: false, port: this.port, error: err.message };
+      this.appendLog(`START ERROR: ${err.message}`);
+      this.lastStartError = err.message;
+      this.lastStartErrorLog = this.getLogs(8).join('\n');
+      return { running: false, port: this.port, error: err.message, errorLog: this.lastStartErrorLog };
     }
   }
 
-  /** Configure via POST /settings (not /torrents — that action:set only updates torrent metadata). */
-  public async configureServer(ramCacheMB: number = 512): Promise<any> {
-    const safeMB = Math.max(64, Math.min(4096, Math.round(ramCacheMB) || 512));
-    console.log(`[TorrServer] Configuring RAM Cache size to ${safeMB} MB...`);
+  /**
+   * Configure via POST /settings.
+   * ВАЖНО: `PeersListenPort` меняется ТОЛЬКО после полной инициализации BT-клиента
+   * (applyPeersPort=true, отложенный вызов). Применение порта в первые секунды
+   * после старта ломает клиент → «BT client not connected» / 500 на add.
+   */
+  public async configureServer(ramCacheMB: number = 300, applyPeersPort: boolean = true): Promise<any> {
+    const safeMB = Math.max(64, Math.min(4096, Math.round(ramCacheMB) || 300));
+    console.log(`[TorrServer] Configuring: RAM cache ${safeMB} MB, RAM-only mode${applyPeersPort ? ', fixed P2P port 43211' : ' (P2P port deferred)'}`);
     const cacheSizeBytes = safeMB * 1024 * 1024;
     try {
       const current = await this.settingsRequest('get');
-      const sets = {
+      const sets: Record<string, unknown> = {
         ...(current && typeof current === 'object' ? current : {}),
-        CacheSize: cacheSizeBytes,
-        ReaderReadAHead: 95,
+        // ── Критический набор для macOS (P2P-скорость 0.0 MB/s fix) ──
+        CacheSize: cacheSizeBytes,          // буфер в RAM
+        ReaderReadAHead: 95,                // упреждающее чтение
         PreloadCache: 50,
+        PreloadBufferSize: 10485760,        // минимальный предзагрузочный буфер ~10 MB
+        UseDisk: false,                     // RAM-only: нет блокировок файловой системы macOS
+        TorrentsSavePath: '',
+        RemoveCacheOnDrop: false,
         ConnectionsLimit: 120,
+        ClientsStatLimit: 30,
+        DownloadRateLimit: 0,               // без лимитов скорости
+        UploadRateLimit: 0,
+        DisableUPNP: false,                 // UPNP/NAT-PMP проброс портов
+        DisableDHT: false,                  // DHT-сеть
+        DisablePEX: false,                  // Peer Exchange
+        DisableUTP: false,                  // uTP (за NAT)
+        DisableTCP: false,
+        EnableIPv6: false,
       };
+      if (applyPeersPort) {
+        sets.PeersListenPort = 43211;       // фиксированный торрент-порт (после инициализации клиента)
+      }
       return await this.settingsRequest('set', sets);
     } catch (e: any) {
       console.warn('[TorrServer] Configure warning:', e.message);
+    }
+  }
+
+  /**
+   * Переподключение торрента к трекерам/DHT — используется, когда
+   * пиры есть, но скорость 0.0 MB/s (зависшие DHT-подключения).
+   * MatriX.142.2 не поддерживает action "reconnect" (HTTP 400), поэтому
+   * пересоздаём торрент: rem + add — трекеры объявляются заново, DHT
+   * ищет пиры с нуля. Прогресс буферизации на этом этапе минимален.
+   */
+  public async reconnectTorrent(hash: string, magnet: string): Promise<void> {
+    if (!hash) return;
+    console.log(`[TorrServer] Reconnecting torrent ${hash} (rem + add)...`);
+    try {
+      await this.apiRequest('rem', { hash });
+    } catch (e: any) {
+      console.warn('[TorrServer] Reconnect rem warning:', e.message);
+    }
+    try {
+      await this.apiRequest('add', {
+        link: magnet,
+        title: magnet || 'Torrent Stream',
+        save_to_db: true,
+      });
+      console.log(`[TorrServer] Torrent ${hash} re-added — DHT/trackers reconnected`);
+    } catch (e: any) {
+      console.warn('[TorrServer] Reconnect add warning:', e.message);
     }
   }
 
@@ -299,6 +717,24 @@ export class TorrServerManager {
     });
 
     this.childProcess = null;
+
+    // Дождаться ФАКТИЧЕСКОГО освобождения порта (процесс может переживать
+    // SIGTERM из-за graceful shutdown). Иначе следующий start увидит умирающий
+    // процесс как «already running» и пропустит spawn.
+    for (let i = 0; i < 10; i++) {
+      if (!(await this.checkHealth())) {
+        console.log('[TorrServer] Port released after stop');
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    // Всё ещё отвечает — принудительно SIGKILL по порту
+    try {
+      execSync(`lsof -ti:${this.port} | xargs kill -9 || true`, { stdio: 'ignore' });
+      console.log(`[TorrServer] Port ${this.port} force-cleared (SIGKILL) after stop timeout`);
+    } catch {
+      /* ignore */
+    }
   }
 
   public async apiRequest(action: string, payload: any = {}): Promise<any> {
@@ -325,6 +761,8 @@ export class TorrServerManager {
               if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
                 resolve(body ? JSON.parse(body) : {});
               } else {
+                // 500 и др. — логируем тело ответа в torrserver.log для диагностики
+                this.appendLog(`[TorrServer API Error ${res.statusCode}]: ${body.slice(0, 500)}`);
                 reject(new Error(`TorrServer API returned ${res.statusCode}: ${body}`));
               }
             } catch {

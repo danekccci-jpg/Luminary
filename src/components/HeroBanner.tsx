@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Play, Info, Star, Calendar, Zap, ChevronRight } from 'lucide-react';
 import { Movie } from '../types';
-import { catalogService } from '../services/catalog';
+import { tmdbService } from '../services/tmdb';
 
 interface HeroBannerProps {
   movie: Movie;
@@ -9,8 +9,9 @@ interface HeroBannerProps {
 }
 
 export const HeroBanner: React.FC<HeroBannerProps> = ({ movie, onSelectMovie }) => {
-  const backdropUrl = catalogService.getImageUrl(movie.backdrop_path);
-  const posterUrl = catalogService.getImageUrl(movie.poster_path);
+  // TMDB CDN напрямую (w1280 для бэкдропа, w500 для постера)
+  const backdropUrl = tmdbService.getImageUrl(movie.backdrop_path, 'w1280');
+  const posterUrl = tmdbService.getImageUrl(movie.poster_path, 'w500');
   const year = movie.release_date
     ? new Date(movie.release_date).getFullYear()
     : movie.first_air_date

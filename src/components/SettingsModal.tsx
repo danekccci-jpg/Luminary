@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Server, Key, Power, Cpu, Database, RefreshCw } from 'lucide-react';
+import { X, Server, Key, Power, Cpu, Database, RefreshCw, ScrollText, AlertTriangle } from 'lucide-react';
 import { TorrServerStatusInfo, UserSettings } from '../types';
 import { torrServerService } from '../services/torrserver';
 
@@ -25,6 +25,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [transcodeAudio, setTranscodeAudio] = useState(settings.transcodeAudioToAac ?? true);
   const [platformInfo,  setPlatformInfo]  = useState({ platform: 'desktop', arch: 'x64' });
   const [isToggling,    setIsToggling]    = useState(false);
+  const [showLogs,      setShowLogs]      = useState(false);
+  const [logs,          setLogs]          = useState<string[]>([]);
+
+  // Загрузка логов TorrServer (последние 100 строк из torrserver.log)
+  const refreshLogs = async () => {
+    const lines = await torrServerService.getLogs(100);
+    setLogs(lines);
+  };
+
+  useEffect(() => {
+    if (showLogs) refreshLogs();
+  }, [showLogs]);
+
+  // При открытии Настроек — прямой запрос актуального статуса TorrServer
+  useEffect(() => {
+    onRefreshStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (window.electronAPI?.getPlatformInfo) {
@@ -149,28 +167,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 borderRadius: '999px',
                 fontSize: '0.72rem',
                 fontWeight: 800,
-                background: torrServerStatus.running ? 'rgba(16,245,172,0.1)' : 'rgba(255,84,112,0.1)',
-                border: `1px solid ${torrServerStatus.running ? 'rgba(16,245,172,0.35)' : 'rgba(255,84,112,0.35)'}`,
-                color: torrServerStatus.running ? 'var(--emerald)' : 'var(--coral)',
-                boxShadow: torrServerStatus.running ? '0 0 10px rgba(16,245,172,0.2)' : '0 0 10px rgba(255,84,112,0.2)',
+                background: torrServerStatus.running ? 'rgba(16,245,172,0.1)' : torrServerStatus.starting ? 'rgba(255,184,0,0.1)' : 'rgba(255,84,112,0.1)',
+                border: `1px solid ${torrServerStatus.running ? 'rgba(16,245,172,0.35)' : torrServerStatus.starting ? 'rgba(255,184,0,0.4)' : 'rgba(255,84,112,0.35)'}`,
+                color: torrServerStatus.running ? 'var(--emerald)' : torrServerStatus.starting ? 'var(--amber)' : 'var(--coral)',
+                boxShadow: torrServerStatus.running ? '0 0 10px rgba(16,245,172,0.2)' : torrServerStatus.starting ? '0 0 10px rgba(255,184,0,0.2)' : '0 0 10px rgba(255,84,112,0.2)',
               }}>
-                {torrServerStatus.running ? '● Online' : '○ Offline'}
+                {torrServerStatus.running ? '● Online' : torrServerStatus.starting ? '◐ Запуск сервиса...' : '○ Offline'}
               </div>
             </div>
             <button
               onClick={handleToggleServer}
-              disabled={isToggling}
+              disabled={isToggling || !!torrServerStatus.starting}
               style={{
                 width: '100%',
                 padding: '0.65rem',
                 borderRadius: '12px',
-                border: `1px solid ${torrServerStatus.running ? 'rgba(255,84,112,0.3)' : 'rgba(16,245,172,0.3)'}`,
-                background: torrServerStatus.running ? 'rgba(255,84,112,0.07)' : 'rgba(16,245,172,0.07)',
-                color: torrServerStatus.running ? 'var(--coral)' : 'var(--emerald)',
+                border: `1px solid ${torrServerStatus.running ? 'rgba(255,84,112,0.3)' : torrServerStatus.starting ? 'rgba(255,184,0,0.3)' : 'rgba(16,245,172,0.3)'}`,
+                background: torrServerStatus.running ? 'rgba(255,84,112,0.07)' : torrServerStatus.starting ? 'rgba(255,184,0,0.07)' : 'rgba(16,245,172,0.07)',
+                color: torrServerStatus.running ? 'var(--coral)' : torrServerStatus.starting ? 'var(--amber)' : 'var(--emerald)',
                 fontFamily: 'inherit',
                 fontSize: '0.82rem',
                 fontWeight: 700,
-                cursor: isToggling ? 'wait' : 'pointer',
+                cursor: isToggling || torrServerStatus.starting ? 'wait' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -179,8 +197,138 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               }}
             >
               <Power size={14} />
-              <span>{isToggling ? 'Обработка...' : torrServerStatus.running ? 'Остановить процесс' : 'Запустить TorrServer'}</span>
+              <span>
+                {isToggling
+                  ? 'Обработка...'
+                  : torrServerStatus.running
+                  ? 'Остановить процесс'
+                  : torrServerStatus.starting
+                  ? 'Запуск сервиса...'
+                  : 'Запустить TorrServer'}
+              </span>
             </button>
+
+            {/* ── Плашка ошибки старта (таймаут /echo, Gatekeeper, порт) ── */}
+            {!torrServerStatus.running && !torrServerStatus.starting && torrServerStatus.error && (
+              <div
+                style={{
+                  marginTop: '0.6rem',
+                  padding: '0.9rem 1rem',
+                  borderRadius: '14px',
+                  background: 'rgba(255,84,112,0.08)',
+                  border: '1px solid rgba(255,84,112,0.35)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                  <AlertTriangle size={15} style={{ color: '#FF5470', flexShrink: 0 }} />
+                  <span style={{ fontSize: '0.8rem', fontWeight: 700, color: 'rgba(255,160,180,0.95)' }}>
+                    {torrServerStatus.error}
+                  </span>
+                </div>
+                {torrServerStatus.errorLog && (
+                  <pre
+                    style={{
+                      margin: '0 0 0.7rem',
+                      padding: '0.5rem 0.6rem',
+                      background: 'rgba(0,0,0,0.4)',
+                      borderRadius: '10px',
+                      fontSize: '0.62rem',
+                      lineHeight: 1.45,
+                      color: 'rgba(255,160,180,0.7)',
+                      fontFamily: 'SF Mono, Menlo, monospace',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-all',
+                      maxHeight: '110px',
+                      overflowY: 'auto',
+                    }}
+                  >
+                    {torrServerStatus.errorLog}
+                  </pre>
+                )}
+                <button
+                  onClick={handleToggleServer}
+                  className="btn-primary"
+                  style={{ borderRadius: '10px', padding: '0.5rem 1rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+                >
+                  <RefreshCw size={13} />
+                  Перезапустить
+                </button>
+              </div>
+            )}
+
+            {/* ── Логи TorrServer (отладка) ── */}
+            <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.6rem' }}>
+              <button
+                onClick={() => setShowLogs(!showLogs)}
+                className="btn-secondary"
+                style={{ flex: 1, borderRadius: '12px', padding: '0.55rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
+              >
+                <ScrollText size={14} />
+                {showLogs ? 'Скрыть логи TorrServer' : 'Посмотреть логи TorrServer'}
+              </button>
+            </div>
+            {showLogs && (
+              <div
+                style={{
+                  marginTop: '0.6rem',
+                  background: 'rgba(0,0,0,0.5)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: '14px',
+                  overflow: 'hidden',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: '0.5rem 0.8rem',
+                    borderBottom: '1px solid rgba(255,255,255,0.06)',
+                    background: 'rgba(0,242,254,0.04)',
+                  }}
+                >
+                  <span style={{ fontSize: '0.68rem', fontWeight: 800, color: 'var(--cyan)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                    torrserver.log · последние {logs.length} строк
+                  </span>
+                  <button
+                    onClick={refreshLogs}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.3rem',
+                      fontSize: '0.7rem',
+                      fontWeight: 700,
+                      color: 'var(--text-muted)',
+                      background: 'rgba(255,255,255,0.06)',
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: '8px',
+                      padding: '3px 10px',
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    <RefreshCw size={11} />
+                    Обновить
+                  </button>
+                </div>
+                <pre
+                  style={{
+                    maxHeight: '260px',
+                    overflowY: 'auto',
+                    padding: '0.7rem 0.8rem',
+                    margin: 0,
+                    fontSize: '0.66rem',
+                    lineHeight: 1.5,
+                    color: 'rgba(16,245,172,0.8)',
+                    fontFamily: 'SF Mono, Menlo, monospace',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-all',
+                  }}
+                >
+                  {logs.length > 0 ? logs.join('\n') : 'Лог пуст — сервис ещё не запускался'}
+                </pre>
+              </div>
+            )}
           </div>
 
           {/* RAM Cache Selector */}

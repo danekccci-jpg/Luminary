@@ -34,6 +34,23 @@ export class TorrServerService {
     }
   }
 
+  /** Переподключение к трекерам/DHT — при пирах>0 и скорости 0.0 MB/s. */
+  public async reconnect(hash: string, magnet: string) {
+    if (window.electronAPI?.reconnectTorrServer) {
+      return await window.electronAPI.reconnectTorrServer(hash, magnet);
+    }
+    return { success: true };
+  }
+
+  /** Логи TorrServer (последние N строк) — для панели отладки в настройках. */
+  public async getLogs(lines: number = 100): Promise<string[]> {
+    if (window.electronAPI?.getTorrServerLogs) {
+      const res = await window.electronAPI.getTorrServerLogs(lines);
+      if (res.success) return res.logs;
+    }
+    return [];
+  }
+
   public async addMagnet(magnet: string, title?: string, poster?: string) {
     if (window.electronAPI?.addMagnetToTorrServer) {
       return await window.electronAPI.addMagnetToTorrServer(magnet, title, poster);
@@ -73,6 +90,39 @@ export class TorrServerService {
     return 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4';
   }
 
+  /**
+   * Проверка готовности потока + форсирование загрузки.
+   * GET с Range: bytes=0-2097151 (2 MB) → ожидаем HTTP 200/206.
+   * Большой Range ВАЖЕН: TorrServer не качает данные, пока файл не востребован
+   * потоком. Запрос 2 MB заставляет его активно тянуть куски из пиров
+   * (иначе даже при пирах>0 скорость держится на 0.0 MB/s).
+   * Возвращает content-type — чтобы отличить видео от субтитров.
+   */
+  public async probeStream(
+    url: string,
+    timeoutMs = 12000
+  ): Promise<{ ok: boolean; status?: number; contentType?: string }> {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-2097151' },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      // Дренируем тело, чтобы соединение закрылось чисто
+      res.body?.cancel().catch(() => {});
+      return {
+        ok: res.status === 200 || res.status === 206,
+        status: res.status,
+        contentType: res.headers.get('content-type') || '',
+      };
+    } catch {
+      return { ok: false };
+    }
+  }
+
   public async searchTorrents(
     query: string,
     year?: string,
@@ -80,20 +130,32 @@ export class TorrServerService {
     jackettApiKey?: string,
     imdbId?: string,
     fallbackQuery?: string
-  ): Promise<TorrentRelease[]> {
+  ): Promise<{ releases: TorrentRelease[]; error?: string }> {
     if (window.electronAPI?.searchTorrents) {
-      const res = await window.electronAPI.searchTorrents(
-        query,
-        year,
-        jackettUrl,
-        jackettApiKey,
-        imdbId,
-        fallbackQuery
-      );
-      if (res.success && res.releases) {
-        return res.releases;
+      try {
+        const res = await window.electronAPI.searchTorrents(
+          query,
+          year,
+          jackettUrl,
+          jackettApiKey,
+          imdbId,
+          fallbackQuery
+        );
+        if (res.success && res.releases) {
+          return { releases: res.releases };
+        }
+        // Surface the real failure instead of silently showing demo data
+        return { releases: [], error: res.error || 'Не удалось найти торренты' };
+      } catch (err: any) {
+        console.error('[TorrServerService] searchTorrents error:', err);
+        return { releases: [], error: 'Не удалось выполнить поиск торрентов' };
       }
     }
+    // Browser demo mode — no Electron bridge, show demo releases
+    return { releases: this.demoReleases(query, year) };
+  }
+
+  private demoReleases(query: string, year?: string): TorrentRelease[] {
     return [
       {
         id: 'demo-1',

@@ -15,6 +15,8 @@ export interface Movie {
   runtime?: number;
   media_type?: 'movie' | 'tv';
   cast?: { id: number; name: string; character: string; profile_path: string | null }[];
+  /** TMDB backdrops (кадры) для галереи в деталях */
+  stills?: string[];
   // HDRezka / Filmix fields
   source?: 'hdrezka' | 'filmix' | 'tmdb';
   url?: string;
@@ -22,6 +24,15 @@ export interface Movie {
   season_count?: number;
   episode_count?: number;
   year?: string;
+}
+
+/** Прямой онлайн-плеер с HDRezka / Filmix (для блока «Смотреть») */
+export interface OnlineStream {
+  id: string;
+  source: 'hdrezka' | 'filmix';
+  dubbing: string;     // Озвучка: Дубляж, RHS, Оригинал и т.д.
+  url: string;         // iframe-URL плеера
+  type?: 'movie' | 'tv';
 }
 
 /** Unified catalog item from HDRezka / Filmix */
@@ -85,6 +96,10 @@ export interface TorrServerStatusInfo {
   port: number;
   version?: string;
   error?: string;
+  /** Сервис в процессе запуска (UI: «Запуск сервиса...»). */
+  starting?: boolean;
+  /** Последние строки лога при ошибке старта — для плашки в UI. */
+  errorLog?: string;
 }
 
 export interface TorrServerStats {
@@ -125,10 +140,14 @@ declare global {
       startTorrServer: () => Promise<TorrServerStatusInfo>;
       stopTorrServer: () => Promise<{ running: boolean }>;
       configureTorrServer: (ramCacheMB: number) => Promise<any>;
+      /** Push-подписка на изменения статуса TorrServer из Main Process. Возвращает unsubscribe. */
+      onTorrServerStatusChanged: (callback: (status: TorrServerStatusInfo) => void) => () => void;
       addMagnetToTorrServer: (magnet: string, title?: string, poster?: string) => Promise<{ success: boolean; data?: any; error?: string }>;
       getTorrServerTorrent: (hash: string) => Promise<{ success: boolean; data?: any; error?: string }>;
       removeTorrServerTorrent: (hash: string) => Promise<{ success: boolean; data?: any; error?: string }>;
       dropTorrServerCache: (hash: string) => Promise<{ success: boolean }>;
+      reconnectTorrServer: (hash: string, magnet: string) => Promise<{ success: boolean; error?: string }>;
+      getTorrServerLogs: (lines?: number) => Promise<{ success: boolean; logs: string[]; error?: string }>;
       getStreamUrl: (hash: string, fileIndex?: number, transcodeAudio?: boolean) => Promise<string>;
       searchTorrents: (
         query: string,
@@ -145,6 +164,16 @@ declare global {
       catalogGetPage: (category: string, page: number) => Promise<{ success: boolean; items: CatalogItem[]; page: number; hasMore: boolean; error?: string }>;
       catalogProxyImage: (imageUrl: string) => Promise<{ success: boolean; data?: string; contentType?: string }>;
       catalogGetPlaceholder: (title: string) => Promise<string>;
+      // Image proxy — returns data-URI or null on failure
+      fetchImage: (imageUrl: string) => Promise<string | null>;
+      // Прямые онлайн-плееры HDRezka/Filmix
+      findPlayers: (
+        title: string,
+        originalTitle: string,
+        year: string
+      ) => Promise<{ success: boolean; streams: OnlineStream[]; error?: string }>;
+      // Открыть поток во внешнем плеере (VLC / IINA)
+      openInExternalPlayer: (url: string) => Promise<{ success: boolean; app?: string }>;
     };
   }
 }

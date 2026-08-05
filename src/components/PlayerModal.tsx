@@ -1,12 +1,14 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import {
   X, Play, Pause, Volume2, VolumeX,
   Maximize, Minimize, Zap, Users,
   AlertTriangle, SkipBack, SkipForward,
   SlidersHorizontal, Sun, Contrast, Palette, Monitor,
+  ExternalLink, Loader2,
 } from 'lucide-react';
 import { TorrServerStats } from '../types';
 import { torrServerService } from '../services/torrserver';
+import { toastBus } from '../services/toast';
 
 interface PlayerModalProps {
   magnet: string;
@@ -14,9 +16,15 @@ interface PlayerModalProps {
   poster?: string;
   /** Prefer AAC/MP3 track or GST HLS remux for AC3/DTS */
   audioCodec?: string;
+  videoCodec?: string;
   transcodeAudioToAac?: boolean;
   onClose: () => void;
 }
+
+/** Максимум попыток проверки HTTP 200 потока (1.5s интервал → ~45s). */
+const MAX_PROBE_ATTEMPTS = 30;
+/** Сколько ждать начала воспроизведения после монтирования <video>. */
+const START_TIMEOUT_MS = 5000;
 
 // ── Video Filter Preset ──
 interface VideoFilters {
@@ -254,12 +262,13 @@ const NeonRingSpinner: React.FC<{ percent: number }> = ({ percent: raw }) => {
 };
 
 export const PlayerModal: React.FC<PlayerModalProps> = ({
-  magnet, title, poster, audioCodec, transcodeAudioToAac = true, onClose,
+  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, onClose,
 }) => {
   const videoRef     = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const progressRef  = useRef<HTMLDivElement>(null);
   const controlsTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const preloadRef   = useRef<{ controller: AbortController | null }>({ controller: null });
 
   const [streamUrl, setStreamUrl]       = useState('');
   const [hash, setHash]                 = useState('');
@@ -278,7 +287,13 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const [errorMsg, setErrorMsg]         = useState('');
   const [audioTrackLabel, setAudioTrackLabel] = useState('');
 
-  // ── Video Filters ──
+  // ── Буферизация / проверка потока ──
+  const [streamReady, setStreamReady]   = useState(false);  // HTTP 200/206 от /stream получен
+  const [skipRequested, setSkipRequested] = useState(false); // «Пропустить буферизацию» нажат
+  const [containerExt, setContainerExt] = useState('');      // .mkv / .mp4 / .ts из file_stats
+  const [codecError, setCodecError]     = useState(false);   // onError / 5s без воспроизведения
+
+  // ── Видео Фильтры ──
   const [filters, setFilters]       = useState<VideoFilters>(loadSavedFilters);
   const [showFilters, setShowFilters] = useState(false);
 
@@ -315,37 +330,208 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   // Pre-buffer target (80 MB) — clamp progress to 0–100, never divide by zero
   const PREBUFFER_BYTES = 80 * 1024 * 1024;
 
-  // Init torrent
+  // ── Детекция риска кодека: MKV / HEVC / AC3 (Chromium не умеет AC3/DTS и HEVC-в-MKV) ──
+  const codecRisk = useMemo(() => {
+    const v = (videoCodec || '').toUpperCase();
+    const a = (audioCodec || '').toUpperCase();
+    const ext = (containerExt || '').toLowerCase();
+    const riskyAudio = /AC.?3|EAC.?3|EC.?3|DTS|TRUEHD|ATMOS|MLP/.test(a);
+    const riskyVideo = v.includes('HEVC') || v.includes('H.265') || v.includes('X265') || v.includes('H265');
+    const mkv = ext === 'mkv' || ext === 'mka';
+    const risky = riskyAudio || (riskyVideo && mkv);
+    return { risky, audio: a || '—', video: v || '—', ext: ext || '—' };
+  }, [videoCodec, audioCodec, containerExt]);
+
+  // Init torrent: предзагрузка + проверка HTTP 200 потока перед монтированием <video>
   useEffect(() => {
-    let intervalId: NodeJS.Timeout | null = null;
+    let statsInterval: NodeJS.Timeout | null = null;
+    let probeInterval: NodeJS.Timeout | null = null;
     let cancelled = false;
     let stillBuffering = true;
+    let probeOk = false;
+    let probeAttempts = 0;
+    let currentUrl = '';
+    let torrentHash = '';
+    let detectedExt = '';
+    let videoIndex: number | undefined;
+    const startTs = Date.now();   // начало буферизации
+    let restartedOnce = false;    // рестарт на 5-й сек при 0 MB/s
+    let restartedTwice = false;   // повторный рестарт на 15-й сек
 
     const clampPct = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
+    /**
+     * Выбрать видео-файл из file_stats: предпочитаем видео-расширения,
+     * иначе самый большой файл. Возвращает 1-based индекс для /stream.
+     */
+    const pickVideoIndex = (files: Array<{ id: number; path: string; length: number }>): number => {
+      if (!files?.length) return 1;
+      const videoRe = /\.(mp4|mkv|avi|webm|mov|m4v|ts|m2ts|wmv)$/i;
+      let best = 0;
+      for (let i = 1; i < files.length; i++) {
+        const isVideo = videoRe.test(files[i].path || '');
+        const isBestVideo = videoRe.test(files[best]?.path || '');
+        if (isVideo && (!isBestVideo || files[i].length > files[best].length)) best = i;
+        else if (!isVideo && !isBestVideo && files[i].length > files[best].length) best = i;
+      }
+      return best + 1; // TorrServer index — 1-based
+    };
+
+    /**
+     * Проверка потока: /stream должен вернуть HTTP 200/206 (одновременно
+     * «прогревает» TorrServer). Если сервер отдал текст (субтитр) — пересобираем
+     * URL с правильным видео-индексом.
+     */
+    const ensureStream = async (url: string): Promise<boolean> => {
+      const r = await torrServerService.probeStream(url);
+      if (r.ok) {
+        // index указывает на .srt/текст вместо видео → пробуем видео-файл
+        if ((r.contentType || '').startsWith('text/') && videoIndex && torrentHash) {
+          const vidUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, transcodeAudioToAac);
+          if (vidUrl && vidUrl !== url) {
+            currentUrl = vidUrl;
+            if (!cancelled) setStreamUrl(vidUrl);
+            restartPreload(vidUrl);
+            const r2 = await torrServerService.probeStream(vidUrl);
+            return r2.ok && !(r2.contentType || '').startsWith('text/');
+          }
+        }
+        return true;
+      }
+      // GST HLS недоступен (обычный бинарник без -gst) → откат на обычный /stream
+      if (transcodeAudioToAac && url.includes('/gst/') && torrentHash) {
+        const plainUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, false);
+        if (plainUrl && plainUrl !== url) {
+          currentUrl = plainUrl;
+          if (!cancelled) setStreamUrl(plainUrl);
+          restartPreload(plainUrl);
+          return await torrServerService.probeStream(plainUrl).then((r2) => r2.ok);
+        }
+      }
+      return false;
+    };
+
     const init = async () => {
       try {
-        const addRes = await torrServerService.addMagnet(magnet, title, poster);
+        // ── Блокировка отправки хэшей: ждём готовности TorrServer (/echo 200) ──
+        const st = await torrServerService.getStatus();
+        if (!st.running) {
+          if (st.starting) {
+            // Сервис в процессе запуска — пинг-петля /echo до 30 сек
+            let ready = false;
+            for (let i = 0; i < 30; i++) {
+              const s2 = await torrServerService.getStatus();
+              if (s2.running) { ready = true; break; }
+              await new Promise((r) => setTimeout(r, 1000));
+            }
+            if (!ready) {
+              throw new Error('TorrServer не запустился (сервис в процессе запуска). Проверьте логи TorrServer в настройках.');
+            }
+          } else {
+            throw new Error('TorrServer не запущен. Запустите его в настройках (кнопка «Запустить TorrServer»).');
+          }
+        }
+
+        const addRes = await (async (): Promise<any> => {
+          // Ретрай добавления: /echo отвечает сразу, но внутренний BT-клиент
+          // TorrServer инициализируется ~20-30 сек после старта. В это время
+          // add возвращает 500 «BT client not connected» — повторяем с паузой.
+          for (let attempt = 0; attempt < 8; attempt++) {
+            const res = await torrServerService.addMagnet(magnet, title, poster);
+            if (res.success || res.data) return res;
+            const errText = String(res.error || '');
+            const isBtNotReady = /BT client not connected|500|TorrServer API returned/i.test(errText);
+            if (!isBtNotReady) return res; // другие ошибки — не ретраим
+            if (!cancelled && attempt < 7) {
+              console.warn(`[Player] TorrServer BT client not ready (attempt ${attempt + 1}) — retrying in 3s`);
+              await new Promise((r) => setTimeout(r, 3000));
+            }
+          }
+          return { success: false, error: 'TorrServer: BT-клиент не готов' };
+        })();
         if (!addRes.success && !addRes.data) throw new Error(addRes.error || 'Ошибка добавления торрента');
 
-        const torrentHash = addRes.data?.hash || 'demo-hash-12345';
+        torrentHash = addRes.data?.hash || 'demo-hash-12345';
         setHash(torrentHash);
 
-        const url = await torrServerService.getStreamUrl(torrentHash, undefined, transcodeAudioToAac);
-        if (!cancelled) setStreamUrl(url);
+        // Ждём метаданные торрента (file_stats пуст сразу после add) — до 10 сек.
+        // Нужно, чтобы выбрать ВИДЕО-файл, а не субтитр (.srt первым в раздаче).
+        for (let i = 0; i < 10 && !cancelled; i++) {
+          try {
+            const early = await torrServerService.getTorrentStats(torrentHash);
+            const earlyStats = early.data?.file_stats;
+            const files = early.success && Array.isArray(earlyStats) ? earlyStats : [];
+            if (files.length > 0) {
+              videoIndex = pickVideoIndex(files);
+              const m = (files[0].path || '').match(/\.([a-z0-9]{2,4})$/i);
+              if (m) { detectedExt = m[1].toLowerCase(); setContainerExt(detectedExt); }
+              break;
+            }
+          } catch {
+            /* retry */
+          }
+          await new Promise((r) => setTimeout(r, 1000));
+        }
 
-        intervalId = setInterval(async () => {
+        currentUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, transcodeAudioToAac);
+        if (!cancelled) setStreamUrl(currentUrl);
+
+        // ── Сразу открываем непрерывный поток: TorrServer начинает качать
+        //    незамедлительно, экран буферизации показывает реальную скорость ──
+        startPreload(currentUrl);
+
+        // ── 1) Статистика торрента: кольцо буфера, скорость, пиры, контейнер ──
+        statsInterval = setInterval(async () => {
           if (cancelled) return;
           try {
             const statRes = await torrServerService.getTorrentStats(torrentHash);
             if (statRes.success && statRes.data) {
               const st = statRes.data;
               setStats(st);
+              // Определяем контейнер по расширению первого файла (mkv/mp4/ts)
+              if (!detectedExt && st.file_stats?.length) {
+                const m = (st.file_stats[0].path || '').match(/\.([a-z0-9]{2,4})$/i);
+                if (m) { detectedExt = m[1].toLowerCase(); setContainerExt(detectedExt); }
+                // Метаданные пришли поздно — выбираем видео-файл и пересобираем URL
+                if (!videoIndex && st.file_stats.length > 0) {
+                  const idx = pickVideoIndex(st.file_stats);
+                  if (idx !== 1 && torrentHash) {
+                    videoIndex = idx;
+                    torrServerService.getStreamUrl(torrentHash, idx, transcodeAudioToAac).then((u) => {
+                      if (u && !cancelled && u !== currentUrl) {
+                        currentUrl = u;
+                        setStreamUrl(u);
+                        restartPreload(u);
+                      }
+                    });
+                  } else {
+                    videoIndex = idx;
+                  }
+                }
+              }
               const loaded = Number.isFinite(st.loaded_size) ? Math.max(0, st.loaded_size) : 0;
-              const denom = Math.max(1, PREBUFFER_BYTES);
-              const pct = clampPct((loaded / denom) * 100);
+              const pct = clampPct((loaded / Math.max(1, PREBUFFER_BYTES)) * 100);
               setBufPercent(pct);
-              if (stillBuffering && (st.stat === 2 || loaded > 12 * 1024 * 1024 || pct >= 100)) {
+              // ── macOS P2P-фикс: скорость 0.0 MB/s → рестарт торрента (rem+add) ──
+              // Через 5 сек после начала буферизации при 0 MB/s — сброс пиров.
+              // Если не помогло, повторный рестарт на 15-й секунде.
+              const elapsedSec = (Date.now() - startTs) / 1000;
+              const speedZero = !Number.isFinite(st.download_speed) || st.download_speed === 0;
+              if (speedZero && elapsedSec >= 5 && !restartedOnce) {
+                restartedOnce = true;
+                console.warn(`[Player] DownloadSpeed=0 for 5s — forcing torrent restart (rem+add) to re-announce DHT/trackers`);
+                torrServerService.reconnect(torrentHash, magnet).catch(() => {});
+                // После пересоздания торрента переоткрываем предзагрузочный поток
+                setTimeout(() => restartPreload(currentUrl), 4000);
+              } else if (speedZero && elapsedSec >= 15 && !restartedTwice) {
+                restartedTwice = true;
+                console.warn('[Player] Still 0 MB/s — second torrent restart (rem+add)');
+                torrServerService.reconnect(torrentHash, magnet).catch(() => {});
+                setTimeout(() => restartPreload(currentUrl), 4000);
+              }
+              // Выходим из буферизации только при подтверждённом потоке
+              // + (достаточно данных ИЛИ пользователь нажал «Пропустить»)
+              if (stillBuffering && probeOk && (skipRequested || st.stat === 2 || loaded > 12 * 1024 * 1024 || pct >= 100)) {
                 stillBuffering = false;
                 setIsBuffering(false);
               }
@@ -355,23 +541,150 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
           }
         }, 1000);
 
-        setTimeout(() => {
-          if (!cancelled && stillBuffering) {
+        // ── 2) Предзагрузка + проверка HTTP 200 (интервал 1.5s, до MAX_PROBE_ATTEMPTS) ──
+        probeInterval = setInterval(async () => {
+          if (cancelled || probeOk) return;
+          probeAttempts++;
+          const ok = await ensureStream(currentUrl);
+          if (cancelled) return;
+          if (ok) {
+            probeOk = true;
+            setStreamReady(true);
+          } else if (probeAttempts >= MAX_PROBE_ATTEMPTS) {
+            // Поток так и не ответил — стоп
             stillBuffering = false;
             setIsBuffering(false);
+            setErrorMsg('TorrServer не ответил на поток. Проверьте, что TorrServer запущен (статус Online), и попробуйте снова.');
           }
-        }, 4200);
+        }, 1500);
+
+        // Первая проверка — сразу
+        probeAttempts++;
+        const first = await ensureStream(currentUrl);
+        if (cancelled) return;
+        if (first) { probeOk = true; setStreamReady(true); }
       } catch (err: any) {
-        if (!cancelled) { setErrorMsg(err.message); setIsBuffering(false); }
+        if (!cancelled) {
+          const raw = String(err?.message || err || '');
+          // 500 от TorrServer / невалидная ссылка → понятная деталь для пользователя
+          setErrorMsg(
+            /500|TorrServer API returned|Некорректная торрент-ссылка/i.test(raw)
+              ? 'Ошибка добавления торрента: неверный формат раздачи или битый magnet-link'
+              : raw
+          );
+          setIsBuffering(false);
+        }
       }
     };
 
     init();
     return () => {
       cancelled = true;
-      if (intervalId) clearInterval(intervalId);
+      stopPreload();
+      if (statsInterval) clearInterval(statsInterval);
+      if (probeInterval) clearInterval(probeInterval);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [magnet, title, poster, transcodeAudioToAac]);
+
+  /** «Пропустить буферизацию»: НЕ монтируем пустой <video> мгновенно —
+   *  продолжаем ждать валидный HTTP 200 от потока, но без ожидания порога предзагрузки. */
+  const handleSkipBuffering = () => {
+    setSkipRequested(true);
+    if (streamReady) setIsBuffering(false);
+  };
+
+  /**
+   * Непрерывная предзагрузка: fetch /stream с Range и чтение тела в фоне.
+   * TorrServer MatriX НЕ качает данные, пока файл не востребован потоком —
+   * прерывистые probe-запросы (Range 0-2MB) дают застревание на 0.0 MB/s.
+   * Открытое соединение, читающее тело, заставляет сервер активно тянуть
+   * куски из пиров. Данные дропаются — они остаются в RAM-кэше TorrServer.
+   */
+  const startPreload = (url: string) => {
+    if (!url || preloadRef.current.controller) return; // уже активен
+    const controller = new AbortController();
+    preloadRef.current.controller = controller;
+    (async () => {
+      try {
+        const res = await fetch(url, {
+          headers: { Range: 'bytes=0-262144000' }, // предзагрузка до 250 MB
+          signal: controller.signal,
+        });
+        if (!res.body) return;
+        const reader = res.body.getReader();
+        while (!controller.signal.aborted) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+        try { reader.releaseLock(); } catch { /* ignore */ }
+      } catch {
+        /* aborted / сетевая ошибка — не критично */
+      }
+    })();
+  };
+
+  const stopPreload = () => {
+    try { preloadRef.current.controller?.abort(); } catch { /* ignore */ }
+    preloadRef.current.controller = null;
+  };
+
+  const restartPreload = (url: string) => {
+    stopPreload();
+    if (url) startPreload(url);
+  };
+
+  /** Когда буферизация завершена/ошибка — останавливаем фоновую предзагрузку
+   *  (видео-элемент продолжает качать поток сам). */
+  useEffect(() => {
+    if (!isBuffering || errorMsg) stopPreload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isBuffering, errorMsg]);
+
+  /** onError на <video>: кодек/контейнер не поддерживается Chromium. */
+  const handleVideoError = () => {
+    console.error('[Player] Video element error:', videoRef.current?.error || 'unknown');
+    setCodecError(true);
+  };
+
+  /** Открыть поток во внешнем плеере (VLC → IINA → браузер). */
+  const openExternalPlayer = async () => {
+    if (!streamUrl) return;
+    if (window.electronAPI?.openInExternalPlayer) {
+      const res = await window.electronAPI.openInExternalPlayer(streamUrl);
+      if (!res.success) {
+        toastBus.push('Не удалось открыть внешний плеер', 'error');
+      }
+      return;
+    }
+    window.open(streamUrl, '_blank');
+  };
+
+  /** Если видео не начало воспроизводиться за 5 секунд — оверлей «Откройте через VLC». */
+  useEffect(() => {
+    if (isBuffering || errorMsg || codecError || !streamUrl) return;
+    const video = videoRef.current;
+    if (!video) return;
+
+    let timer: NodeJS.Timeout | null = null;
+    const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    const onPlaying = () => clearTimer();
+
+    video.addEventListener('playing', onPlaying);
+    timer = setTimeout(() => {
+      // Данные не подгрузились (readyState < 2) — поток не воспроизводится
+      if (!video.error && video.readyState < 2) {
+        console.warn('[Player] Stream did not start within 5s — showing codec fallback');
+        setCodecError(true);
+      }
+      clearTimer();
+    }, START_TIMEOUT_MS);
+
+    return () => {
+      clearTimer();
+      video.removeEventListener('playing', onPlaying);
+    };
+  }, [isBuffering, errorMsg, codecError, streamUrl]);
 
   const handleClose = () => {
     if (hash) torrServerService.dropCache(hash);
@@ -565,7 +878,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                 marginBottom: '0.4rem',
               }}
             >
-              TorrServer MatriX · Буферизация
+              {skipRequested && !streamReady
+                ? 'TorrServer MatriX · Проверка потока'
+                : 'TorrServer MatriX · Буферизация'}
             </div>
             <h2
               style={{
@@ -580,6 +895,23 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             >
               {title}
             </h2>
+            {skipRequested && !streamReady && (
+              <p
+                style={{
+                  marginTop: '0.5rem',
+                  fontSize: '0.78rem',
+                  color: 'rgba(255,184,0,0.8)',
+                  fontWeight: 600,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '0.4rem',
+                }}
+              >
+                <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                Ждём ответ сервера потока (HTTP 200)…
+              </p>
+            )}
           </div>
 
           {/* Live Stats Grid */}
@@ -696,14 +1028,27 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             </div>
           </div>
 
-          {/* Skip Button */}
-          <button
-            onClick={() => setIsBuffering(false)}
-            className="btn-secondary"
-            style={{ marginTop: '1.8rem', fontSize: '0.82rem', padding: '0.6rem 1.5rem' }}
-          >
-            Пропустить буферизацию →
-          </button>
+          {/* Skip Button — ждёт HTTP 200 от потока, не монтирует пустой <video> */}
+          {!skipRequested ? (
+            <button
+              onClick={handleSkipBuffering}
+              className="btn-secondary"
+              style={{ marginTop: '1.8rem', fontSize: '0.82rem', padding: '0.6rem 1.5rem' }}
+            >
+              Пропустить буферизацию →
+            </button>
+          ) : (
+            <p
+              style={{
+                marginTop: '1.6rem',
+                fontSize: '0.72rem',
+                color: 'rgba(240,242,248,0.35)',
+                fontWeight: 500,
+              }}
+            >
+              Плеер запустится сразу после ответа потока — проверка HTTP 200…
+            </p>
+          )}
         </div>
 
       ) : errorMsg ? (
@@ -735,12 +1080,101 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             autoPlay
             crossOrigin="anonymous"
             onLoadedMetadata={handleVideoMetadata}
+            onError={handleVideoError}
             onPlay={() => setIsPlaying(true)}
             onPause={() => setIsPlaying(false)}
             onTimeUpdate={handleTimeUpdate}
             onClick={togglePlay}
             style={{ width: '100%', height: '100%', cursor: showControls ? 'default' : 'none', ...objectFitStyle }}
           />
+
+          {/* ── CODEC ERROR OVERLAY: неподдерживаемый формат / зависший поток ── */}
+          {codecError && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                zIndex: 60,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'rgba(0,0,0,0.85)',
+                backdropFilter: 'blur(12px)',
+                WebkitBackdropFilter: 'blur(12px)',
+                padding: '1.5rem',
+              }}
+            >
+              <div
+                style={{
+                  maxWidth: '460px',
+                  width: '100%',
+                  padding: '2.5rem 2rem',
+                  textAlign: 'center',
+                  background: 'rgba(11,12,17,0.96)',
+                  border: '1px solid rgba(255,184,0,0.35)',
+                  borderRadius: '24px',
+                  boxShadow: '0 24px 80px rgba(0,0,0,0.8), 0 0 30px rgba(255,184,0,0.06)',
+                  animation: 'scaleIn 0.25s cubic-bezier(0.16,1,0.3,1)',
+                }}
+              >
+                <AlertTriangle size={42} style={{ color: '#FFB800', margin: '0 auto 1rem' }} />
+                <h3 style={{ fontWeight: 900, fontSize: '1.15rem', marginBottom: '0.6rem', color: '#fff' }}>
+                  Неподдерживаемый формат видео/кодек
+                </h3>
+                <p style={{ fontSize: '0.85rem', color: 'rgba(240,242,248,0.6)', lineHeight: 1.6, marginBottom: '0.9rem' }}>
+                  Встроенный плеер не смог воспроизвести этот поток.
+                  {codecRisk.risky && (
+                    <> Поток: {codecRisk.ext.toUpperCase()} · {codecRisk.video} · {codecRisk.audio}. </>
+                  )}
+                  Откройте его через VLC или IINA.
+                </p>
+                {codecRisk.risky && (
+                  <div
+                    style={{
+                      display: 'inline-flex',
+                      gap: '0.4rem',
+                      marginBottom: '1.4rem',
+                      padding: '0.35rem 0.8rem',
+                      borderRadius: '999px',
+                      background: 'rgba(255,184,0,0.1)',
+                      border: '1px solid rgba(255,184,0,0.3)',
+                      fontSize: '0.7rem',
+                      fontWeight: 700,
+                      color: '#FFB800',
+                    }}
+                  >
+                    {codecRisk.ext.toUpperCase()} · {codecRisk.video} · {codecRisk.audio}
+                  </div>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                  <button
+                    onClick={openExternalPlayer}
+                    className="btn-primary"
+                    style={{ borderRadius: '12px', padding: '0.7rem 1rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
+                  >
+                    <ExternalLink size={15} />
+                    Открыть во внешнем плеере (VLC / IINA)
+                  </button>
+                  <div style={{ display: 'flex', gap: '0.6rem' }}>
+                    <button
+                      onClick={() => setCodecError(false)}
+                      className="btn-secondary"
+                      style={{ flex: 1, borderRadius: '12px', padding: '0.55rem', fontSize: '0.8rem' }}
+                    >
+                      Продолжить ожидание
+                    </button>
+                    <button
+                      onClick={handleClose}
+                      className="btn-secondary"
+                      style={{ flex: 1, borderRadius: '12px', padding: '0.55rem', fontSize: '0.8rem' }}
+                    >
+                      Закрыть
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* ── CUSTOM CONTROLS OVERLAY ── */}
           <div
@@ -766,6 +1200,15 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', flexWrap: 'wrap', gap: '0.3rem' }}>
                 <span style={{ fontSize: '0.88rem', fontWeight: 700, color: 'rgba(255,255,255,0.9)' }}>{title}</span>
                 <div style={{ display: 'flex', gap: '1rem', fontSize: '0.72rem', fontWeight: 600, color: 'rgba(255,255,255,0.4)', flexWrap: 'wrap' }}>
+                  {codecRisk.risky && (
+                    <span
+                      title="MKV / HEVC / AC3 могут не воспроизводиться в Chromium. При проблемах откройте поток через VLC."
+                      style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', color: '#FFB800', fontWeight: 700 }}
+                    >
+                      <AlertTriangle size={12} />
+                      {codecRisk.ext.toUpperCase()} · {codecRisk.video} · {codecRisk.audio}
+                    </span>
+                  )}
                   {audioTrackLabel && (
                     <span style={{ color: 'rgba(16,245,172,0.7)' }}>🔊 {audioTrackLabel}</span>
                   )}
@@ -943,6 +1386,22 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                   style={{ width: '36px', height: '36px', borderRadius: '10px' }}
                 >
                   {isFullscreen ? <Minimize size={15} /> : <Maximize size={15} />}
+                </button>
+
+                {/* External player (VLC / IINA) — fallback для MKV/HEVC/AC3 */}
+                <button
+                  onClick={openExternalPlayer}
+                  className="btn-icon"
+                  title="Открыть во внешнем плеере (VLC / IINA)"
+                  style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '10px',
+                    background: codecRisk.risky ? 'rgba(255,184,0,0.12)' : undefined,
+                    border: codecRisk.risky ? '1px solid rgba(255,184,0,0.35)' : undefined,
+                  }}
+                >
+                  <ExternalLink size={15} style={{ color: codecRisk.risky ? '#FFB800' : undefined }} />
                 </button>
               </div>
 

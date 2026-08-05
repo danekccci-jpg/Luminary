@@ -6,9 +6,11 @@ import { MovieDetailsModal } from './components/MovieDetailsModal';
 import { PlayerModal } from './components/PlayerModal';
 import { SettingsModal } from './components/SettingsModal';
 import { MagnetInputModal } from './components/MagnetInputModal';
+import { Toaster } from './components/Toaster';
 import { Movie, TorrServerStatusInfo, UserSettings } from './types';
-import { catalogService } from './services/catalog';
+import { tmdbService, TMDB_GENRES } from './services/tmdb';
 import { torrServerService } from './services/torrserver';
+import { toastBus } from './services/toast';
 import { Flame, TrendingUp, Award, Search as SearchIcon, Tv, Zap, Film } from 'lucide-react';
 
 // ── Ambient backdrop hue extractor via canvas ──
@@ -64,7 +66,13 @@ export const App: React.FC = () => {
   const [isLoadingCatalog, setIsLoadingCatalog] = useState(true);
 
   const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null);
-  const [activeStream, setActiveStream]   = useState<{ magnet: string; title: string; poster?: string } | null>(null);
+  const [activeStream, setActiveStream]   = useState<{
+    magnet: string;
+    title: string;
+    poster?: string;
+    videoCodec?: string;
+    audioCodec?: string;
+  } | null>(null);
   const [isSettingsOpen, setIsSettingsOpen]   = useState(false);
   const [isMagnetModalOpen, setIsMagnetModalOpen] = useState(false);
 
@@ -88,6 +96,18 @@ export const App: React.FC = () => {
   useEffect(() => {
     fetchCatalog();
     checkTorrServerStatus();
+    // Push-подписка на изменения статуса TorrServer из Main Process —
+    // UI (Header/Настройки) обновляется без опроса
+    const off = window.electronAPI?.onTorrServerStatusChanged?.((st) => {
+      setTorrServerStatus({
+        running: !!st.running,
+        starting: !!st.starting,
+        port: st.port || 8090,
+        error: st.error,
+        errorLog: st.errorLog,
+      });
+    });
+    return () => off?.();
   }, []);
 
   // ── Global Search — API-backed, debounced ──
@@ -100,10 +120,13 @@ export const App: React.FC = () => {
     setIsSearching(true);
     const t = setTimeout(async () => {
       try {
-        const results = await catalogService.search(searchQuery);
+        // TMDB-First: мгновенный поиск по API (Lampa-style), без блокирующего скрейпинга
+        const results = await tmdbService.searchMovies(searchQuery);
         setSearchResults(results);
-      } catch {
+      } catch (err: any) {
+        console.warn('[App] Search failed:', err?.message || err);
         setSearchResults([]);
+        toastBus.push('Поиск временно недоступен — проверьте соединение и попробуйте снова.', 'error');
       } finally {
         setIsSearching(false);
       }
@@ -115,8 +138,8 @@ export const App: React.FC = () => {
   useEffect(() => {
     const hero = trendingMovies[0] || popularMovies[0];
     if (!hero?.poster_path) return;
-    // Try to extract from proxy URL or direct
-    const imgUrl = catalogService.getImageUrl(hero.poster_path);
+    // TMDB CDN: прямые ссылки, CORS разрешён для image.tmdb.org
+    const imgUrl = tmdbService.getImageUrl(hero.poster_path, 'w500');
     if (!imgUrl) return;
     extractDominantHue(imgUrl).then(color => {
       setAmbientColor(color);
@@ -124,16 +147,18 @@ export const App: React.FC = () => {
     });
   }, [trendingMovies, popularMovies]);
 
+  // TMDB-First: каталог строится из быстрых API-запросов TMDB,
+  // а не из блокирующего скрейпинга HDRezka/Filmix на главной.
   const fetchCatalog = async () => {
     setIsLoadingCatalog(true);
     try {
       const [pop, trend, top, nowPlaying, tv, anim] = await Promise.all([
-        catalogService.getPopularMovies(),
-        catalogService.getTrendingMovies(),
-        catalogService.getTopRatedMovies(),
-        catalogService.getNowPlayingMovies(),
-        catalogService.getPopularTV(),
-        catalogService.getAnimation(),
+        tmdbService.getPopularMovies(),
+        tmdbService.getTrending(),
+        tmdbService.getTopRatedMovies(),
+        tmdbService.getNowPlayingMovies(),
+        tmdbService.getPopularTV(),
+        tmdbService.getMoviesByGenre(TMDB_GENRES.animation.id),
       ]);
       setPopularMovies(pop);
       setTrendingMovies(trend);
@@ -160,6 +185,10 @@ export const App: React.FC = () => {
 
   const handleSaveSettings = (newSettings: UserSettings) => {
     setSettings(newSettings);
+    // Пользовательский TMDB-ключ (из настроек) применяется сразу
+    if (newSettings.tmdbApiKey?.trim()) {
+      tmdbService.setApiKey(newSettings.tmdbApiKey.trim());
+    }
     fetchCatalog();
   };
 
@@ -355,6 +384,8 @@ export const App: React.FC = () => {
           magnet={activeStream.magnet}
           title={activeStream.title}
           poster={activeStream.poster}
+          videoCodec={activeStream.videoCodec}
+          audioCodec={activeStream.audioCodec}
           transcodeAudioToAac={settings.transcodeAudioToAac}
           onClose={() => setActiveStream(null)}
         />
@@ -379,6 +410,9 @@ export const App: React.FC = () => {
           }}
         />
       )}
+
+      {/* Global toast notifications */}
+      <Toaster />
     </div>
   );
 };

@@ -15,6 +15,15 @@
   "extraMetadata": {
     "main": "dist-electron/main.js"
   },
+  // TorrServer binaries ship OUTSIDE app.asar (extraResources → Resources/torrserver)
+  // so Electron can exec them directly via process.resourcesPath.
+  "extraResources": [
+    {
+      "from": "resources/torrserver",
+      "to": "torrserver",
+      "filter": ["**/*"]
+    }
+  ],
   "asar": true,
   "mac": {
     "category": "public.app-category.entertainment",

@@ -1,6 +1,7 @@
 import https from 'https';
 import http from 'http';
 import { URL } from 'url';
+import zlib from 'zlib';
 
 // ── Unified catalog item returned by the proxy ──
 export interface CatalogItem {
@@ -25,6 +26,15 @@ export interface CatalogPage {
   page: number;
   hasMore: boolean;
   totalPages?: number;
+}
+
+/** Прямой онлайн-плеер с HDRezka / Filmix */
+export interface OnlineStream {
+  id: string;
+  source: 'hdrezka' | 'filmix';
+  dubbing: string;
+  url: string;
+  type?: 'movie' | 'tv';
 }
 
 // ── Browser-like headers to avoid bot detection ──
@@ -109,7 +119,7 @@ function cacheSet(key: string, data: any) {
   cache.set(key, { data, ts: Date.now() });
 }
 
-// ── Generic HTTP GET with redirects ──
+// ── Generic HTTP GET with redirects + gzip/brotli decompression ──
 function httpGet(url: string, headers: Record<string, string> = {}, timeout: number = 8000): Promise<string> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -124,6 +134,13 @@ function httpGet(url: string, headers: Record<string, string> = {}, timeout: num
       rejectUnauthorized: false,
     };
 
+    const collect = (stream: NodeJS.ReadableStream, cb: (body: string) => void) => {
+      let body = '';
+      stream.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      stream.on('end', () => cb(body));
+      stream.on('error', reject);
+    };
+
     const req = mod.request(opts, (res) => {
       // Follow redirects
       if ([301, 302, 307, 308].includes(res.statusCode || 0) && res.headers.location) {
@@ -134,9 +151,19 @@ function httpGet(url: string, headers: Record<string, string> = {}, timeout: num
         reject(new Error(`HTTP ${res.statusCode}`));
         return;
       }
-      let body = '';
-      res.on('data', (chunk: Buffer) => (body += chunk.toString()));
-      res.on('end', () => resolve(body));
+      // Распаковываем gzip/brotli — иначе HDRezka-контент парсится как мусор
+      const encoding = (res.headers['content-encoding'] || '').toLowerCase();
+      if (encoding === 'gzip') {
+        const gunzip = zlib.createGunzip();
+        res.pipe(gunzip);
+        collect(gunzip, resolve);
+      } else if (encoding === 'br') {
+        const brotli = zlib.createBrotliDecompress();
+        res.pipe(brotli);
+        collect(brotli, resolve);
+      } else {
+        collect(res, resolve);
+      }
     });
 
     req.on('error', reject);
@@ -504,13 +531,58 @@ async function filmixCatalog(category: string, page: number = 1): Promise<Catalo
 //  Unified catalog API (tries both sources)
 // ═══════════════════════════════════════════════════════
 
+/** Извлечь названия озвучек со страницы HDRezka (табы переводов). */
+function parseTranslators(html: string): string[] {
+  const names: string[] = [];
+  const tabRegex = /class="[^"]*b-translators__item[^"]*"[^>]*title="([^"]+)"[\s\S]*?<\/li>/gi;
+  let m;
+  while ((m = tabRegex.exec(html)) !== null) {
+    const name = m[1].trim();
+    if (name && !names.includes(name)) names.push(name);
+  }
+  // Fallback: атрибут data-translator_id + текст
+  if (names.length === 0) {
+    const altRegex = /class="[^"]*b-translators__item[^"]*"[^>]*data-translator_id="\d+"[^>]*>([\s\S]*?)<\/li>/gi;
+    while ((m = altRegex.exec(html)) !== null) {
+      const name = m[1].replace(/<[^>]+>/g, '').trim();
+      if (name && !names.includes(name)) names.push(name);
+    }
+  }
+  return names;
+}
+
+/** Извлечь URL iframe-плееров (фильмы + серии). */
+function parsePlayerIframes(html: string): string[] {
+  const urls: string[] = [];
+  // iframe data-src/src с путём /iframe-N/...
+  const iframeRegex = /<iframe[^>]+(?:data-src|src)="([^"]*iframe-\d[^"]*)"/gi;
+  let m;
+  while ((m = iframeRegex.exec(html)) !== null) {
+    const u = m[1].trim();
+    if (u && !urls.includes(u)) urls.push(u.startsWith('//') ? `https:${u}` : u);
+  }
+  // Сериалы: блоки эпизодов с data-iframe
+  if (urls.length === 0) {
+    const epRegex = /data-iframe="([^"]*)iframe-\d[^"]*"/gi;
+    while ((m = epRegex.exec(html)) !== null) {
+      const u = m[1].trim();
+      if (u && !urls.includes(u)) urls.push(u.startsWith('//') ? `https:${u}` : u);
+    }
+  }
+  return urls.slice(0, 12);
+}
+
+function defaultDubbing(i: number): string {
+  const names = ['Дубляж', 'Оригинал + Субтитры', 'Многоголосый', 'Двухголосый', 'Оригинал'];
+  return names[i] || `Озвучка ${i + 1}`;
+}
+
 export class CatalogProxy {
   /**
    * Global search across HDRezka + Filmix.
    * Returns merged & deduplicated results.
    */
-  async search(query: string): Promise<CatalogItem[]> {
-    if (!query.trim()) return [];
+  async search(query: string): Promise<CatalogItem[]> {    if (!query.trim()) return [];
     const q = query.trim().slice(0, 200);
 
     const [rezkaResults, filmixResults] = await Promise.allSettled([
@@ -539,6 +611,72 @@ export class CatalogProxy {
     }
 
     return merged.slice(0, 50);
+  }
+
+  /**
+   * On-Demand: найти прямые онлайн-плееры (озвучки → iframe) на HDRezka / Filmix.
+   * Используется в блоке «Смотреть» — TMDB-First: карточка из TMDB, источники по запросу.
+   */
+  async findPlayers(
+    title: string,
+    originalTitle: string,
+    year: string
+  ): Promise<OnlineStream[]> {
+    const queries = [title, originalTitle].filter(Boolean);
+    const attempts: Array<{ source: 'hdrezka' | 'filmix'; items: CatalogItem[] }> = [];
+
+    for (const q of queries) {
+      if (!q) continue;
+      const [rezka, filmix] = await Promise.allSettled([rezkaSearch(q), filmixSearch(q)]);
+      if (rezka.status === 'fulfilled' && rezka.value.length) {
+        attempts.push({ source: 'hdrezka', items: rezka.value });
+        break; // HDRezka — приоритет, одного удачного поиска достаточно
+      }
+      if (filmix.status === 'fulfilled' && filmix.value.length) {
+        attempts.push({ source: 'filmix', items: filmix.value });
+        break;
+      }
+    }
+
+    if (attempts.length === 0) return [];
+
+    const { source, items } = attempts[0];
+    // Лучшее совпадение: сначала точный год, иначе первый результат
+    const item =
+      items.find((i) => year && i.year === year) ||
+      items.find((i) => i.type === 'movie') ||
+      items[0];
+
+    if (!item?.url) return [];
+
+    try {
+      const baseUrl = new URL(item.url).origin;
+      const html = await httpGet(item.url, { Referer: baseUrl }, 8000);
+
+      // HDRezka: озвучки (табы) + iframe-плееры в порядке следования
+      const dubbings = parseTranslators(html);
+      const iframeUrls = parsePlayerIframes(html);
+
+      const streams: OnlineStream[] = [];
+      iframeUrls.forEach((url, i) => {
+        streams.push({
+          id: `${source}-${i}`,
+          source,
+          dubbing: dubbings[i] || defaultDubbing(i),
+          url,
+          type: item.type,
+        });
+      });
+
+      if (streams.length > 0) {
+        console.log(`[CatalogProxy] findPlayers(${title}) → ${streams.length} streams on ${source}`);
+        return streams;
+      }
+    } catch (err: any) {
+      console.warn(`[CatalogProxy] findPlayers page fetch failed: ${err.message}`);
+    }
+
+    return [];
   }
 
   /**

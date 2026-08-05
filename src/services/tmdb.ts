@@ -1,7 +1,8 @@
 import axios from 'axios';
 import { Movie } from '../types';
 
-const DEFAULT_TMDB_KEY = 'e82b794132dd8b8398e09f583e76a911';
+// Public read-only TMDB v3 key (Lampa-style). Users can override in Settings.
+const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const BASE_URL = 'https://api.themoviedb.org/3';
 const IMAGE_BASE_URL = 'https://image.tmdb.org/t/p';
 /** Minimum items per catalog rail after merging pages */
@@ -38,7 +39,10 @@ export class TMDBService {
     };
   }
 
-  public getImageUrl(path: string | null | undefined, size: 'w500' | 'w780' | 'original' = 'w500'): string {
+  public getImageUrl(
+    path: string | null | undefined,
+    size: 'w185' | 'w300' | 'w500' | 'w780' | 'w1280' | 'original' = 'w500'
+  ): string {
     if (!path) return '';
     const normalized = path.startsWith('/') ? path : `/${path}`;
     return `${IMAGE_BASE_URL}/${size}${normalized}`;
@@ -86,7 +90,8 @@ export class TMDBService {
   private async fetchPaged(
     path: string,
     pages: number = 2,
-    extra: Record<string, string | number> = {}
+    extra: Record<string, string | number> = {},
+    mediaType: 'movie' | 'tv' = 'movie'
   ): Promise<Movie[]> {
     try {
       const reqs = Array.from({ length: pages }, (_, i) =>
@@ -100,7 +105,17 @@ export class TMDBService {
       for (const r of responses) {
         if (r.status === 'fulfilled') {
           const results = r.value.data?.results;
-          if (Array.isArray(results)) merged.push(...results);
+          if (Array.isArray(results)) {
+            merged.push(
+              ...results.map((m: any) => ({
+                ...m,
+                title: m.title || m.name || 'Без названия',
+                original_title: m.original_title || m.original_name,
+                release_date: m.release_date || m.first_air_date,
+                media_type: (m.media_type === 'tv' ? 'tv' : mediaType) as 'movie' | 'tv',
+              }))
+            );
+          }
         }
       }
       const unique = this.dedupeMovies(merged);
@@ -114,6 +129,11 @@ export class TMDBService {
 
   public async getPopularMovies(): Promise<Movie[]> {
     return this.fetchPaged('/movie/popular', 2);
+  }
+
+  /** TMDB-First: trending rails (популярные новинки и тренды). */
+  public async getTrending(): Promise<Movie[]> {
+    return this.getTrendingMovies();
   }
 
   public async getTrendingMovies(): Promise<Movie[]> {
@@ -181,11 +201,11 @@ export class TMDBService {
     }
   }
 
-  public async getMovieDetails(id: number, mediaType: 'movie' | 'tv' = 'movie'): Promise<Movie | null> {
+  public async getMovieDetails(id: number | string, mediaType: 'movie' | 'tv' = 'movie'): Promise<Movie | null> {
     try {
       const path = mediaType === 'tv' ? `/tv/${id}` : `/movie/${id}`;
       const res = await axios.get(`${BASE_URL}${path}`, {
-        params: this.localeParams({ append_to_response: 'credits,external_ids' }),
+        params: this.localeParams({ append_to_response: 'credits,images' }),
         timeout: 6000,
       });
       const data = res.data;
@@ -195,6 +215,12 @@ export class TMDBService {
         original_title: data.original_title || data.original_name,
         release_date: data.release_date || data.first_air_date,
         media_type: mediaType,
+        runtime: data.runtime,
+        genres: data.genres,
+        // Кадры (backdrops) из TMDB для галереи в модалке
+        stills: (data.images?.backdrops || [])
+          .slice(0, 8)
+          .map((b: any) => b.file_path),
         cast: data.credits?.cast?.slice(0, 8).map((c: any) => ({
           id: c.id,
           name: c.name,
@@ -203,6 +229,7 @@ export class TMDBService {
         })),
       };
     } catch (err) {
+      console.warn(`[TMDB] getMovieDetails(${id}) failed:`, err);
       const found = this.getDemoCatalog().find((m) => m.id === id);
       return found || null;
     }

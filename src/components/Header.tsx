@@ -231,19 +231,20 @@ export const Header: React.FC<HeaderProps> = ({
           {/* TorrServer Status Indicator */}
           <button
             onClick={onOpenSettings}
+            title={torrServerStatus.running ? 'TorrServer онлайн' : torrServerStatus.starting ? 'TorrServer запускается…' : 'TorrServer офлайн'}
             style={{
               display: 'flex',
               alignItems: 'center',
               gap: '0.4rem',
               padding: '0.45rem 0.9rem',
               borderRadius: '12px',
-              border: `1px solid ${torrServerStatus.running ? 'rgba(16,245,172,0.35)' : 'rgba(255,84,112,0.35)'}`,
-              background: torrServerStatus.running ? 'rgba(16,245,172,0.07)' : 'rgba(255,84,112,0.07)',
+              border: `1px solid ${torrServerStatus.running ? 'rgba(16,245,172,0.35)' : torrServerStatus.starting ? 'rgba(255,184,0,0.4)' : 'rgba(255,84,112,0.35)'}`,
+              background: torrServerStatus.running ? 'rgba(16,245,172,0.07)' : torrServerStatus.starting ? 'rgba(255,184,0,0.07)' : 'rgba(255,84,112,0.07)',
               cursor: 'pointer',
               fontSize: '0.78rem',
               fontWeight: 700,
               fontFamily: 'inherit',
-              color: torrServerStatus.running ? 'var(--emerald)' : 'var(--coral)',
+              color: torrServerStatus.running ? 'var(--emerald)' : torrServerStatus.starting ? 'var(--amber)' : 'var(--coral)',
               transition: 'all 0.2s ease',
             }}
           >
@@ -252,17 +253,19 @@ export const Header: React.FC<HeaderProps> = ({
                 width: '7px',
                 height: '7px',
                 borderRadius: '50%',
-                background: torrServerStatus.running ? 'var(--emerald)' : 'var(--coral)',
+                background: torrServerStatus.running ? 'var(--emerald)' : torrServerStatus.starting ? '#FFB800' : 'var(--coral)',
                 boxShadow: torrServerStatus.running
                   ? '0 0 8px rgba(16,245,172,0.7)'
+                  : torrServerStatus.starting
+                  ? '0 0 8px rgba(255,184,0,0.7)'
                   : '0 0 8px rgba(255,84,112,0.7)',
-                animation: torrServerStatus.running ? 'pulseNeon 2s ease-in-out infinite' : 'none',
+                animation: torrServerStatus.running ? 'pulseNeon 2s ease-in-out infinite' : torrServerStatus.starting ? 'pulseNeon 1s ease-in-out infinite' : 'none',
                 flexShrink: 0,
               }}
             />
             <Server size={13} />
-            <span style={{ display: 'none' }}>
-              {torrServerStatus.running ? 'Online' : 'Offline'}
+            <span style={{ whiteSpace: 'nowrap' }}>
+              {torrServerStatus.running ? 'Online' : torrServerStatus.starting ? 'Запуск…' : 'Offline'}
             </span>
           </button>
 

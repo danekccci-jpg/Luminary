@@ -72,12 +72,14 @@ export class CatalogService {
 
     if (window.electronAPI?.catalogSearch) {
       const res = await window.electronAPI.catalogSearch(q);
-      if (res.success && res.items.length > 0) {
+      if (res.success) {
         return res.items.map(catalogItemToMovie);
       }
+      // Real failure — surface it so the UI can show a toast (no fake demo data)
+      throw new Error(res.error || 'Catalog search failed');
     }
 
-    // Offline fallback — demo search
+    // Browser demo mode — no Electron bridge
     return this.generateDemoSearch(q);
   }
 

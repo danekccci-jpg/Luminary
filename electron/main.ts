@@ -1,6 +1,7 @@
-import { app, BrowserWindow, ipcMain, shell, protocol } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, protocol, net } from 'electron';
 import path from 'path';
-import { TorrServerManager } from './torrserver.js';
+import { exec } from 'child_process';
+import { TorrServerManager, normalizeTorrentLink } from './torrserver.js';
 import { TorrentScraper } from './scraper.js';
 import { catalogProxy } from './catalog-proxy.js';
 
@@ -35,6 +36,21 @@ let mainWindow: BrowserWindow | null = null;
 const torrServer = new TorrServerManager(8090);
 const scraper = new TorrentScraper();
 let isQuitting = false;
+
+// ── Single-instance lock ──
+// Prevents two copies from fighting over TorrServer port 8090 (double-click,
+// updater relaunch, etc.). Second launch focuses the existing window instead.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  console.warn('[Main] Another Luminary instance is running — quitting.');
+  app.quit();
+}
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
 
 // ── Register luminary-img:// protocol for image proxying ──
 function registerImageProtocol() {
@@ -148,23 +164,44 @@ async function loadWithRetry(loader: () => Promise<void> | undefined, label: str
   console.error(`[Main] Failed to load ${label} after 10 attempts`);
 }
 
+/** Отправить актуальный статус TorrServer в renderer (push-событие). */
+function notifyTorrServerStatus(status: { running: boolean; starting?: boolean; port?: number; error?: string }) {
+  mainWindow?.webContents.send('torrserver-status-changed', status);
+}
+
 /**
  * Start TorrServer WITHOUT blocking window creation.
  * Fire-and-forget: window appears instantly, TorrServer warms up in background.
+ * Retries up to MAX_AUTOSTART_ATTEMPTS if the first start fails (binary download
+ * or slow metadata) — status is polled by the UI via torrserver:status.
  */
-function startTorrServerAsync() {
-  console.log('[Main] TorrServer starting in BACKGROUND (non-blocking)...');
+const MAX_AUTOSTART_ATTEMPTS = 3;
+const AUTOSTART_RETRY_DELAY_MS = 8000;
+
+function startTorrServerAsync(attempt: number = 1) {
+  console.log(`[Main] TorrServer starting in BACKGROUND (non-blocking) — attempt ${attempt}/${MAX_AUTOSTART_ATTEMPTS}...`);
   torrServer
     .startServer()
     .then((status) => {
       if (status.running) {
         console.log('[Main] TorrServer ready on port', status.port);
+        // Push актуального состояния в UI — статус 'online'
+        notifyTorrServerStatus({ running: true, starting: false, port: status.port });
+      } else if (attempt < MAX_AUTOSTART_ATTEMPTS) {
+        console.warn(`[Main] TorrServer not ready (${status.error}) — retrying in ${AUTOSTART_RETRY_DELAY_MS / 1000}s...`);
+        notifyTorrServerStatus({ running: false, starting: true, port: 8090, error: status.error });
+        setTimeout(() => startTorrServerAsync(attempt + 1), AUTOSTART_RETRY_DELAY_MS);
       } else {
-        console.warn('[Main] TorrServer not ready:', status.error);
+        console.warn('[Main] TorrServer failed to start after', MAX_AUTOSTART_ATTEMPTS, 'attempts:', status.error);
+        notifyTorrServerStatus({ running: false, starting: false, port: 8090, error: status.error });
       }
     })
     .catch((err: any) => {
       console.warn('[Main] TorrServer background start warning:', err.message);
+      notifyTorrServerStatus({ running: false, starting: false, port: 8090, error: err.message });
+      if (attempt < MAX_AUTOSTART_ATTEMPTS) {
+        setTimeout(() => startTorrServerAsync(attempt + 1), AUTOSTART_RETRY_DELAY_MS);
+      }
     });
 }
 
@@ -173,18 +210,40 @@ function setupIPC() {
   ipcMain.handle('torrserver:status', async () => {
     try {
       const running = await torrServer.checkHealth();
-      return { running, port: 8090 };
+      const starting = !running && torrServer.isStarting();
+      const lastErr = torrServer.getLastError();
+      return { running, starting, port: 8090, error: lastErr.error, errorLog: lastErr.errorLog };
     } catch {
-      return { running: false, port: 8090 };
+      const lastErr = torrServer.getLastError();
+      return { running: false, starting: false, port: 8090, error: lastErr.error, errorLog: lastErr.errorLog };
+    }
+  });
+
+  // ── Логи TorrServer (последние 100 строк из torrserver.log) ──
+  ipcMain.handle('torrserver:get-logs', async (_event, lines?: number) => {
+    try {
+      return { success: true, logs: torrServer.getLogs(typeof lines === 'number' ? lines : 100) };
+    } catch (err: any) {
+      return { success: false, logs: [], error: err.message };
     }
   });
 
   ipcMain.handle('torrserver:start', async () => {
-    return await torrServer.startServer();
+    const status = await torrServer.startServer();
+    // Push актуального состояния в UI сразу после старта
+    notifyTorrServerStatus({
+      running: status.running,
+      starting: !status.running && torrServer.isStarting(),
+      port: 8090,
+      error: status.error,
+    });
+    return status;
   });
 
   ipcMain.handle('torrserver:stop', async () => {
     await torrServer.stopServer();
+    // Push остановки в UI
+    notifyTorrServerStatus({ running: false, starting: false, port: 8090 });
     return { running: false };
   });
 
@@ -194,19 +253,31 @@ function setupIPC() {
 
   ipcMain.handle('torrserver:add', async (_, { magnet, title, poster }) => {
     try {
-      if (!magnet || typeof magnet !== 'string' || !magnet.startsWith('magnet:')) {
-        return { success: false, error: 'Invalid magnet link' };
+      // Валидация и нормализация: magnet/http(s)/BTIH-хэш → корректная ссылка
+      const norm = normalizeTorrentLink(magnet, title);
+      if (!norm.ok) {
+        // Некорректная ссылка — не отправляем запрос на TorrServer
+        console.warn(`[torrserver:add] BLOCKED link: "${String(magnet).slice(0, 80)}" — ${norm.error}`);
+        return { success: false, error: norm.error || 'Некорректная торрент-ссылка' };
       }
-      const res = await torrServer.apiRequest('add', {
-        link: magnet,
-        title: title || 'Torrent Stream',
+      console.log(`[torrserver:add] normalize: "${String(magnet).slice(0, 60)}" → "${(norm.link || '').slice(0, 60)}"`);
+      // Защита от undefined-полей в payload
+      const payload = {
+        action: 'add',
+        link: norm.link,
+        title: title || 'Movie Stream',
         poster: poster || '',
         save_to_db: true,
-      });
+      };
+      const res = await torrServer.apiRequest('add', payload);
       return { success: true, data: res };
     } catch (err: any) {
       console.error('[IPC torrserver:add error]', err.message);
-      return { success: false, error: err.message };
+      // 500 (битый magnet / формат раздачи) → понятная деталь для UI
+      const msg = /500|TorrServer API returned/i.test(err.message || '')
+        ? 'Ошибка добавления торрента: неверный формат раздачи или битый magnet-link'
+        : err.message;
+      return { success: false, error: msg };
     }
   });
 
@@ -231,6 +302,15 @@ function setupIPC() {
   ipcMain.handle('torrserver:dropCache', async (_, { hash }) => {
     await torrServer.dropTorrentCache(hash);
     return { success: true };
+  });
+
+  ipcMain.handle('torrserver:reconnect', async (_, { hash, magnet }) => {
+    try {
+      await torrServer.reconnectTorrent(hash, magnet || '');
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
   });
 
   ipcMain.handle('torrserver:streamUrl', (_, { hash, fileIndex, transcodeAudio }) => {
@@ -291,11 +371,72 @@ function setupIPC() {
     return catalogProxy.getPlaceholderSVG(title);
   });
 
+  // ── On-Demand streams: прямые плееры HDRezka/Filmix ──
+  ipcMain.handle('streams:findPlayers', async (_, args: { title: string; originalTitle: string; year: string }) => {
+    try {
+      const streams = await catalogProxy.findPlayers(
+        args?.title || '',
+        args?.originalTitle || '',
+        args?.year || ''
+      );
+      return { success: true, streams };
+    } catch (err: any) {
+      return { success: false, streams: [], error: err.message };
+    }
+  });
+
+  // ── Image proxy IPC — bypasses Referer / User-Agent blocks on posters ──
+  // Returns a data-URI (base64) so the renderer never hits CORS / hotlink guards.
+  ipcMain.handle('fetch-image', async (_event, imageUrl: string) => {
+    try {
+      if (!imageUrl || typeof imageUrl !== 'string' || !/^https?:\/\//i.test(imageUrl)) {
+        return null;
+      }
+      const response = await net.fetch(imageUrl, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': new URL(imageUrl).origin,
+        },
+      });
+      if (!response.ok) return null;
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const base64 = buffer.toString('base64');
+      const contentType = response.headers.get('content-type') || 'image/jpeg';
+      return `data:${contentType};base64,${base64}`;
+    } catch {
+      return null;
+    }
+  });
+
   // ── Shell / Platform IPC ──
   ipcMain.handle('shell:openExternal', async (_, url: string) => {
     if (url.startsWith('http://') || url.startsWith('https://')) {
       await shell.openExternal(url);
     }
+  });
+
+  // ── Open stream in an external player (VLC / IINA) ──
+  // Used as fallback when Chromium can't decode MKV / HEVC / AC3.
+  ipcMain.handle('player:openExternal', async (_event, url: string) => {
+    if (!url || typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+      return { success: false };
+    }
+    if (process.platform === 'darwin') {
+      // macOS: try VLC → IINA, then fall back to default browser
+      for (const appName of ['VLC', 'IINA']) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            exec(`open -a "${appName}" "${url}"`, (err) => (err ? reject(err) : resolve()));
+          });
+          return { success: true, app: appName };
+        } catch {
+          /* try next player */
+        }
+      }
+    }
+    await shell.openExternal(url);
+    return { success: true, app: 'browser' };
   });
 
   ipcMain.handle('app:platformInfo', () => {
