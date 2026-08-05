@@ -9,6 +9,10 @@ import {
 import { TorrServerStats } from '../types';
 import { torrServerService } from '../services/torrserver';
 import { toastBus } from '../services/toast';
+// Hls.js — воспроизведение HLS (/gst/master.m3u8 от TorrServer MatriX.gst):
+// автоматический транскодинг HEVC/H.265, AC3/DTS/TrueHD, 10-bit MKV → MSE.
+// (Chromium не умеет эти кодеки нативно, но умеет их декодировать через MSE.)
+import Hls from 'hls.js';
 
 interface PlayerModalProps {
   magnet: string;
@@ -312,6 +316,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const [scrubHover, setScrubHover] = useState<{ x: number; time: number } | null>(null);
   // Актуальный видео-индекс (для фонового ретранскода AC3/DTS → AAC при сбое кодека)
   const videoIndexRef = useRef<number | undefined>(undefined);
+  // Hls.js: инстанс для HLS-потока (/gst/master.m3u8) + флаг активного режима
+  const hlsRef = useRef<Hls | null>(null);
+  const [isHlsMode, setIsHlsMode] = useState(false);
   // Настройки субтитров (применяются к <track>, если поток их содержит)
   const [subs, setSubs] = useState({
     enabled: true,
@@ -412,6 +419,17 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   };
 
   const selectAudioTrack = (index: number) => {
+    // HLS-режим (Hls.js): переключение через hls.audioTrack (gst отдаёт дорожки в манифесте)
+    const hls = hlsRef.current;
+    if (hls && isHlsMode) {
+      const t = hls.audioTracks[index];
+      if (!t) return;
+      hls.audioTrack = index;
+      setActiveAudioTrack(index);
+      setAudioTrackLabel(t.name || `Дорожка ${index + 1}`);
+      setShowControls(true);
+      return;
+    }
     const video = videoRef.current;
     const list = (video as any)?.audioTracks as { length: number; [i: number]: { enabled: boolean; label?: string } } | undefined;
     if (!list || index < 0 || index >= list.length) return;
@@ -835,9 +853,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
    * оверлея (видео не замораживается, даём ещё один START_TIMEOUT).
    * Возвращает true, если фоновый ретранскод запущен.
    */
-  const tryAutoRetranscode = async (): Promise<boolean> => {
+  const tryAutoRetranscode = async (force: boolean = false): Promise<boolean> => {
     if (transcodeAudioToAac) return false;                       // уже в транскоде
-    if (!codecRisk.risky) return false;                          // кодек безопасный
+    if (!codecRisk.risky && !force) return false;                // кодек безопасный (force — для onError)
     if (!hash || !videoIndexRef.current) return false;           // нет индекса файла
     if (streamUrl && streamUrl.includes('/gst/')) return false;  // уже пробовали GST
     const gstUrl = await torrServerService.getStreamUrl(hash, videoIndexRef.current, true).catch(() => null);
@@ -851,10 +869,86 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   /** onError на <video>: кодек/контейнер не поддерживается Chromium. */
   const handleVideoError = async () => {
     console.error('[Player] Video element error:', videoRef.current?.error || 'unknown');
-    // AC3/DTS: одна фоновая попытка перекодировки в AAC до показа оверлея
-    if (await tryAutoRetranscode()) return;
+    // Любая ошибка нативного воспроизведения → пробуем HLS-транскодинг (gst),
+    // даже если кодек не помечен рискованным в названии (force=true).
+    if (await tryAutoRetranscode(true)) return;
     setCodecError(true);
   };
+
+  /** Уничтожить инстанс Hls.js (при смене URL / закрытии / fallback на нативный src). */
+  const destroyHls = useCallback(() => {
+    if (hlsRef.current) {
+      try { hlsRef.current.destroy(); } catch { /* ignore */ }
+      hlsRef.current = null;
+    }
+    setIsHlsMode(false);
+  }, []);
+
+  /**
+   * Адаптивный рендер потока:
+   * 1. HLS-URL (/gst/master.m3u8, hls=true) + Hls.isSupported() → Hls.js (MSE).
+   *    Видео HEVC/H.265, аудио AC3/DTS/TrueHD транскодируются TorrServer MatriX.gst.
+   * 2. Обычный /stream → нативный src (H.264/AAC/MP4 без накладных расходов).
+   * Оверлей VLC/IINA показывается ТОЛЬКО после фатальной ошибки Hls.js/gst.
+   */
+  useEffect(() => {
+    const video = videoRef.current;
+    // <video> монтируется только после выхода из буферизации (STATE «видео»).
+    // deps включают isBuffering: при монтировании video эффект перезапускается
+    // и применяет поток (src / Hls.js) — иначе видео оставалось бы без источника.
+    if (!video || !streamReady) return;
+    destroyHls();
+    const isHlsUrl =
+      streamUrl.includes('.m3u8') || streamUrl.includes('/gst/') || streamUrl.includes('hls=true');
+    if (isHlsUrl && Hls.isSupported()) {
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        maxBufferLength: 60,
+        maxMaxBufferLength: 120,
+      });
+      let netRetries = 0;
+      hlsRef.current = hls;
+      setIsHlsMode(true);
+      hls.loadSource(streamUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        const tracks = (hls.audioTracks || []).map((t, i) => ({
+          index: i,
+          label: t.name || (t as any).langCode || `Дорожка ${i + 1}`,
+        }));
+        if (tracks.length) setAudioTracks(tracks);
+        // автовыбор первой дорожки (gst отдаёт AAC stereo первым по умолчанию)
+        if (hls.audioTracks.length) {
+          hls.audioTrack = 0;
+          setActiveAudioTrack(0);
+        }
+      });
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (!data.fatal) return;
+        console.warn('[Player] Hls fatal error:', data.type, data.details);
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          // Сетевая ошибка (gst недоступен/404 на обычном бинарнике) — до 3 авто-retry,
+          // затем отдаём управление оверлею VLC (handleVideoError-путь).
+          if (netRetries < 3) {
+            netRetries++;
+            setTimeout(() => hls.startLoad(), 1200);
+            return;
+          }
+          setCodecError(true);
+          return;
+        }
+        // MEDIA_ERROR и прочие фатальные: кодек не поддерживается даже через MSE →
+        // оверлей «Открыть через VLC / IINA» (ТОЛЬКО после фатала hls.js + gst).
+        setCodecError(true);
+      });
+    } else if (streamUrl) {
+      // Нативный путь: H.264/AAC/MP4 (или Hls недоступен — крайний случай)
+      video.src = streamUrl;
+    }
+    return () => { destroyHls(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamUrl, streamReady, isBuffering]);
 
   /** Открыть поток во внешнем плеере (VLC → IINA → браузер). */
   const openExternalPlayer = async () => {
@@ -902,6 +996,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     if (onProgressSave && videoRef.current && !isBuffering) {
       onProgressSave(videoRef.current.currentTime || 0, videoRef.current.duration || 0);
     }
+    destroyHls();
     if (hash) torrServerService.dropCache(hash);
     onClose();
   };
@@ -1311,10 +1406,10 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       ) : (
         /* ════════ STATE 3: VIDEO PLAYER ════════ */
         <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          {/* Video Element */}
+          {/* Video Element — src управляется адаптивным эффектом:
+              HLS (gst m3u8) → Hls.js, обычный /stream → нативный src */}
           <video
             ref={videoRef}
-            src={streamUrl}
             autoPlay
             crossOrigin="anonymous"
             onLoadedMetadata={handleVideoMetadata}

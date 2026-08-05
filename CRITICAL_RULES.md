@@ -52,7 +52,7 @@ TorrServer MatriX (Go-бинарник, extraResources)
 **ПОЧЕМУ нельзя менять:**
 - **Пункт 5 (сброс settings.json)** — корень бага «BT client not connected → 500 на add». TorrServer читает сохранённый в `settings.json` `PeersListenPort: 43211` **сразу при старте** и это ломает инициализацию BT-клиента (anacrolix). Приложение **каждый следующий запуск** падало с 500, пока не добавили сброс + `StoreSettingsInJson: false`.
 - **Пункт 9-10 (отложенный порт)** — применение `PeersListenPort` в первые секунды после `/echo` (клиент ещё инициализируется) даёт тот же «BT client not connected». Порт можно менять **только после полной инициализации** (~20 сек).
-- **Пункт 4 (killall/lsof)** — убивает зависшие зомби-процессы и освобождает bboltDB-локи. Удаление → повторные инстансы на 8090, «address already in use» / «Error open bboltDB».
+- **Пункт 4 (killall/lsof)** — убивает зависшие зомби-процессы и освобождает bboltDB-локи. Удаление → повторные инстансы на 8090, «address already in use» / «Error open bboltDB». Вызовы обёрнуты в `safeExecKill()` (try/catch + фильтр PID: только валидные числовые, никогда `process.pid`) — ошибки CLI-утилит в песочницах/ограниченных средах НЕ должны ронять главный процесс (SIGKILL при холодном старте).
 - **Пункт 3 (xattr)** — без него Gatekeeper блокирует исполнение бинарника (EACCES).
 - **Пункт 7 (0.0.0.0)** — bind только на 127.0.0.1 → входящие P2P-подключения не работают → скорость 0.0 MB/s.
 
@@ -140,6 +140,8 @@ TorrServer MatriX (Go-бинарник, extraResources)
 - Правила: `transcodeAudioToAac` (gst HLS, если бинарник -gst) → fallback на обычный `/stream` (в `ensureStream`) → fallback VLC/IINA (`openInExternalPlayer`).
 - `onError` + 5-сек детектор → оверлей «Неподдерживаемый формат видео/кодек. Откройте через VLC».
 - `codecRisk` — только информирует, не блокирует.
+- **Hls.js (`src/components/PlayerModal.tsx`)**: HLS-URL (`/gst/master.m3u8` от MatriX.gst, `/stream?hls=true`) воспроизводится через `Hls` (MSE), а не нативный `src`. Нативный путь — только для обычного `/stream`. Оверлей VLC/IINA — ТОЛЬКО после фатальной ошибки Hls.js (3 авто-retry на сетевые, MEDIA_ERROR → сразу оверлей). Адаптация потока — в `useEffect` на `streamUrl` (не трогать `startPreload`/`probeStream`/`addWithRetry`/`pickVideoIndex` из ZONE 3).
+- **gst-бинарник**: `TorrServer-gst-<plat>-<arch>` (имя в релизах YouROK: `TorrServer-gst-…`, НЕ `TorrServer-…-gst`); gst-сборки есть для darwin/linux/windows (amd64/arm64). `getOrDownloadBinary()` предпочитает gst (bundled extraResources `resources/torrserver/` → userData/bin), флаг `-gst` при spawn НЕ передаётся (сборка уже с GStreamer).
 
 **Регрессии:** убрать fallback → пользователь остаётся без способа посмотреть MKV/AC3.
 

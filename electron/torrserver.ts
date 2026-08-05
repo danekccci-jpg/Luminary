@@ -98,6 +98,8 @@ export class TorrServerManager {
   private host: string = '127.0.0.1';
   private binaryPath: string = '';
   private dataDir: string = '';
+  /** true, если используется gst-сборка MatriX (HLS-транскодинг /gst/master.m3u8). */
+  private usingGstBinary: boolean = false;
 
   // ── Сквозное логирование ──
   private logPath: string = '';
@@ -167,8 +169,14 @@ export class TorrServerManager {
         .trim();
       const pids = out.split('\n').map((s) => s.trim()).filter(Boolean);
       for (const pid of pids) {
+        // Безопасность: только валидные числовые PID, никогда не убивать себя
+        const n = Number(pid);
+        if (!Number.isFinite(n) || n <= 1 || n === process.pid) {
+          console.warn(`[TorrServer] Skipping unsafe kill target on port ${port} (pid "${pid}")`);
+          continue;
+        }
         try {
-          process.kill(Number(pid), 'SIGKILL');
+          process.kill(n, 'SIGKILL');
           console.log(`[TorrServer] Killed stale process on port ${port} (pid ${pid})`);
         } catch {
           /* процесс уже умер */
@@ -177,6 +185,35 @@ export class TorrServerManager {
       return pids.length > 0;
     } catch {
       return false; // порт свободен или lsof недоступен
+    }
+  }
+
+  /**
+   * Безопасный запуск CLI-утилиты для очистки процессов.
+   * Ошибки `execSync` (отсутствие утилиты, sandbox/permissions, таймаут) НЕ
+   * должны ронять главный процесс — в песочницах и ограниченных средах эти
+   * команды могут быть запрещены. Возвращает список убитых PID.
+   */
+  private safeExecKill(cmd: string, label: string): number[] {
+    try {
+      const out = execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, encoding: 'utf8' });
+      const killed: number[] = [];
+      for (const raw of (out || '').split('\n')) {
+        const n = Number(raw.trim());
+        if (!Number.isFinite(n) || n <= 1 || n === process.pid) continue; // никогда не убивать себя
+        try {
+          process.kill(n, 'SIGKILL');
+          killed.push(n);
+        } catch {
+          /* процесс уже умер */
+        }
+      }
+      if (killed.length) console.log(`[TorrServer] ${label}: killed ${killed.length} process(es) (${killed.join(', ')})`);
+      return killed;
+    } catch (err: any) {
+      // killall/lsof отсутствует или запрещён — безопасно пропускаем (защита от SIGKILL главного процесса)
+      console.warn(`[TorrServer] ${label}: skipped (cli unavailable/restricted: ${err?.message || 'unknown'})`);
+      return [];
     }
   }
 
@@ -299,16 +336,24 @@ export class TorrServerManager {
    * Official YouROK/TorrServer asset names:
    * Windows amd64 → TorrServer-windows-amd64.exe
    */
-  public getBinaryName(): string {
+  /** Имя бинарника TorrServer. `useGst=true` — сборка MatriX.gst (GStreamer):
+   *  умеет HLS-транскодинг (/gst/hash/master.m3u8), нужна для HEVC/AC3/DTS/10-bit.
+   *  Именование в релизах YouROK/TorrServer: `TorrServer-gst-<plat>-<arch>`.
+   *  gst-сборки существуют только для amd64/arm64 (darwin/linux/windows). */
+  public getBinaryName(useGst: boolean = false): string {
     const platform = process.platform;
     const arch = process.arch;
+    const gstSupported = arch === 'x64' || arch === 'arm64';
+    const name = useGst && gstSupported ? 'TorrServer-gst' : 'TorrServer';
 
     if (platform === 'win32') {
-      return arch === 'ia32' ? 'TorrServer-windows-386.exe' : 'TorrServer-windows-amd64.exe';
+      if (arch === 'ia32') return 'TorrServer-windows-386.exe';
+      return `${name}-windows-${arch}.exe`;
     } else if (platform === 'darwin') {
-      return arch === 'arm64' ? 'TorrServer-darwin-arm64' : 'TorrServer-darwin-amd64';
+      return `${name}-darwin-${arch}`;
     } else {
-      return arch === 'arm64' ? 'TorrServer-linux-arm64' : 'TorrServer-linux-amd64';
+      if (arch === 'ia32') return 'TorrServer-linux-386';
+      return `${name}-linux-${arch}`;
     }
   }
 
@@ -335,18 +380,55 @@ export class TorrServerManager {
     }
   }
 
+  /**
+   * Приобрести бинарник TorrServer. Сначала пробуем gst-сборку (MatriX.gst —
+   * HLS-транскодинг HEVC/AC3/DTS/10-bit в /gst/master.m3u8), затем обычную.
+   * gst-бинарник кладётся в extraResources `resources/torrserver/TorrServer-<plat>-<arch>-gst`
+   * и автоматически копируется в Resources/torrserver (см. electron-builder.json5).
+   */
   public async getOrDownloadBinary(): Promise<string> {
     const binDir = this.getBinaryDir();
     if (!fs.existsSync(binDir)) {
       fs.mkdirSync(binDir, { recursive: true });
     }
 
-    const binaryName = this.getBinaryName();
-    const targetPath = path.join(binDir, binaryName);
+    // 0) ПРЕДПОЧТЕНИЕ: gst-сборка (HLS-транскодинг). На Windows gst-сборки нет —
+    //    используем обычную.
+    if (process.platform !== 'win32' && (await this.tryAcquireBinary(true))) return this.binaryPath;
+    if (await this.tryAcquireBinary(false)) return this.binaryPath;
+
+    throw new Error('Failed to acquire TorrServer binary (gst and standard variants unavailable)');
+  }
+
+  /** gst-сборка TorrServer требует системный `gst-discoverer-1.0` (GStreamer):
+   *  `/gst/master.m3u8` отвечает «gst-discoverer-1.0 not found» без него. */
+  private gstRuntimeAvailable(): boolean {
+    try {
+      const out = execSync('which gst-discoverer-1.0 || command -v gst-discoverer-1.0 || true', {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 3000,
+        encoding: 'utf8',
+      });
+      return (out || '').trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Попытка получить бинарник (bundled extraResources → userData/bin → download). */
+  private async tryAcquireBinary(useGst: boolean): Promise<boolean> {
+    // Без GStreamer на системе gst-сборка бесполезна (роут /gst/ не отвечает) —
+    // выбираем обычный бинарник, чтобы не ломать текущее воспроизведение.
+    if (useGst && !this.gstRuntimeAvailable()) {
+      console.warn('[TorrServer] gst-discoverer-1.0 (GStreamer) not found — GST transcoder unavailable, using standard binary');
+      return false;
+    }
+    const binaryName = this.getBinaryName(useGst);
+    const targetPath = path.join(this.getBinaryDir(), binaryName);
 
     // 1) Prefer the bundled binary from extraResources (process.resourcesPath),
     //    NOT from inside app.asar (Electron cannot exec files from asar).
-    const bundledPath = this.getBundledBinaryPath();
+    const bundledPath = path.join(process.resourcesPath, 'torrserver', binaryName);
     if (fs.existsSync(bundledPath)) {
       try {
         if (!fs.existsSync(targetPath) || fs.statSync(bundledPath).size !== fs.statSync(targetPath).size) {
@@ -354,8 +436,9 @@ export class TorrServerManager {
         }
         this.ensureExecutable(targetPath);
         this.binaryPath = targetPath;
-        console.log(`[TorrServer] Using bundled binary from extraResources: ${bundledPath}`);
-        return targetPath;
+        this.usingGstBinary = useGst;
+        console.log(`[TorrServer] Using bundled binary from extraResources: ${bundledPath}${useGst ? ' (GST transcoder)' : ''}`);
+        return true;
       } catch (err: any) {
         console.warn('[TorrServer] Failed to use bundled binary, falling back to download:', err.message);
       }
@@ -365,7 +448,9 @@ export class TorrServerManager {
     if (fs.existsSync(targetPath)) {
       this.ensureExecutable(targetPath);
       this.binaryPath = targetPath;
-      return targetPath;
+      this.usingGstBinary = useGst;
+      console.log(`[TorrServer] Using binary from userData/bin: ${targetPath}${useGst ? ' (GST transcoder)' : ''}`);
+      return true;
     }
 
     // 3) First launch — download from official GitHub Releases
@@ -377,16 +462,17 @@ export class TorrServerManager {
       await this.downloadFile(downloadUrl, targetPath);
       this.ensureExecutable(targetPath);
       this.binaryPath = targetPath;
-      return targetPath;
+      this.usingGstBinary = useGst;
+      return true;
     } catch (err: any) {
-      console.error('[TorrServer] Download failed:', err.message);
+      console.error(`[TorrServer] Download failed for ${binaryName}:`, err.message);
       // Clean partial download
       try {
         if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
       } catch {
         /* ignore */
       }
-      throw new Error(`Failed to acquire TorrServer binary: ${err.message}`);
+      return false;
     }
   }
 
@@ -463,20 +549,25 @@ export class TorrServerManager {
       }
 
       // ── Жёсткая очистка перед стартом: убить зависшие инстансы и bboltDB-локи ──
+      // ZONE 1: порядок и назначение НЕ меняются (зомби/локи на 8090).
+      // Добавлена безопасность: ошибки CLI-утилит (sandbox/permissions) перехватываются
+      // и НЕ роняют главный процесс (раньше execSync мог бросать → SIGKILL-цепочка).
       if (this.childProcess) {
         await this.stopServer().catch(() => {});
       }
       try {
-        execSync('killall -9 TorrServer || true', { stdio: 'ignore' });
-        console.log('[TorrServer] Killed stale TorrServer processes (killall -9)');
-      } catch {
-        /* процесса нет — ок */
+        this.safeExecKill('killall -9 TorrServer || true', 'Killed stale TorrServer processes (killall -9)');
+        console.log('[TorrServer] Stale TorrServer processes cleanup finished');
+      } catch (err: any) {
+        console.warn('[TorrServer] killall cleanup warning (non-fatal):', err?.message);
       }
       try {
-        execSync(`lsof -ti:${this.port} | xargs kill -9 || true`, { stdio: 'ignore' });
-        console.log(`[TorrServer] Port ${this.port} cleared (lsof kill)`);
-      } catch {
-        /* порт свободен — ок */
+        // `lsof -ti tcp:<port>` — безопасная форма (как в killProcessOnPort);
+        // в stdout приходят только PID на порту, kill валидных из них.
+        this.safeExecKill(`lsof -ti tcp:${this.port} | xargs kill -9 || true`, `Port ${this.port} cleared (lsof kill)`);
+        console.log(`[TorrServer] Port ${this.port} cleanup finished`);
+      } catch (err: any) {
+        console.warn(`[TorrServer] Port ${this.port} cleanup warning (non-fatal):`, err?.message);
       }
 
       // ── Сброс настроек TorrServer (BT-клиент fix) ──
