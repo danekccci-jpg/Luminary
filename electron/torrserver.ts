@@ -114,6 +114,11 @@ export class TorrServerManager {
   private lastStartError = '';
   private lastStartErrorLog = '';
 
+  // ── Keep-Alive / heartbeat ──
+  /** true, если остановка была ЯВНОЙ (кнопка «Остановить» в настройках).
+   *  Keep-Alive НЕ должен сам поднимать сервер после ручной остановки. */
+  private manualStopRequested = false;
+
   constructor(port: number = 8090) {
     this.port = port;
     this.dataDir = path.join(app.getPath('userData'), 'torrserver_data');
@@ -127,6 +132,21 @@ export class TorrServerManager {
   /** Флаг «идёт запуск» — для статуса «Запуск сервиса...» в UI. */
   public isStarting(): boolean {
     return this.startingFlag;
+  }
+
+  /** Keep-Alive: авто-перезапуск с уважением лимитов ZONE 2
+   *  (MAX_AUTO_RESTARTS = 3, cooldown 15 c) — защита от бесконечного цикла. */
+  public keepAliveRestart(reason: string): void {
+    this.scheduleRestart(reason);
+  }
+
+  /** Пометить ЯВНУЮ остановку (кнопка «Остановить») — Keep-Alive не поднимает сервер. */
+  public setManualStop(v: boolean): void {
+    this.manualStopRequested = v;
+  }
+
+  public isManuallyStopped(): boolean {
+    return this.manualStopRequested;
   }
 
   /** Последняя ошибка старта (текст) — для плашки в UI. */

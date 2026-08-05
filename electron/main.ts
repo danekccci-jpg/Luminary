@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, protocol, net } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, protocol, net, powerMonitor } from 'electron';
 import path from 'path';
 import { exec } from 'child_process';
 import { TorrServerManager, normalizeTorrentLink } from './torrserver.js';
@@ -205,6 +205,49 @@ function startTorrServerAsync(attempt: number = 1) {
     });
 }
 
+// ═══════════════════════════════════════════════════════════
+//  Keep-Alive Service: heartbeat /echo + авто-восстановление
+// ═══════════════════════════════════════════════════════════
+const HEARTBEAT_INTERVAL_MS = 7000; // каждые 7 сек — /echo
+let heartbeatTimer: NodeJS.Timeout | null = null;
+/** Последнее подтверждённое состояние /echo (null — ещё не проверяли). */
+let lastHeartbeatAlive: boolean | null = null;
+
+/** Одна проверка heartbeat: /echo + push при смене + keep-alive при падении. */
+async function heartbeatTick() {
+  const alive = await torrServer.checkHealth();
+  // Смена состояния → мгновенный push в Renderer (индикатор без клика)
+  if (alive !== lastHeartbeatAlive) {
+    lastHeartbeatAlive = alive;
+    const lastErr = torrServer.getLastError();
+    notifyTorrServerStatus({
+      running: alive,
+      starting: !alive && torrServer.isStarting(),
+      port: 8090,
+      error: alive ? undefined : lastErr.error,
+    });
+  }
+  // Keep-Alive: сервер упал / не отвечает → авто-запуск, НО:
+  //  - не во время штатного старта (isStarting),
+  //  - не после ЯВНОЙ остановки пользователем (isManuallyStopped),
+  //  - с лимитами ZONE 2 (MAX_AUTO_RESTARTS=3, cooldown 15с).
+  if (!alive && !torrServer.isStarting() && !torrServer.isManuallyStopped()) {
+    console.warn('[KeepAlive] Heartbeat: TorrServer не отвечает — авто-восстановление');
+    torrServer.keepAliveRestart('heartbeat-timeout');
+  }
+}
+
+/** Запустить фоновый heartbeat-мониторинг (idempotent). */
+function startHeartbeat() {
+  if (heartbeatTimer) return;
+  console.log(`[Main] Keep-Alive heartbeat started (every ${HEARTBEAT_INTERVAL_MS / 1000}s)`);
+  // Первый тик сразу — синхронизируем статус при старте
+  heartbeatTick().catch(() => {});
+  heartbeatTimer = setInterval(() => {
+    heartbeatTick().catch((err) => console.warn('[KeepAlive] heartbeat tick warning:', err.message));
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
 function setupIPC() {
   // ── TorrServer IPC ──
   ipcMain.handle('torrserver:status', async () => {
@@ -229,6 +272,7 @@ function setupIPC() {
   });
 
   ipcMain.handle('torrserver:start', async () => {
+    torrServer.setManualStop(false);
     const status = await torrServer.startServer();
     // Push актуального состояния в UI сразу после старта
     notifyTorrServerStatus({
@@ -241,6 +285,8 @@ function setupIPC() {
   });
 
   ipcMain.handle('torrserver:stop', async () => {
+    // Явная остановка: Keep-Alive НЕ должен сам поднимать сервер после неё
+    torrServer.setManualStop(true);
     await torrServer.stopServer();
     // Push остановки в UI
     notifyTorrServerStatus({ running: false, starting: false, port: 8090 });
@@ -249,6 +295,7 @@ function setupIPC() {
 
   // Полный рестарт сервера (stop + start) — самолечение зависшего BT-клиента
   ipcMain.handle('torrserver:restart', async () => {
+    torrServer.setManualStop(false);
     notifyTorrServerStatus({ running: false, starting: true, port: 8090 });
     await torrServer.stopServer().catch(() => {});
     const status = await torrServer.startServer();
@@ -473,6 +520,16 @@ app.whenReady().then(async () => {
 
     // 2. Start TorrServer in background — never blocks the UI
     startTorrServerAsync();
+
+    // 3. Keep-Alive: фоновый heartbeat /echo → push статуса + авто-восстановление
+    startHeartbeat();
+
+    // 4. macOS resume (выход из сна): немедленно проверить реальный статус /echo
+    //    (после сна сеть/процессы могли умереть — UI должен это увидеть сразу)
+    powerMonitor.on('resume', () => {
+      console.log('[Main] System resumed from sleep — refreshing TorrServer status');
+      heartbeatTick().catch((err) => console.warn('[KeepAlive] resume check warning:', err.message));
+    });
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

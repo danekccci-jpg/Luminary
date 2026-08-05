@@ -116,7 +116,9 @@ TorrServer MatriX (Go-бинарник, extraResources)
 ### 🔴 ZONE 5 — `electron/main.ts`: IPC-статус и push-события
 
 - **`torrserver:status`** обязан возвращать `{ running, starting, error, errorLog }` — актуальные из Main Process (`checkHealth` + `isStarting()` + `getLastError()`).
-- **Push-событие `torrserver-status-changed`** (`notifyTorrServerStatus`) — вызывается из: автозапуска (`startTorrServerAsync`), `torrserver:start`, `torrserver:stop`, `torrserver:restart`. UI (App.tsx) подписан через `onTorrServerStatusChanged`.
+- **Push-событие `torrserver-status-changed`** (`notifyTorrServerStatus`) — вызывается из: автозапуска (`startTorrServerAsync`), `torrserver:start`, `torrserver:stop`, `torrserver:restart`, **heartbeat** (`heartbeatTick`) и **`powerMonitor.on('resume')`** (выход из сна macOS). UI (App.tsx) подписан через `onTorrServerStatusChanged`.
+- **Keep-Alive Service** (`startHeartbeat`, интервал 7 с): `heartbeatTick()` → `checkHealth()` (`/echo`), при смене состояния — push в UI (индикатор меняется без клика); если сервер упал и это НЕ ручная остановка (`isManuallyStopped`, флаг `setManualStop` в `torrserver:stop`) и НЕ идёт штатный старт (`isStarting`) — авто-восстановление через `keepAliveRestart()` → `scheduleRestart` (лимиты ZONE 2: `MAX_AUTO_RESTARTS=3`, cooldown 15 с — НЕ увеличивать).
+- **`torrserver:status`** обязан возвращать `{ running, starting, error, errorLog }` — актуальные из Main Process (`checkHealth` + `isStarting()` + `getLastError()`). Индикатор в UI отражает ТОЛЬКО подтверждённый `/echo` (все push-источники используют `checkHealth`).
 - **`torrserver:add`**: валидация через `normalizeTorrentLink` → защита payload от undefined (`title || 'Movie Stream'`, `poster || ''`) → маппинг 500 в «Ошибка добавления торрента: неверный формат раздачи или битый magnet-link».
 - **`app.requestSingleInstanceLock()`** — защита от двойных инстансов.
 
