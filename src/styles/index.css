@@ -1,0 +1,630 @@
+/* ─────────────────────────────────────────────
+   LUMINARY · Premium Design System
+   Revolut Glassmorphism × Lampa Cinematic Dark
+   ───────────────────────────────────────────── */
+
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,400&display=swap');
+
+/* ── Design Tokens ─────────────────────────── */
+:root {
+  /* Backgrounds */
+  --bg-void:         #0A0B0E;
+  --bg-surface:      #0F1014;
+  --bg-elevated:     rgba(20, 21, 30, 0.85);
+  --bg-card:         rgba(255, 255, 255, 0.035);
+  --bg-card-hover:   rgba(255, 255, 255, 0.07);
+  --bg-input:        rgba(255, 255, 255, 0.045);
+
+  /* Borders */
+  --border-subtle:   rgba(255, 255, 255, 0.06);
+  --border-normal:   rgba(255, 255, 255, 0.10);
+  --border-strong:   rgba(255, 255, 255, 0.18);
+  --border-cyan:     rgba(0, 242, 254, 0.35);
+  --border-purple:   rgba(138, 43, 226, 0.4);
+
+  /* Neon Accents */
+  --cyan:            #00F2FE;
+  --cyan-dim:        rgba(0, 242, 254, 0.15);
+  --cyan-glow:       rgba(0, 242, 254, 0.35);
+  --purple:          #8A2BE2;
+  --purple-dim:      rgba(138, 43, 226, 0.15);
+  --purple-glow:     rgba(138, 43, 226, 0.45);
+  --magenta:         #D946EF;
+  --emerald:         #10F5AC;
+  --amber:           #FFB800;
+  --coral:           #FF5470;
+
+  /* Text */
+  --text-primary:    #F0F2F8;
+  --text-secondary:  rgba(240, 242, 248, 0.65);
+  --text-muted:      rgba(240, 242, 248, 0.38);
+  --text-cyan:       #00F2FE;
+  --text-purple:     #B57BFF;
+
+  /* Spacing */
+  --radius-sm:       10px;
+  --radius-md:       16px;
+  --radius-lg:       22px;
+  --radius-xl:       28px;
+  --radius-pill:     999px;
+
+  /* Typography */
+  --font:            'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+
+  /* Glow Shadows */
+  --shadow-cyan:     0 0 24px rgba(0, 242, 254, 0.3), 0 0 60px rgba(0, 242, 254, 0.12);
+  --shadow-purple:   0 0 24px rgba(138, 43, 226, 0.4), 0 0 60px rgba(138, 43, 226, 0.15);
+  --shadow-card:     0 8px 32px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-elevated: 0 20px 60px rgba(0, 0, 0, 0.8), 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* ── Base Reset ────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--bg-void);
+  color: var(--text-primary);
+  font-family: var(--font);
+  overflow-x: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+/* ── Ambient Backdrop ──────────────────────── */
+#ambient-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  transition: opacity 1.2s ease;
+}
+
+#ambient-backdrop::before {
+  content: '';
+  position: absolute;
+  top: -30%;
+  left: -20%;
+  width: 80%;
+  height: 80%;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--ambient-color, rgba(0, 242, 254, 0.045)) 0%, transparent 70%);
+  filter: blur(80px);
+  transition: background 2s ease;
+}
+
+#ambient-backdrop::after {
+  content: '';
+  position: absolute;
+  bottom: -20%;
+  right: -10%;
+  width: 60%;
+  height: 60%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(138, 43, 226, 0.04) 0%, transparent 70%);
+  filter: blur(100px);
+}
+
+/* ── Scrollbar ─────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.1);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(0,242,254,0.3); }
+
+/* ── Glass Morphism Surfaces ───────────────── */
+.glass {
+  background: rgba(16, 17, 24, 0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--border-normal);
+}
+
+.glass-dark {
+  background: rgba(10, 11, 14, 0.88);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  border: 1px solid var(--border-subtle);
+}
+
+.glass-card {
+  background: var(--bg-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.glass-card:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-cyan);
+  transform: translateY(-6px);
+  box-shadow: var(--shadow-cyan), var(--shadow-card);
+}
+
+.glass-modal {
+  background: rgba(11, 12, 17, 0.95);
+  backdrop-filter: blur(32px) saturate(200%);
+  -webkit-backdrop-filter: blur(32px) saturate(200%);
+  border: 1px solid var(--border-normal);
+}
+
+/* ── Neon Glow Borders ─────────────────────── */
+.neon-border-cyan {
+  border-color: var(--border-cyan) !important;
+  box-shadow: 0 0 12px rgba(0, 242, 254, 0.2), inset 0 0 12px rgba(0, 242, 254, 0.04);
+}
+
+.neon-border-purple {
+  border-color: var(--border-purple) !important;
+  box-shadow: 0 0 12px rgba(138, 43, 226, 0.25), inset 0 0 12px rgba(138, 43, 226, 0.04);
+}
+
+/* ── Primary CTA Button (Cyan Gradient) ────── */
+.btn-primary {
+  background: linear-gradient(135deg, #00c6fb 0%, #005bea 100%);
+  color: #fff;
+  border: none;
+  padding: 0.7rem 1.5rem;
+  border-radius: var(--radius-pill);
+  font-weight: 700;
+  font-size: 0.9rem;
+  font-family: var(--font);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  letter-spacing: 0.01em;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 4px 20px rgba(0, 198, 251, 0.35), 0 2px 6px rgba(0, 91, 234, 0.25);
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-primary::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255,255,255,0.15) 0%, transparent 60%);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.btn-primary:hover::before { opacity: 1; }
+
+.btn-primary:hover {
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 8px 30px rgba(0, 198, 251, 0.5), 0 4px 12px rgba(0, 91, 234, 0.35);
+}
+
+.btn-primary:active {
+  transform: translateY(0) scale(0.98);
+  box-shadow: 0 2px 10px rgba(0, 198, 251, 0.4);
+}
+
+/* ── Play Button (Neon Purple Variant) ─────── */
+.btn-play {
+  background: linear-gradient(135deg, #8A2BE2 0%, #D946EF 100%);
+  color: #fff;
+  border: none;
+  padding: 0.75rem 1.6rem;
+  border-radius: var(--radius-pill);
+  font-weight: 800;
+  font-size: 0.95rem;
+  font-family: var(--font);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 4px 24px rgba(138, 43, 226, 0.45), 0 2px 8px rgba(217, 70, 239, 0.3);
+}
+
+.btn-play:hover {
+  transform: translateY(-3px) scale(1.04);
+  box-shadow: 0 10px 35px rgba(138, 43, 226, 0.6), 0 5px 15px rgba(217, 70, 239, 0.4);
+}
+
+.btn-play:active {
+  transform: translateY(0) scale(0.97);
+}
+
+/* ── Secondary Button ──────────────────────── */
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-primary);
+  border: 1px solid var(--border-normal);
+  padding: 0.7rem 1.5rem;
+  border-radius: var(--radius-pill);
+  font-weight: 600;
+  font-size: 0.9rem;
+  font-family: var(--font);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  backdrop-filter: blur(10px);
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+}
+
+.btn-secondary:active { transform: translateY(0) scale(0.98); }
+
+/* ── Ghost / Minimal Icon Button ───────────── */
+.btn-icon {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  padding: 0.55rem;
+}
+
+.btn-icon:hover {
+  background: rgba(0, 242, 254, 0.08);
+  border-color: var(--border-cyan);
+  color: var(--cyan);
+  box-shadow: 0 0 12px rgba(0,242,254,0.15);
+}
+
+/* ── Quality Badges ────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.22rem 0.6rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+
+.badge-4k {
+  background: rgba(255, 184, 0, 0.14);
+  color: var(--amber);
+  border-color: rgba(255, 184, 0, 0.4);
+  text-shadow: 0 0 8px rgba(255, 184, 0, 0.5);
+}
+
+.badge-1080p {
+  background: rgba(0, 242, 254, 0.1);
+  color: var(--cyan);
+  border-color: rgba(0, 242, 254, 0.35);
+  text-shadow: 0 0 8px rgba(0, 242, 254, 0.4);
+}
+
+.badge-720p {
+  background: rgba(16, 245, 172, 0.1);
+  color: var(--emerald);
+  border-color: rgba(16, 245, 172, 0.3);
+}
+
+.badge-sd {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-muted);
+  border-color: var(--border-subtle);
+}
+
+.badge-hdr {
+  background: rgba(255, 84, 112, 0.12);
+  color: var(--coral);
+  border-color: rgba(255, 84, 112, 0.35);
+}
+
+.badge-remux {
+  background: rgba(217, 70, 239, 0.12);
+  color: var(--magenta);
+  border-color: rgba(217, 70, 239, 0.35);
+}
+
+/* ── Dubbing Studio Chips ──────────────────── */
+.chip-dubbing {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid transparent;
+  backdrop-filter: blur(8px);
+}
+
+.chip-dub-studio {
+  background: rgba(16, 245, 172, 0.1);
+  color: var(--emerald);
+  border-color: rgba(16, 245, 172, 0.3);
+  box-shadow: 0 0 8px rgba(16, 245, 172, 0.2);
+}
+
+.chip-dub-rezka {
+  background: rgba(138, 43, 226, 0.12);
+  color: var(--text-purple);
+  border-color: rgba(138, 43, 226, 0.35);
+  box-shadow: 0 0 8px rgba(138, 43, 226, 0.2);
+}
+
+.chip-dub-lost {
+  background: rgba(138, 43, 226, 0.1);
+  color: #c084fc;
+  border-color: rgba(192, 132, 252, 0.3);
+  box-shadow: 0 0 8px rgba(192, 132, 252, 0.15);
+}
+
+.chip-dub-orig {
+  background: rgba(0, 242, 254, 0.08);
+  color: var(--cyan);
+  border-color: rgba(0, 242, 254, 0.25);
+  box-shadow: 0 0 8px rgba(0, 242, 254, 0.12);
+}
+
+.chip-dub-other {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  border-color: var(--border-subtle);
+}
+
+/* ── Filter Chip Toggle ────────────────────── */
+.filter-chip {
+  padding: 0.3rem 0.85rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.78rem;
+  font-weight: 700;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font);
+  transition: all 0.18s ease;
+  white-space: nowrap;
+}
+
+.filter-chip:hover {
+  background: rgba(255,255,255,0.06);
+  color: var(--text-primary);
+  border-color: var(--border-normal);
+}
+
+.filter-chip.active-cyan {
+  background: rgba(0, 242, 254, 0.12);
+  color: var(--cyan);
+  border-color: var(--border-cyan);
+  box-shadow: 0 0 10px rgba(0,242,254,0.2);
+}
+
+.filter-chip.active-purple {
+  background: rgba(138, 43, 226, 0.15);
+  color: var(--text-purple);
+  border-color: var(--border-purple);
+  box-shadow: 0 0 10px rgba(138,43,226,0.25);
+}
+
+/* ── Stability / Health Score Badges ───────── */
+.stability-excellent {
+  background: rgba(16, 245, 172, 0.1);
+  color: var(--emerald);
+  border-color: rgba(16, 245, 172, 0.35);
+  box-shadow: 0 0 8px rgba(16, 245, 172, 0.2);
+}
+
+.stability-good {
+  background: rgba(0, 242, 254, 0.1);
+  color: var(--cyan);
+  border-color: rgba(0, 242, 254, 0.3);
+}
+
+.stability-moderate {
+  background: rgba(255, 184, 0, 0.1);
+  color: var(--amber);
+  border-color: rgba(255, 184, 0, 0.35);
+}
+
+.stability-low {
+  background: rgba(255, 84, 112, 0.1);
+  color: var(--coral);
+  border-color: rgba(255, 84, 112, 0.35);
+}
+
+/* ── Input Styling ─────────────────────────── */
+.input-glass {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font);
+  padding: 0.6rem 1rem;
+  font-size: 0.85rem;
+  width: 100%;
+  transition: all 0.2s ease;
+  outline: none;
+}
+
+.input-glass::placeholder { color: var(--text-muted); }
+
+.input-glass:focus {
+  border-color: var(--border-cyan);
+  background: rgba(0, 242, 254, 0.04);
+  box-shadow: 0 0 0 3px rgba(0, 242, 254, 0.1), 0 0 16px rgba(0, 242, 254, 0.08);
+}
+
+/* ── Animations ────────────────────────────── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.93); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes shimmer {
+  from { background-position: -200% center; }
+  to   { background-position: 200% center; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes pulseNeon {
+  0%, 100% { opacity: 1; box-shadow: 0 0 10px rgba(0,242,254,0.4); }
+  50%       { opacity: 0.8; box-shadow: 0 0 25px rgba(0,242,254,0.8), 0 0 50px rgba(0,242,254,0.3); }
+}
+
+@keyframes ambientShift {
+  0%, 100% { transform: scale(1) translate(0,0); }
+  33%       { transform: scale(1.1) translate(2%,3%); }
+  66%       { transform: scale(0.95) translate(-2%,-2%); }
+}
+
+@keyframes dash {
+  to { stroke-dashoffset: 0; }
+}
+
+.animate-fade-up    { animation: fadeUp   0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.animate-fade-in    { animation: fadeIn   0.3s ease forwards; }
+.animate-scale-in   { animation: scaleIn  0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.animate-spin       { animation: spin 1s linear infinite; }
+.animate-pulse-neon { animation: pulseNeon 2s ease-in-out infinite; }
+
+/* ── Skeleton Loading ──────────────────────── */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255,255,255,0.04) 25%,
+    rgba(255,255,255,0.08) 50%,
+    rgba(255,255,255,0.04) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.8s infinite;
+  border-radius: var(--radius-md);
+}
+
+/* ── Seeker / Range Slider ─────────────────── */
+.neon-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 99px;
+  outline: none;
+  cursor: pointer;
+  position: relative;
+}
+
+.neon-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--cyan);
+  cursor: pointer;
+  box-shadow: 0 0 10px rgba(0,242,254,0.7), 0 0 20px rgba(0,242,254,0.3);
+  transition: all 0.2s ease;
+}
+
+.neon-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.3);
+  box-shadow: 0 0 16px rgba(0,242,254,0.9), 0 0 30px rgba(0,242,254,0.4);
+}
+
+.neon-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--cyan);
+  cursor: pointer;
+  border: none;
+  box-shadow: 0 0 10px rgba(0,242,254,0.7);
+}
+
+/* ── Scrollbar Hide Utility ────────────────── */
+.scrollbar-none::-webkit-scrollbar { display: none; }
+.scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ── Gradient Text ─────────────────────────── */
+.gradient-text-cyan {
+  background: linear-gradient(135deg, #00F2FE, #4facfe);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-text-purple {
+  background: linear-gradient(135deg, #B57BFF, #D946EF);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-text-hero {
+  background: linear-gradient(135deg, #fff 30%, rgba(255,255,255,0.75));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Divider Lines ─────────────────────────── */
+.divider {
+  width: 100%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border-normal), transparent);
+}
+
+/* ── Tag / Codec Chip ──────────────────────── */
+.tag-chip {
+  padding: 0.18rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: rgba(255,255,255,0.06);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+}
+
+.tag-chip-hevc {
+  background: rgba(255, 184, 0, 0.08);
+  color: rgba(255,184,0,0.85);
+  border-color: rgba(255,184,0,0.25);
+}
+
+.tag-chip-av1 {
+  background: rgba(0,242,254,0.08);
+  color: rgba(0,242,254,0.8);
+  border-color: rgba(0,242,254,0.2);
+}

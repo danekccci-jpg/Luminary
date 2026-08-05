@@ -1,0 +1,754 @@
+import axios, { AxiosError } from 'axios';
+import * as cheerio from 'cheerio';
+
+/** Local copy — keeps electron build isolated from Vite `src/` rootDir. */
+export type DubbingType =
+  | 'ALL'
+  | 'Дубляж'
+  | 'RHS'
+  | 'HDRezka'
+  | 'LostFilm'
+  | 'TVShows'
+  | 'Кубик в Кубе'
+  | 'Оригинал + Субтитры'
+  | 'Прочее';
+
+export interface TorrentRelease {
+  id: string;
+  title: string;
+  originalTitle?: string;
+  quality: '4K' | '1080p' | '720p' | 'SD';
+  tags: string[];
+  dubbing: DubbingType;
+  size: string;
+  sizeBytes: number;
+  seeders: number;
+  leechers: number;
+  magnet: string;
+  source: string;
+  videoCodec: 'H.264' | 'HEVC' | 'AV1' | 'Unknown';
+  audioCodec: 'AAC' | 'AC3' | 'EAC3' | 'DTS' | 'TrueHD' | 'Unknown';
+  stabilityScore: number;
+  stabilityLabel: 'Отличная' | 'Хорошая' | 'Умеренная' | 'Низкий битрэйт';
+  requiredMbps: number;
+}
+
+export class TorrentScraper {
+  /**
+   * Multi-source search. Lampa-style: primaryQuery (RU title) first;
+   * if no live hits, retry with fallbackQuery (original title).
+   */
+  public async searchTorrents(
+    query: string,
+    year?: string,
+    jackettUrl?: string,
+    jackettApiKey?: string,
+    imdbId?: string,
+    fallbackQuery?: string
+  ): Promise<TorrentRelease[]> {
+    const primary = await this.runSearchPass(query, year, jackettUrl, jackettApiKey, imdbId);
+    const livePrimary = primary.filter((r) => !/\(Demo\)/i.test(r.source));
+
+    if (livePrimary.length > 0) {
+      return this.dedupeAndSort(primary);
+    }
+
+    const fb = this.sanitizeQuery(fallbackQuery || '');
+    const primarySafe = this.sanitizeQuery(query);
+    if (fb && fb.toLowerCase() !== primarySafe.toLowerCase()) {
+      console.log(`[Scraper] Lampa fallback → original title: "${fb}"`);
+      const secondary = await this.runSearchPass(fb, year, jackettUrl, jackettApiKey, imdbId);
+      const liveSecondary = secondary.filter((r) => !/\(Demo\)/i.test(r.source));
+      if (liveSecondary.length > 0) {
+        return this.dedupeAndSort(secondary);
+      }
+      // Merge any demos from either pass
+      return this.dedupeAndSort([...primary, ...secondary]);
+    }
+
+    return this.dedupeAndSort(primary);
+  }
+
+  private async runSearchPass(
+    query: string,
+    year?: string,
+    jackettUrl?: string,
+    jackettApiKey?: string,
+    imdbId?: string
+  ): Promise<TorrentRelease[]> {
+    const safeQuery = this.sanitizeQuery(query);
+    if (!safeQuery) {
+      console.warn('[Scraper] Empty query after sanitization');
+      return [];
+    }
+
+    const safeYear = this.sanitizeYear(year);
+    console.log(`[Scraper] Multi-source search for "${safeQuery}" (${safeYear || 'any year'})...`);
+
+    const results: TorrentRelease[] = [];
+    const sources: Array<{ name: string; run: () => Promise<TorrentRelease[]> }> = [
+      { name: 'JacRed', run: () => this.queryJacRed(safeQuery, safeYear) },
+      { name: 'Torrentio', run: () => this.queryTorrentio(safeQuery, safeYear, imdbId) },
+      { name: 'Rutor', run: () => this.scrapeRutor(safeQuery, safeYear) },
+      { name: 'RuTracker', run: () => this.scrapeRuTracker(safeQuery, safeYear) },
+      { name: 'VK Video', run: () => this.queryVKVideo(safeQuery, safeYear) },
+    ];
+
+    if (jackettUrl && jackettApiKey) {
+      sources.push({
+        name: 'Jackett',
+        run: () => this.queryJackett(safeQuery, safeYear, jackettUrl, jackettApiKey),
+      });
+    }
+
+    const settled = await Promise.allSettled(sources.map((s) => s.run()));
+    settled.forEach((outcome, i) => {
+      const name = sources[i].name;
+      if (outcome.status === 'fulfilled') {
+        results.push(...outcome.value);
+        console.log(`[Scraper] ${name}: ${outcome.value.length} results`);
+      } else {
+        console.warn(`[Scraper] ${name} fallback skip:`, this.formatAxiosError(outcome.reason));
+      }
+    });
+
+    if (results.length === 0) {
+      console.warn('[Scraper] Pass empty — local demo fallback for this query');
+      results.push(...this.generateFallbackReleases(safeQuery, safeYear));
+    }
+
+    return results;
+  }
+
+  private dedupeAndSort(results: TorrentRelease[]): TorrentRelease[] {
+    const unique = new Map<string, TorrentRelease>();
+    for (const item of results) {
+      if (!item.magnet) continue;
+      const hashMatch = item.magnet.match(/btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/i);
+      const key = hashMatch ? hashMatch[1].toLowerCase() : `${item.title}|${item.size}`;
+      const prev = unique.get(key);
+      if (!prev || item.seeders > prev.seeders) {
+        unique.set(key, item);
+      }
+    }
+    const finalResults = Array.from(unique.values());
+    finalResults.sort((a, b) => b.seeders - a.seeders || b.stabilityScore - a.stabilityScore);
+    return finalResults;
+  }
+
+  /** Strip punctuation Lampa-style: colons, dashes, quotes → spaces; keep letters/digits. */
+  private sanitizeQuery(query: string): string {
+    return String(query || '')
+      .replace(/[\u0000-\u001F\u007F]/g, '')
+      .replace(/[<>"`«»„"']/g, ' ')
+      .replace(/[:;|/\\_+.,!?()[\]{}]/g, ' ')
+      .replace(/[—–−‐-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 200);
+  }
+
+  private sanitizeYear(year?: string): string | undefined {
+    if (!year) return undefined;
+    const m = String(year).match(/\b(19|20)\d{2}\b/);
+    return m ? m[0] : undefined;
+  }
+
+  private formatAxiosError(err: unknown): string {
+    if (axios.isAxiosError(err)) {
+      const ax = err as AxiosError;
+      const status = ax.response?.status;
+      if (status) return `HTTP ${status}`;
+      if (ax.code === 'ECONNABORTED') return 'timeout';
+      return ax.message;
+    }
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  private async queryJacRed(query: string, year?: string): Promise<TorrentRelease[]> {
+    const searchStr = year ? `${query} ${year}` : query;
+    const encoded = encodeURIComponent(searchStr);
+
+    // Pool of public JacRed instances — queried in parallel
+    const instances = [
+      `http://jacred.xyz/api/v1.0/torrents?search=${encoded}`,
+      `http://torrents.jacred.ru/api/v1.0/torrents?search=${encoded}`,
+      `http://jacred.xyz/api/v2.0/torrents?search=${encoded}`,
+      `http://torrents.jacred.ru/api/v2.0/torrents?search=${encoded}`,
+    ];
+
+    // Fire all in parallel, collect any successful responses
+    const settled = await Promise.allSettled(
+      instances.map((url) =>
+        axios.get(url, {
+          timeout: 5000,
+          validateStatus: (s) => s >= 200 && s < 300,
+          maxRedirects: 0,
+        })
+      )
+    );
+
+    const allItems: any[] = [];
+    let lastErr: unknown = null;
+
+    for (const outcome of settled) {
+      if (outcome.status === 'fulfilled') {
+        const data = outcome.value.data;
+        const items: any[] = Array.isArray(data)
+          ? data
+          : Array.isArray(data?.Results)
+            ? data.Results
+            : Array.isArray(data?.results)
+              ? data.results
+              : Array.isArray(data?.torrents)
+                ? data.torrents
+                : [];
+        allItems.push(...items);
+      } else {
+        lastErr = outcome.reason;
+      }
+    }
+
+    // Deduplicate by magnet hash
+    const seen = new Set<string>();
+    const items = allItems.filter((item: any) => {
+      const magnet = String(item.magnet || item.MagnetUri || item.link || item.url || '');
+      const hashMatch = magnet.match(/btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/i);
+      const key = hashMatch ? hashMatch[1].toLowerCase() : magnet;
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    if (items.length === 0 && lastErr) {
+      throw lastErr;
+    }
+
+    return items
+      .filter((item: any) => item && (item.magnet || item.MagnetUri || item.link || item.url))
+      .map((item: any, i: number) => {
+        const title = String(item.title || item.Title || item.name || searchStr);
+        const sizeBytes =
+          typeof item.size === 'number'
+            ? item.size
+            : typeof item.Size === 'number'
+              ? item.Size
+              : this.parseSizeBytes(String(item.sizeName || item.size_str || item.SizeStr || '4 GB'));
+        const seeders = Number(item.seeders ?? item.Seeders ?? item.seeds ?? 0) || 0;
+        const leechers = Number(item.leechers ?? item.Peers ?? item.peers ?? 0) || 0;
+        const magnet = String(item.magnet || item.MagnetUri || item.link || item.url || '');
+
+        return this.normalizeRelease(
+          `jacred-${i}-${Date.now()}`,
+          title,
+          magnet,
+          sizeBytes,
+          seeders,
+          leechers,
+          'JacRed Aggregator'
+        );
+      })
+      .filter((r) => r.magnet.startsWith('magnet:'));
+  }
+
+  /**
+   * Torrentio needs an IMDb id (`tt…`). Resolve via Cinemeta when missing.
+   * Never hardcode a demo film id.
+   */
+  private async queryTorrentio(
+    query: string,
+    year?: string,
+    imdbId?: string
+  ): Promise<TorrentRelease[]> {
+    let id = imdbId && /^tt\d+$/i.test(imdbId) ? imdbId : undefined;
+
+    if (!id) {
+      id = await this.resolveImdbId(query, year);
+    }
+    if (!id) {
+      console.warn('[Scraper] Torrentio skipped — no IMDb id for query');
+      return [];
+    }
+
+    const url = `https://torrentio.strem.fun/stream/movie/${encodeURIComponent(id)}.json`;
+    const response = await axios.get(url, {
+      timeout: 5000,
+      validateStatus: (s) => s >= 200 && s < 300,
+    });
+
+    const streams = Array.isArray(response.data?.streams) ? response.data.streams : [];
+    const searchStr = year ? `${query} ${year}` : query;
+
+    return streams
+      .filter((st: any) => st?.infoHash)
+      .map((st: any, i: number) => {
+        const title = `${searchStr} [${st.name || 'HD'}] ${st.title || ''}`.trim();
+        const magnet = `magnet:?xt=urn:btih:${st.infoHash}&dn=${encodeURIComponent(searchStr)}`;
+        const seedersMatch = String(st.title || '').match(/👤\s*(\d+)/);
+        const seeders = seedersMatch ? parseInt(seedersMatch[1], 10) : 25;
+        const sizeMatch = String(st.title || '').match(/💾\s*([\d.]+)\s*(GB|MB)/i);
+        const sizeBytes = sizeMatch
+          ? this.parseSizeBytes(`${sizeMatch[1]} ${sizeMatch[2]}`)
+          : 5 * 1024 * 1024 * 1024;
+
+        return this.normalizeRelease(
+          `torrentio-${id}-${i}`,
+          title,
+          magnet,
+          sizeBytes,
+          seeders,
+          3,
+          'Torrentio Network'
+        );
+      });
+  }
+
+  private async resolveImdbId(query: string, year?: string): Promise<string | undefined> {
+    try {
+      const url = `https://v3-cinemeta.strem.io/catalog/movie/top/search=${encodeURIComponent(query)}.json`;
+      const res = await axios.get(url, { timeout: 4000 });
+      const metas: any[] = Array.isArray(res.data?.metas) ? res.data.metas : [];
+      if (metas.length === 0) return undefined;
+
+      let best = metas[0];
+      if (year) {
+        const byYear = metas.find((m) => String(m.releaseInfo || m.year || '').includes(year));
+        if (byYear) best = byYear;
+      }
+
+      const raw = String(best.imdb_id || best.id || '');
+      return /^tt\d+$/i.test(raw) ? raw : undefined;
+    } catch (e: any) {
+      console.warn('[Scraper] Cinemeta IMDb resolve failed:', e.message);
+      return undefined;
+    }
+  }
+
+  private async scrapeRutor(query: string, year?: string): Promise<TorrentRelease[]> {
+    const searchStr = year ? `${query} ${year}` : query;
+    const url = `http://rutor.info/search/0/0/100/0/${encodeURIComponent(searchStr)}`;
+
+    const response = await axios.get(url, {
+      timeout: 5500,
+      validateStatus: (s) => s >= 200 && s < 300,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+
+    const $ = cheerio.load(response.data);
+    const releases: TorrentRelease[] = [];
+
+    $('#index tr').each((i, el) => {
+      if (i === 0) return;
+      const cells = $(el).find('td');
+      if (cells.length < 3) return;
+
+      const titleCell = $(cells[1]);
+      const titleText = titleCell.text().trim();
+      const magnetLink = titleCell.find('a[href^="magnet:"]').attr('href');
+
+      if (!magnetLink || !titleText) return;
+
+      const sizeText = $(cells[cells.length - 2]).text().trim();
+      const seedText = $(cells[cells.length - 1]).find('span.green').text().trim() || '0';
+      const leechText = $(cells[cells.length - 1]).find('span.red').text().trim() || '0';
+
+      releases.push(
+        this.normalizeRelease(
+          `rutor-${i}-${Date.now()}`,
+          titleText,
+          magnetLink,
+          this.parseSizeBytes(sizeText),
+          parseInt(seedText, 10) || 0,
+          parseInt(leechText, 10) || 0,
+          'Rutor Tracker'
+        )
+      );
+    });
+
+    return releases;
+  }
+
+  private async queryJackett(
+    query: string,
+    year: string | undefined,
+    jackettUrl: string,
+    apiKey: string
+  ): Promise<TorrentRelease[]> {
+    const searchStr = year ? `${query} ${year}` : query;
+    const cleanUrl = jackettUrl.replace(/\/$/, '');
+    const reqUrl = `${cleanUrl}/api/v2.0/indexers/all/results?apikey=${encodeURIComponent(
+      apiKey
+    )}&Query=${encodeURIComponent(searchStr)}`;
+
+    const res = await axios.get(reqUrl, {
+      timeout: 7000,
+      validateStatus: (s) => s >= 200 && s < 300,
+    });
+    const results = Array.isArray(res.data?.Results) ? res.data.Results : [];
+
+    return results
+      .map((item: any, i: number) =>
+        this.normalizeRelease(
+          `jackett-${i}`,
+          item.Title || searchStr,
+          item.MagnetUri || item.Link || '',
+          item.Size || 4 * 1024 * 1024 * 1024,
+          item.Seeders || 0,
+          item.Peers || 0,
+          item.Tracker || 'Jackett'
+        )
+      )
+      .filter((r: TorrentRelease) => r.magnet.startsWith('magnet:'));
+  }
+
+  // ═══════════════════════════════════════════════════════
+  //  RuTracker.org — HTML scraper
+  // ═══════════════════════════════════════════════════════
+  private async scrapeRuTracker(query: string, year?: string): Promise<TorrentRelease[]> {
+    const searchStr = year ? `${query} ${year}` : query;
+    // Try multiple RuTracker mirrors
+    const mirrors = [
+      `https://rutracker.org/forum/tracker.php?nm=${encodeURIComponent(searchStr)}`,
+      `https://rutracker.net/forum/tracker.php?nm=${encodeURIComponent(searchStr)}`,
+    ];
+
+    let html = '';
+    let lastErr: unknown;
+
+    for (const url of mirrors) {
+      try {
+        const response = await axios.get(url, {
+          timeout: 7000,
+          validateStatus: (s) => s >= 200 && s < 300,
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml',
+            'Accept-Language': 'ru-RU,ru;q=0.9',
+          },
+          maxRedirects: 2,
+        });
+        html = response.data;
+        break;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    if (!html) {
+      if (lastErr) throw lastErr;
+      return [];
+    }
+
+    const $ = cheerio.load(html);
+    const releases: TorrentRelease[] = [];
+
+    // RuTracker uses <tr> rows with class "tCenter" or similar
+    $('tr.hl-tr, tr:has(a[href^="magnet:"])').each((i, el) => {
+      const cells = $(el).find('td');
+      if (cells.length < 5) return;
+
+      const titleCell = $(cells).eq(1); // Usually 2nd column
+      const titleLink = titleCell.find('a[href*="viewtopic"]');
+      const titleText = titleLink.text().trim();
+
+      // Magnet link — may be in the row or on detail page
+      const magnetLink =
+        $(el).find('a[href^="magnet:"]').attr('href') ||
+        $(el).find('a.dl-link').attr('href') ||
+        '';
+
+      if (!titleText) return;
+
+      // Size column
+      const sizeText = $(cells).eq(4).text().trim() || '0 GB';
+      // Seeds column
+      const seedText = $(cells).eq(5).text().trim() || '0';
+      // Leeches column
+      const leechText = $(cells).eq(6).text().trim() || '0';
+
+      // Generate magnet from topic ID if not available
+      let magnet = magnetLink;
+      if (!magnet || !magnet.startsWith('magnet:')) {
+        const topicMatch = (titleLink.attr('href') || '').match(/t=(\d+)/);
+        if (topicMatch) {
+          const topicId = topicMatch[1];
+          // Construct info hash placeholder — real hash requires auth
+          magnet = `magnet:?xt=urn:btih:${'0'.repeat(40)}&dn=${encodeURIComponent(titleText)}&tr=udp://opentor.net:6969`;
+        } else {
+          magnet = `magnet:?xt=urn:btih:${'0'.repeat(40)}&dn=${encodeURIComponent(titleText)}`;
+        }
+      }
+
+      const seeders = parseInt(seedText, 10) || 0;
+      const leechers = parseInt(leechText, 10) || 0;
+
+      releases.push(
+        this.normalizeRelease(
+          `rutracker-${i}-${Date.now()}`,
+          titleText,
+          magnet,
+          this.parseSizeBytes(sizeText),
+          seeders,
+          leechers,
+          'RuTracker.org'
+        )
+      );
+    });
+
+    // If no magnet rows found, try generic table rows
+    if (releases.length === 0) {
+      $('table.forum tr').each((i, el) => {
+        if (i === 0) return;
+        const cells = $(el).find('td');
+        if (cells.length < 4) return;
+
+        const titleEl = $(cells).eq(1).find('a').first();
+        const titleText = titleEl.text().trim();
+        if (!titleText || titleText.length < 3) return;
+
+        const sizeText = $(cells).eq(cells.length - 2).text().trim();
+        const seedText = $(cells).last().text().trim();
+        const seedMatch = seedText.match(/(\d+)/);
+        const seeders = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+
+        releases.push(
+          this.normalizeRelease(
+            `rutracker-gen-${i}-${Date.now()}`,
+            titleText,
+            `magnet:?xt=urn:btih:${'0'.repeat(40)}&dn=${encodeURIComponent(titleText)}`,
+            this.parseSizeBytes(sizeText),
+            seeders,
+            0,
+            'RuTracker.org'
+          )
+        );
+      });
+    }
+
+    return releases;
+  }
+
+  // ═══════════════════════════════════════════════════════
+  //  VK Video — direct stream lookup
+  // ═══════════════════════════════════════════════════════
+  private async queryVKVideo(query: string, year?: string): Promise<TorrentRelease[]> {
+    const searchStr = year ? `${query} ${year}` : query;
+
+    try {
+      // VK Video search API (public endpoint)
+      const apiUrl = `https://api.vk.com/method/video.search?q=${encodeURIComponent(searchStr)}&sort=2&hd=1&adult=0&count=10&v=5.199&access_token=anonymous`;
+      const response = await axios.get(apiUrl, {
+        timeout: 5000,
+        validateStatus: (s) => s >= 200 && s < 300,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+          'Accept-Language': 'ru-RU,ru;q=0.9',
+        },
+      });
+
+      const data = response.data;
+      const items = data?.response?.items || [];
+
+      return items.map((item: any, i: number) => {
+        const title = `${item.title || searchStr} [VK Video]`;
+        const duration = item.duration || 5400;
+        // Estimate video size based on duration and assumed bitrate
+        const estimatedBytes = duration * 250 * 1024; // ~2 Mbps
+        const qualityStr = item.width >= 1920 ? '1080p' : item.width >= 1280 ? '720p' : 'SD';
+
+        // Create a direct stream URL-style magnet
+        const playerUrl = item.player || `https://vk.com/video${item.owner_id}_${item.id}`;
+        const magnet = `magnet:?xt=urn:btih:${'0'.repeat(40)}&dn=${encodeURIComponent(title)}&tr=${encodeURIComponent(playerUrl)}`;
+
+        return this.normalizeRelease(
+          `vkvideo-${item.id || i}`,
+          title,
+          magnet,
+          estimatedBytes,
+          item.views ? Math.min(Math.floor(item.views / 100), 999) : 25,
+          5,
+          'VK Video Direct'
+        );
+      });
+    } catch (err: any) {
+      // VK Video API may be rate-limited or blocked — return empty gracefully
+      console.warn(`[Scraper] VK Video:`, this.formatAxiosError(err));
+      return [];
+    }
+  }
+
+  private normalizeRelease(
+    id: string,
+    title: string,
+    magnet: string,
+    sizeBytes: number,
+    seeders: number,
+    leechers: number,
+    source: string
+  ): TorrentRelease {
+    const quality = this.detectQuality(title);
+    const tags = this.detectTags(title);
+    const dubbing = this.detectDubbing(title);
+    const videoCodec = this.detectVideoCodec(title);
+    const audioCodec = this.detectAudioCodec(title);
+
+    const safeBytes = Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : 4 * 1024 * 1024 * 1024;
+    const safeSeeders = Math.max(0, Number.isFinite(seeders) ? seeders : 0);
+    const safeLeechers = Math.max(0, Number.isFinite(leechers) ? leechers : 0);
+
+    // ~110 min default runtime; guard division by zero
+    const durationSeconds = 110 * 60;
+    const requiredMbps =
+      Math.round(((safeBytes * 8) / durationSeconds / (1024 * 1024)) * 10) / 10;
+
+    // Stability Score 0–100: seed supply vs bitrate demand
+    const seedFactor = Math.min(100, Math.max(0, safeSeeders * 4));
+    const bitrateFactor = Math.min(100, Math.max(10, 100 - requiredMbps * 1.5));
+    const stabilityScore = Math.min(
+      100,
+      Math.max(0, Math.round(seedFactor * 0.6 + bitrateFactor * 0.4))
+    );
+
+    let stabilityLabel: 'Отличная' | 'Хорошая' | 'Умеренная' | 'Низкий битрэйт' = 'Умеренная';
+    if (stabilityScore >= 80) stabilityLabel = 'Отличная';
+    else if (stabilityScore >= 55) stabilityLabel = 'Хорошая';
+    else if (requiredMbps > 65) stabilityLabel = 'Низкий битрэйт';
+
+    return {
+      id,
+      title,
+      quality,
+      tags,
+      dubbing,
+      size: this.formatSizeBytes(safeBytes),
+      sizeBytes: safeBytes,
+      seeders: safeSeeders,
+      leechers: safeLeechers,
+      magnet,
+      source,
+      videoCodec,
+      audioCodec,
+      stabilityScore,
+      stabilityLabel,
+      requiredMbps,
+    };
+  }
+
+  private detectDubbing(title: string): DubbingType {
+    const t = title.toLowerCase();
+    if (/дубляж|\bdub\b|лицензия|\bitunes\b/.test(t)) return 'Дубляж';
+    if (/\brhs\b|red head sound/.test(t)) return 'RHS';
+    if (/hdrezka|\brezka\b/.test(t)) return 'HDRezka';
+    if (/lostfilm/.test(t)) return 'LostFilm';
+    if (/tvshows/.test(t)) return 'TVShows';
+    if (/кубик в кубе|\bkubik\b/.test(t)) return 'Кубик в Кубе';
+    if (/оригинал|\bsubtitles?\b|\benglish\b/.test(t)) return 'Оригинал + Субтитры';
+    return 'Прочее';
+  }
+
+  /** Word-boundary quality detection — avoid bare "hd" matching HDR / HDRezka. */
+  private detectQuality(title: string): '4K' | '1080p' | '720p' | 'SD' {
+    const t = title.toLowerCase();
+    if (/\b2160p\b|\b4k\b|\buhd\b|\b3840\s*[x×]\s*2160\b/.test(t)) return '4K';
+    if (/\b1080p\b|\b1080i\b|\bfull.?hd\b|\b1920\s*[x×]\s*1080\b/.test(t)) return '1080p';
+    if (/\b720p\b|\b1280\s*[x×]\s*720\b/.test(t)) return '720p';
+    return 'SD';
+  }
+
+  private detectTags(title: string): string[] {
+    const t = title.toLowerCase();
+    const tags: string[] = [];
+    if (/dolby.?vision|\bdv\b/.test(t)) tags.push('Dolby Vision');
+    if (/hdr10\+/.test(t)) tags.push('HDR10+');
+    else if (/\bhdr10\b|\bhdr\b/.test(t)) tags.push('HDR');
+    if (/\bremux\b/.test(t)) tags.push('REMUX');
+    if (/web-?dl/.test(t)) tags.push('WEB-DL');
+    if (/bdrip|blu-?ray/.test(t)) tags.push('BDRip');
+    return tags;
+  }
+
+  private detectVideoCodec(title: string): 'H.264' | 'HEVC' | 'AV1' | 'Unknown' {
+    const t = title.toLowerCase();
+    if (/\bav1\b/.test(t)) return 'AV1';
+    if (/\bhevc\b|\bx265\b|\bh\.?265\b/.test(t)) return 'HEVC';
+    if (/\bx264\b|\bh\.?264\b|\bavc\b/.test(t)) return 'H.264';
+    return 'Unknown';
+  }
+
+  private detectAudioCodec(title: string): 'AAC' | 'AC3' | 'EAC3' | 'DTS' | 'TrueHD' | 'Unknown' {
+    const t = title.toLowerCase();
+    if (/truehd|\batmos\b/.test(t)) return 'TrueHD';
+    if (/\bdts\b/.test(t)) return 'DTS';
+    if (/\beac3\b|\bdd\+/.test(t)) return 'EAC3';
+    if (/\bac3\b|\bdd5\.1\b/.test(t)) return 'AC3';
+    if (/\baac\b/.test(t)) return 'AAC';
+    return 'Unknown';
+  }
+
+  private parseSizeBytes(sizeStr: string): number {
+    const match = sizeStr.match(/([\d.]+)\s*(GB|MB|KB|TB|ГБ|МБ|КБ|ТБ)/i);
+    if (!match) return 4 * 1024 * 1024 * 1024;
+    const val = parseFloat(match[1]);
+    if (!Number.isFinite(val) || val < 0) return 4 * 1024 * 1024 * 1024;
+    const unit = match[2].toUpperCase();
+    if (unit.startsWith('T') || unit.startsWith('Т')) return val * 1024 * 1024 * 1024 * 1024;
+    if (unit.startsWith('G') || unit.startsWith('Г')) return val * 1024 * 1024 * 1024;
+    if (unit.startsWith('M') || unit.startsWith('М')) return val * 1024 * 1024;
+    return val * 1024;
+  }
+
+  private formatSizeBytes(bytes: number): string {
+    const gb = bytes / (1024 * 1024 * 1024);
+    if (gb >= 1) return `${gb.toFixed(2)} GB`;
+    const mb = bytes / (1024 * 1024);
+    return `${mb.toFixed(0)} MB`;
+  }
+
+  private generateFallbackReleases(query: string, year?: string): TorrentRelease[] {
+    const qStr = year ? `${query} (${year})` : query;
+    return [
+      this.normalizeRelease(
+        'fallback-4k-1',
+        `${qStr} [2160p 4K UHD] [Dolby Vision & HDR10+] [REMUX] [HEVC x265] [Дубляж RHS 5.1 + Eng]`,
+        `magnet:?xt=urn:btih:e2467cbf021192c241367b892230dc5037d89001&dn=${encodeURIComponent(qStr)}+4K`,
+        24.8 * 1024 * 1024 * 1024,
+        185,
+        14,
+        'JacRed Aggregator (Demo)'
+      ),
+      this.normalizeRelease(
+        'fallback-1080p-1',
+        `${qStr} [1080p FullHD] [WEB-DL] [x264] [Озвучка HDRezka Studio] [AC3 5.1]`,
+        `magnet:?xt=urn:btih:08da7015a846347d46922970f5b73015db5e9da6&dn=${encodeURIComponent(qStr)}+1080p`,
+        7.2 * 1024 * 1024 * 1024,
+        340,
+        22,
+        'Rutor Tracker (Demo)'
+      ),
+      this.normalizeRelease(
+        'fallback-1080p-2',
+        `${qStr} [1080p] [BDRip] [Дубляж Лицензия] [H.264] [AAC]`,
+        `magnet:?xt=urn:btih:a1b2c3d4e5f60718293a4b5c6d7e8f901234abcd&dn=${encodeURIComponent(qStr)}+Dub`,
+        4.5 * 1024 * 1024 * 1024,
+        210,
+        8,
+        'Torrentio Network (Demo)'
+      ),
+      this.normalizeRelease(
+        'fallback-720p-1',
+        `${qStr} [720p HD] [WEB-DL] [Озвучка LostFilm]`,
+        `magnet:?xt=urn:btih:b2c3d4e5f60718293a4b5c6d7e8f901234abcdef&dn=${encodeURIComponent(qStr)}+720p`,
+        2.2 * 1024 * 1024 * 1024,
+        98,
+        4,
+        'Rutor Tracker (Demo)'
+      ),
+    ];
+  }
+}
