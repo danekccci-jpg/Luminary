@@ -4,6 +4,7 @@ export interface ElectronAPI {
   getTorrServerStatus: () => Promise<any>;
   startTorrServer: () => Promise<any>;
   stopTorrServer: () => Promise<any>;
+  restartTorrServer: () => Promise<any>;
   configureTorrServer: (ramCacheMB: number) => Promise<any>;
   /** Push-подписка на изменения статуса TorrServer из Main Process. Возвращает unsubscribe. */
   onTorrServerStatusChanged: (callback: (status: any) => void) => () => void;
@@ -46,6 +47,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTorrServerStatus: () => ipcRenderer.invoke('torrserver:status'),
   startTorrServer: () => ipcRenderer.invoke('torrserver:start'),
   stopTorrServer: () => ipcRenderer.invoke('torrserver:stop'),
+  restartTorrServer: () => ipcRenderer.invoke('torrserver:restart'),
   onTorrServerStatusChanged: (callback: (status: any) => void) => {
     const listener = (_event: unknown, status: any) => callback(status);
     ipcRenderer.on('torrserver-status-changed', listener);

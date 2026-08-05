@@ -247,6 +247,20 @@ function setupIPC() {
     return { running: false };
   });
 
+  // Полный рестарт сервера (stop + start) — самолечение зависшего BT-клиента
+  ipcMain.handle('torrserver:restart', async () => {
+    notifyTorrServerStatus({ running: false, starting: true, port: 8090 });
+    await torrServer.stopServer().catch(() => {});
+    const status = await torrServer.startServer();
+    notifyTorrServerStatus({
+      running: status.running,
+      starting: !status.running && torrServer.isStarting(),
+      port: 8090,
+      error: status.error,
+    });
+    return status;
+  });
+
   ipcMain.handle('torrserver:configure', async (_, ramCacheMB: number) => {
     return await torrServer.configureServer(ramCacheMB);
   });

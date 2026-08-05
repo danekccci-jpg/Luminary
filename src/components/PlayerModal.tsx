@@ -4,7 +4,7 @@ import {
   Maximize, Minimize, Zap, Users,
   AlertTriangle, SkipBack, SkipForward,
   SlidersHorizontal, Sun, Contrast, Palette, Monitor,
-  ExternalLink, Loader2,
+  ExternalLink, Loader2, MonitorPlay, RotateCcw, PictureInPicture2, Gauge, Subtitles, AudioLines,
 } from 'lucide-react';
 import { TorrServerStats } from '../types';
 import { torrServerService } from '../services/torrserver';
@@ -18,6 +18,10 @@ interface PlayerModalProps {
   audioCodec?: string;
   videoCodec?: string;
   transcodeAudioToAac?: boolean;
+  /** Сохранение прогресса просмотра (история) при закрытии/завершении. */
+  onProgressSave?: (current: number, duration: number) => void;
+  /** Возобновить просмотр с этого таймкода (из истории). */
+  startPosition?: number;
   onClose: () => void;
 }
 
@@ -32,7 +36,7 @@ interface VideoFilters {
   contrast: number;    // 0.5 – 1.5 (default 1)
   saturation: number;  // 0.0 – 2.0 (default 1)
   grayscale: boolean;
-  aspectRatio: '16:9' | '21:9' | 'fill' | 'fit';
+  aspectRatio: 'contain' | 'cover' | 'fill' | '16:9' | '21:9' | '4:3';
 }
 
 const DEFAULT_FILTERS: VideoFilters = {
@@ -40,7 +44,7 @@ const DEFAULT_FILTERS: VideoFilters = {
   contrast: 1,
   saturation: 1,
   grayscale: false,
-  aspectRatio: 'fit',
+  aspectRatio: 'contain',
 };
 
 const FILTER_STORAGE_KEY = 'luminary_video_filters';
@@ -50,7 +54,8 @@ function loadSavedFilters(): VideoFilters {
     const raw = localStorage.getItem(FILTER_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      return { ...DEFAULT_FILTERS, ...parsed };
+      const asp = parsed.aspectRatio === 'fit' ? 'contain' : parsed.aspectRatio === 'fill' ? 'cover' : parsed.aspectRatio;
+      return { ...DEFAULT_FILTERS, ...parsed, aspectRatio: asp };
     }
   } catch { /* ignore */ }
   return { ...DEFAULT_FILTERS };
@@ -262,7 +267,7 @@ const NeonRingSpinner: React.FC<{ percent: number }> = ({ percent: raw }) => {
 };
 
 export const PlayerModal: React.FC<PlayerModalProps> = ({
-  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, onClose,
+  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, onProgressSave, startPosition, onClose,
 }) => {
   const videoRef     = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -297,6 +302,30 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const [filters, setFilters]       = useState<VideoFilters>(loadSavedFilters);
   const [showFilters, setShowFilters] = useState(false);
 
+  // ── Новые возможности плеера ──
+  const [volumeHud, setVolumeHud]   = useState<number | null>(null); // всплывающий индикатор громкости
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [audioTracks, setAudioTracks]   = useState<Array<{ index: number; label: string }>>([]);
+  const [activeAudioTrack, setActiveAudioTrack] = useState(-1);
+  const [isPip, setIsPip]           = useState(false);
+  const [isEnded, setIsEnded]       = useState(false);
+  const [scrubHover, setScrubHover] = useState<{ x: number; time: number } | null>(null);
+  // Настройки субтитров (применяются к <track>, если поток их содержит)
+  const [subs, setSubs] = useState({
+    enabled: true,
+    size: 100,        // % от стандартного
+    color: '#FFFFFF',
+    bgOpacity: 0.6,   // 0..1
+    delay: 0,         // сек, +позже / −раньше
+  });
+  const volumeHudTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const showVolumeHud = (v: number) => {
+    setVolumeHud(v);
+    if (volumeHudTimer.current) clearTimeout(volumeHudTimer.current);
+    volumeHudTimer.current = setTimeout(() => setVolumeHud(null), 1200);
+  };
+
   // Persist filters to localStorage on change
   useEffect(() => {
     saveFilters(filters);
@@ -315,12 +344,149 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   // Map aspectRatio to object-fit
   const objectFitStyle: React.CSSProperties = (() => {
     switch (filters.aspectRatio) {
-      case 'fill':  return { objectFit: 'cover' };
+      case 'cover': return { objectFit: 'cover' };
+      case 'fill':  return { objectFit: 'fill' };
       case '16:9':  return { objectFit: 'contain', aspectRatio: '16/9' };
       case '21:9':  return { objectFit: 'contain', aspectRatio: '21/9' };
+      case '4:3':   return { objectFit: 'contain', aspectRatio: '4/3' };
       default:      return { objectFit: 'contain' };
     }
   })();
+
+  // Скорость воспроизведения → video.playbackRate
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.playbackRate = playbackRate;
+  }, [playbackRate]);
+
+  // Применение настроек субтитров к <track>-элементам видео
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const tracks = Array.from(video.textTracks || []);
+    for (const tr of tracks) {
+      tr.mode = subs.enabled ? 'showing' : 'hidden';
+    }
+    // Стилизация через CSS-переменные на видео (WebVTT ку-стили не поддерживаются
+    // нативно, поэтому применяем глобальные стили cue)
+    video.style.setProperty('--sub-size', `${subs.size}%`);
+    video.style.setProperty('--sub-color', subs.color);
+    video.style.setProperty('--sub-bg-opacity', String(subs.bgOpacity));
+  }, [subs]);
+
+  // Глобальные стили cue (WebVTT): размер/цвет/фон через ::cue
+  useEffect(() => {
+    const styleId = 'luminary-cue-styles';
+    let styleEl = document.getElementById(styleId) as HTMLStyleElement | null;
+    if (!styleEl) {
+      styleEl = document.createElement('style');
+      styleEl.id = styleId;
+      document.head.appendChild(styleEl);
+    }
+    styleEl.textContent = `
+      video::cue {
+        font-size: var(--sub-size, 100%) !important;
+        color: var(--sub-color, #fff) !important;
+        background: rgba(0,0,0,var(--sub-bg-opacity, 0.6)) !important;
+      }`;
+  }, []);
+
+  // Сбор аудио-дорожек из video.audioTracks (multitrack hls/mkv)
+  const collectAudioTracks = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    const list = (video as any).audioTracks as
+      | { length: number; [i: number]: { enabled: boolean; label?: string; language?: string; id?: string } }
+      | undefined;
+    if (!list || list.length === 0) return;
+    const arr: Array<{ index: number; label: string }> = [];
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      arr.push({ index: i, label: (t.label || t.language || `Дорожка ${i + 1}`).trim() || `Дорожка ${i + 1}` });
+    }
+    setAudioTracks(arr);
+    let active = 0;
+    for (let i = 0; i < list.length; i++) { if (list[i].enabled) { active = i; break; } }
+    setActiveAudioTrack(active);
+  };
+
+  const selectAudioTrack = (index: number) => {
+    const video = videoRef.current;
+    const list = (video as any)?.audioTracks as { length: number; [i: number]: { enabled: boolean; label?: string } } | undefined;
+    if (!list || index < 0 || index >= list.length) return;
+    for (let i = 0; i < list.length; i++) list[i].enabled = i === index;
+    setActiveAudioTrack(index);
+    setAudioTrackLabel(list[index].label || `Дорожка ${index + 1}`);
+    setShowControls(true);
+  };
+
+  // Клавиатурное управление
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isBuffering || errorMsg || codecError) return;
+      const target = e.target as HTMLElement;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+      switch (e.key) {
+        case 'ArrowUp':
+          e.preventDefault();
+          setVolumeLevel(Math.min(1, volume + 0.05));
+          showVolumeHud(Math.round(Math.min(1, volume + 0.05) * 100));
+          break;
+        case 'ArrowDown':
+          e.preventDefault();
+          setVolumeLevel(Math.max(0, volume - 0.05));
+          showVolumeHud(Math.round(Math.max(0, volume - 0.05) * 100));
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          skipSeconds(-10);
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          skipSeconds(10);
+          break;
+        case ' ':
+          e.preventDefault();
+          togglePlay();
+          break;
+        case 'f':
+        case 'F':
+          e.preventDefault();
+          toggleFullscreen();
+          break;
+        case 'm':
+        case 'M':
+          e.preventDefault();
+          toggleMute();
+          break;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isBuffering, errorMsg, codecError, volume, isPlaying, duration]);
+
+  // Picture-in-Picture
+  const togglePip = async () => {
+    const video = videoRef.current;
+    if (!video) return;
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setIsPip(false);
+      } else {
+        await (video as any).requestPictureInPicture?.();
+        setIsPip(true);
+      }
+    } catch (err: any) {
+      console.warn('[Player] PiP error:', err?.message);
+      toastBus.push('Picture-in-Picture недоступен', 'error');
+    }
+  };
+  useEffect(() => {
+    const onLeave = () => setIsPip(false);
+    document.addEventListener('leavepictureinpicture', onLeave);
+    return () => document.removeEventListener('leavepictureinpicture', onLeave);
+  }, []);
 
   const resetFilters = () => {
     setFilters({ ...DEFAULT_FILTERS });
@@ -432,23 +598,33 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
           }
         }
 
-        const addRes = await (async (): Promise<any> => {
-          // Ретрай добавления: /echo отвечает сразу, но внутренний BT-клиент
-          // TorrServer инициализируется ~20-30 сек после старта. В это время
-          // add возвращает 500 «BT client not connected» — повторяем с паузой.
-          for (let attempt = 0; attempt < 8; attempt++) {
+        // ── Ретрай добавления: /echo отвечает сразу, но внутренний BT-клиент
+        //    TorrServer инициализируется ~20-30 сек после старта. В это время
+        //    add возвращает 500 «BT client not connected» — повторяем с паузой.
+        const addWithRetry = async (attempts: number, retryDelayMs: number): Promise<any> => {
+          for (let attempt = 0; attempt < attempts; attempt++) {
             const res = await torrServerService.addMagnet(magnet, title, poster);
             if (res.success || res.data) return res;
             const errText = String(res.error || '');
             const isBtNotReady = /BT client not connected|500|TorrServer API returned/i.test(errText);
             if (!isBtNotReady) return res; // другие ошибки — не ретраим
-            if (!cancelled && attempt < 7) {
-              console.warn(`[Player] TorrServer BT client not ready (attempt ${attempt + 1}) — retrying in 3s`);
-              await new Promise((r) => setTimeout(r, 3000));
+            if (!cancelled && attempt < attempts - 1) {
+              console.warn(`[Player] TorrServer BT client not ready (attempt ${attempt + 1}) — retrying in ${retryDelayMs / 1000}s`);
+              await new Promise((r) => setTimeout(r, retryDelayMs));
             }
           }
-          return { success: false, error: 'TorrServer: BT-клиент не готов' };
-        })();
+          return { success: false, error: 'TorrServer: BT-клиент не готов', btNotReady: true };
+        };
+
+        let addRes = await addWithRetry(6, 3000);
+        if (!addRes.success && !addRes.data && addRes.btNotReady) {
+          // Последний рубеж: BT-клиент завис — полный перезапуск TorrServer
+          // (main-процесс сбрасывает settings.json → чистый старт) и повтор.
+          console.warn('[Player] BT client stuck — restarting TorrServer (self-heal)');
+          await torrServerService.restartServer().catch(() => {});
+          if (!cancelled) await new Promise((r) => setTimeout(r, 25000)); // старт + инициализация клиента
+          addRes = await addWithRetry(6, 3000);
+        }
         if (!addRes.success && !addRes.data) throw new Error(addRes.error || 'Ошибка добавления торрента');
 
         torrentHash = addRes.data?.hash || 'demo-hash-12345';
@@ -687,8 +863,21 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   }, [isBuffering, errorMsg, codecError, streamUrl]);
 
   const handleClose = () => {
+    // Сохранить прогресс в историю (если видео играло)
+    if (onProgressSave && videoRef.current && !isBuffering) {
+      onProgressSave(videoRef.current.currentTime || 0, videoRef.current.duration || 0);
+    }
     if (hash) torrServerService.dropCache(hash);
     onClose();
+  };
+
+  /** Видео завершилось — end-screen (авто-следующее для сериалов в UI каталога). */
+  const handleEnded = () => {
+    if (onProgressSave && videoRef.current) {
+      onProgressSave(videoRef.current.duration || 0, videoRef.current.duration || 0);
+    }
+    setIsEnded(true);
+    setShowControls(true);
   };
 
   const handleTimeUpdate = () => {
@@ -708,6 +897,12 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       setAudioTrackLabel(chosen);
       console.log('[Player] Auto-selected compatible audio track:', chosen);
     }
+    collectAudioTracks();
+    // Возобновление просмотра с сохранённого таймкода
+    if (startPosition && startPosition > 5 && videoRef.current.duration && startPosition < videoRef.current.duration - 10) {
+      videoRef.current.currentTime = startPosition;
+      console.log(`[Player] Resumed from ${startPosition}s`);
+    }
   };
 
   const togglePlay = () => {
@@ -723,6 +918,14 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     const time = ratio * duration;
     videoRef.current.currentTime = Math.max(0, Math.min(duration, time));
     setCurrentTime(time);
+  };
+
+  /** Scrubber: тултип с временем при наведении на прогресс-бар. */
+  const handleScrubHover = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!progressRef.current || !duration) return;
+    const rect = progressRef.current.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setScrubHover({ x: Math.max(0, e.clientX - rect.left), time: ratio * duration });
   };
 
   const handleMouseMove = () => {
@@ -1084,9 +1287,123 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             onPlay={() => setIsPlaying(true)}
             onPause={() => setIsPlaying(false)}
             onTimeUpdate={handleTimeUpdate}
+            onEnded={handleEnded}
             onClick={togglePlay}
             style={{ width: '100%', height: '100%', cursor: showControls ? 'default' : 'none', ...objectFitStyle }}
           />
+
+          {/* ── HUD: всплывающий индикатор громкости ── */}
+          {volumeHud !== null && (
+            <div
+              style={{
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -50%)',
+                zIndex: 55,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '0.5rem',
+                padding: '1rem 1.4rem',
+                borderRadius: '18px',
+                background: 'rgba(10,11,14,0.75)',
+                backdropFilter: 'blur(14px)',
+                WebkitBackdropFilter: 'blur(14px)',
+                border: '1px solid rgba(0,242,254,0.25)',
+                boxShadow: '0 12px 40px rgba(0,0,0,0.6), 0 0 20px rgba(0,242,254,0.08)',
+                animation: 'scaleIn 0.15s cubic-bezier(0.16,1,0.3,1)',
+                pointerEvents: 'none',
+              }}
+            >
+              <span style={{ fontSize: '1.4rem', fontWeight: 900, color: '#fff', lineHeight: 1 }}>
+                {volumeHud}%
+              </span>
+              <div style={{ width: '120px', height: '5px', background: 'rgba(255,255,255,0.15)', borderRadius: '99px', overflow: 'hidden' }}>
+                <div
+                  style={{
+                    width: `${volumeHud}%`,
+                    height: '100%',
+                    background: 'linear-gradient(90deg, #00F2FE, #8A2BE2)',
+                    borderRadius: '99px',
+                    transition: 'width 0.1s ease',
+                  }}
+                />
+              </div>
+              {volumeHud === 0 ? <VolumeX size={18} color="#FF5470" /> : <Volume2 size={18} color="#00F2FE" />}
+            </div>
+          )}
+
+          {/* ── END SCREEN: воспроизведение завершено ── */}
+          {isEnded && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                zIndex: 58,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'rgba(0,0,0,0.88)',
+                backdropFilter: 'blur(10px)',
+                WebkitBackdropFilter: 'blur(10px)',
+                padding: '1.5rem',
+              }}
+            >
+              <div
+                style={{
+                  maxWidth: '420px',
+                  width: '100%',
+                  padding: '2.5rem 2rem',
+                  textAlign: 'center',
+                  background: 'rgba(11,12,17,0.96)',
+                  border: '1px solid rgba(0,242,254,0.25)',
+                  borderRadius: '24px',
+                  boxShadow: '0 24px 80px rgba(0,0,0,0.8)',
+                  animation: 'scaleIn 0.25s cubic-bezier(0.16,1,0.3,1)',
+                }}
+              >
+                <div
+                  style={{
+                    width: '64px',
+                    height: '64px',
+                    borderRadius: '50%',
+                    background: 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(138,43,226,0.2))',
+                    border: '1px solid rgba(0,242,254,0.3)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    margin: '0 auto 1rem',
+                  }}
+                >
+                  <MonitorPlay size={26} style={{ color: '#00F2FE' }} />
+                </div>
+                <h3 style={{ fontWeight: 900, fontSize: '1.15rem', marginBottom: '0.4rem', color: '#fff' }}>
+                  Воспроизведение завершено
+                </h3>
+                <p style={{ fontSize: '0.8rem', color: 'rgba(240,242,248,0.55)', marginBottom: '1.4rem', lineHeight: 1.5 }}>
+                  Прогресс сохранён в историю просмотра.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                  <button
+                    onClick={() => { setIsEnded(false); if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.play(); } }}
+                    className="btn-primary"
+                    style={{ borderRadius: '12px', padding: '0.7rem', fontSize: '0.85rem' }}
+                  >
+                    <RotateCcw size={15} style={{ marginRight: '0.4rem' }} />
+                    Смотреть сначала
+                  </button>
+                  <button
+                    onClick={handleClose}
+                    className="btn-secondary"
+                    style={{ borderRadius: '12px', padding: '0.7rem', fontSize: '0.85rem' }}
+                  >
+                    Закрыть
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* ── CODEC ERROR OVERLAY: неподдерживаемый формат / зависший поток ── */}
           {codecError && (
@@ -1222,6 +1539,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
               <div
                 ref={progressRef}
                 onClick={handleSeek}
+                onMouseMove={handleScrubHover}
+                onMouseLeave={() => setScrubHover(null)}
                 style={{
                   position: 'relative',
                   height: '20px',
@@ -1231,6 +1550,29 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                   marginBottom: '0.6rem',
                 }}
               >
+                {/* Scrubber tooltip: время под курсором */}
+                {scrubHover && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      bottom: '22px',
+                      left: `${scrubHover.x}px`,
+                      transform: 'translateX(-50%)',
+                      padding: '2px 8px',
+                      borderRadius: '8px',
+                      background: 'rgba(10,11,14,0.85)',
+                      border: '1px solid rgba(0,242,254,0.25)',
+                      fontSize: '0.7rem',
+                      fontWeight: 700,
+                      color: '#00F2FE',
+                      pointerEvents: 'none',
+                      whiteSpace: 'nowrap',
+                      zIndex: 5,
+                    }}
+                  >
+                    {formatTime(scrubHover.time)}
+                  </div>
+                )}
                 {/* Track */}
                 <div
                   style={{
@@ -1374,34 +1716,35 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                     background: showFilters ? 'rgba(0,242,254,0.15)' : undefined,
                     border: showFilters ? '1px solid rgba(0,242,254,0.35)' : undefined,
                   }}
-                  title="Фильтры изображения"
+                  title="Настройки и фильтры"
                 >
                   <SlidersHorizontal size={15} style={{ color: showFilters ? 'var(--cyan)' : undefined }} />
+                </button>
+
+                {/* Picture-in-Picture */}
+                <button
+                  onClick={togglePip}
+                  className="btn-icon"
+                  title="Картинка в картинке"
+                  style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '10px',
+                    background: isPip ? 'rgba(0,242,254,0.15)' : undefined,
+                    border: isPip ? '1px solid rgba(0,242,254,0.35)' : undefined,
+                  }}
+                >
+                  <PictureInPicture2 size={15} style={{ color: isPip ? 'var(--cyan)' : undefined }} />
                 </button>
 
                 {/* Fullscreen */}
                 <button
                   onClick={toggleFullscreen}
                   className="btn-icon"
+                  title="Полный экран (F)"
                   style={{ width: '36px', height: '36px', borderRadius: '10px' }}
                 >
                   {isFullscreen ? <Minimize size={15} /> : <Maximize size={15} />}
-                </button>
-
-                {/* External player (VLC / IINA) — fallback для MKV/HEVC/AC3 */}
-                <button
-                  onClick={openExternalPlayer}
-                  className="btn-icon"
-                  title="Открыть во внешнем плеере (VLC / IINA)"
-                  style={{
-                    width: '36px',
-                    height: '36px',
-                    borderRadius: '10px',
-                    background: codecRisk.risky ? 'rgba(255,184,0,0.12)' : undefined,
-                    border: codecRisk.risky ? '1px solid rgba(255,184,0,0.35)' : undefined,
-                  }}
-                >
-                  <ExternalLink size={15} style={{ color: codecRisk.risky ? '#FFB800' : undefined }} />
                 </button>
               </div>
 
@@ -1419,7 +1762,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                     border: '1px solid rgba(0,242,254,0.2)',
                     borderRadius: '18px',
                     padding: '1.2rem 1.3rem',
-                    width: '280px',
+                    width: '320px',
                     boxShadow: '0 8px 40px rgba(0,0,0,0.8), 0 0 20px rgba(0,242,254,0.08)',
                     animation: 'scaleIn 0.2s cubic-bezier(0.16,1,0.3,1)',
                     display: 'flex',
@@ -1513,18 +1856,20 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                     </button>
                   </div>
 
-                  {/* Aspect Ratio */}
+                  {/* Aspect Ratio / Scaling */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
                       <Maximize size={13} style={{ color: 'var(--text-muted)' }} />
-                      <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Формат</span>
+                      <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Масштаб</span>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.35rem' }}>
                       {([
-                        { key: 'fit',  label: 'Fit' },
-                        { key: '16:9', label: '16:9' },
-                        { key: '21:9', label: '21:9 UW' },
-                        { key: 'fill', label: 'Fill' },
+                        { key: 'contain', label: 'По экрану' },
+                        { key: 'cover',   label: 'Заполнить' },
+                        { key: 'fill',    label: 'Растянуть' },
+                        { key: '16:9',    label: '16:9' },
+                        { key: '21:9',    label: '21:9 UW' },
+                        { key: '4:3',     label: '4:3' },
                       ] as const).map(({ key, label }) => (
                         <button
                           key={key}
@@ -1535,7 +1880,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                             border: `1px solid ${filters.aspectRatio === key ? 'rgba(0,242,254,0.4)' : 'rgba(255,255,255,0.08)'}`,
                             background: filters.aspectRatio === key ? 'rgba(0,242,254,0.12)' : 'rgba(255,255,255,0.03)',
                             color: filters.aspectRatio === key ? 'var(--cyan)' : 'var(--text-muted)',
-                            fontSize: '0.7rem',
+                            fontSize: '0.68rem',
                             fontWeight: 700,
                             fontFamily: 'inherit',
                             cursor: 'pointer',
@@ -1546,6 +1891,165 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                           {label}
                         </button>
                       ))}
+                    </div>
+                  </div>
+
+                  {/* Скорость воспроизведения */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                      <Gauge size={13} style={{ color: 'var(--text-muted)' }} />
+                      <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Скорость</span>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.3rem' }}>
+                      {[0.5, 1, 1.25, 1.5, 2].map((r) => (
+                        <button
+                          key={r}
+                          onClick={() => setPlaybackRate(r)}
+                          style={{
+                            padding: '0.35rem 0.1rem',
+                            borderRadius: '8px',
+                            border: `1px solid ${playbackRate === r ? 'rgba(0,242,254,0.4)' : 'rgba(255,255,255,0.08)'}`,
+                            background: playbackRate === r ? 'rgba(0,242,254,0.12)' : 'rgba(255,255,255,0.03)',
+                            color: playbackRate === r ? 'var(--cyan)' : 'var(--text-muted)',
+                            fontSize: '0.68rem',
+                            fontWeight: 700,
+                            fontFamily: 'inherit',
+                            cursor: 'pointer',
+                            textAlign: 'center',
+                          }}
+                        >
+                          {r}x
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Аудио-дорожки (мульти-аудио hls/mkv) */}
+                  {audioTracks.length > 1 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                        <AudioLines size={13} style={{ color: 'var(--text-muted)' }} />
+                        <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Аудио / Озвучка</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
+                        {audioTracks.map((t) => (
+                          <button
+                            key={t.index}
+                            onClick={() => selectAudioTrack(t.index)}
+                            style={{
+                              padding: '0.32rem 0.6rem',
+                              borderRadius: '8px',
+                              border: `1px solid ${activeAudioTrack === t.index ? 'rgba(138,43,226,0.5)' : 'rgba(255,255,255,0.08)'}`,
+                              background: activeAudioTrack === t.index ? 'rgba(138,43,226,0.15)' : 'rgba(255,255,255,0.03)',
+                              color: activeAudioTrack === t.index ? '#B57BFF' : 'var(--text-muted)',
+                              fontSize: '0.68rem',
+                              fontWeight: 700,
+                              fontFamily: 'inherit',
+                              cursor: 'pointer',
+                              maxWidth: '130px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {t.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Субтитры */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                        <Subtitles size={13} style={{ color: 'var(--text-muted)' }} />
+                        <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Субтитры</span>
+                      </div>
+                      <button
+                        onClick={() => setSubs(s => ({ ...s, enabled: !s.enabled }))}
+                        style={{
+                          padding: '2px 10px',
+                          borderRadius: '999px',
+                          border: `1px solid ${subs.enabled ? 'rgba(0,242,254,0.4)' : 'rgba(255,255,255,0.1)'}`,
+                          background: subs.enabled ? 'rgba(0,242,254,0.12)' : 'rgba(255,255,255,0.03)',
+                          color: subs.enabled ? 'var(--cyan)' : 'var(--text-muted)',
+                          fontSize: '0.66rem',
+                          fontWeight: 800,
+                          fontFamily: 'inherit',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {subs.enabled ? 'Вкл' : 'Выкл'}
+                      </button>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+                      {/* Размер */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '0.64rem', color: 'var(--text-muted)', minWidth: '56px' }}>Размер</span>
+                        <div style={{ flex: 1, display: 'flex', gap: '0.25rem' }}>
+                          {[80, 100, 130, 160].map((sz) => (
+                            <button
+                              key={sz}
+                              onClick={() => setSubs(s => ({ ...s, size: sz }))}
+                              style={{
+                                flex: 1,
+                                padding: '0.25rem 0',
+                                borderRadius: '6px',
+                                border: `1px solid ${subs.size === sz ? 'rgba(0,242,254,0.4)' : 'rgba(255,255,255,0.08)'}`,
+                                background: subs.size === sz ? 'rgba(0,242,254,0.12)' : 'transparent',
+                                color: subs.size === sz ? 'var(--cyan)' : 'var(--text-muted)',
+                                fontSize: '0.62rem',
+                                fontWeight: 700,
+                                fontFamily: 'inherit',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {sz === 100 ? '100%' : `${sz}%`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      {/* Цвет */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '0.64rem', color: 'var(--text-muted)', minWidth: '56px' }}>Цвет</span>
+                        <div style={{ display: 'flex', gap: '0.3rem' }}>
+                          {['#FFFFFF', '#FFB800', '#00F2FE', '#10F5AC', '#FF5470'].map((c) => (
+                            <button
+                              key={c}
+                              onClick={() => setSubs(s => ({ ...s, color: c }))}
+                              title={c}
+                              style={{
+                                width: '18px',
+                                height: '18px',
+                                borderRadius: '50%',
+                                background: c,
+                                border: `2px solid ${subs.color === c ? 'rgba(0,242,254,0.8)' : 'rgba(255,255,255,0.15)'}`,
+                                cursor: 'pointer',
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                      {/* Задержка синхронизации */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '0.64rem', color: 'var(--text-muted)', minWidth: '56px' }}>Задержка</span>
+                        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                          <button
+                            onClick={() => setSubs(s => ({ ...s, delay: Math.max(-30, s.delay - 0.5) }))}
+                            className="btn-icon"
+                            style={{ width: '26px', height: '26px', borderRadius: '8px', fontSize: '0.8rem' }}
+                          >−</button>
+                          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-primary)', minWidth: '52px', textAlign: 'center' }}>
+                            {subs.delay === 0 ? '0с' : `${subs.delay > 0 ? '+' : ''}${subs.delay}с`}
+                          </span>
+                          <button
+                            onClick={() => setSubs(s => ({ ...s, delay: Math.min(30, s.delay + 0.5) }))}
+                            className="btn-icon"
+                            style={{ width: '26px', height: '26px', borderRadius: '8px', fontSize: '0.8rem' }}
+                          >+</button>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>

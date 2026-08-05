@@ -275,6 +275,15 @@ export class TorrServerManager {
       return;
     }
 
+    // 2.5) BT-клиент не инициализировался / таймаут метаданных → полный
+    //    перезапуск сервера. Возникает при старте с сохранённым в settings.json
+    //    PeersListenPort или после зависания клиента; рестарт со сбросом
+    //    настроек лечит. Cooldown/лимит защищают от лавины перезапусков.
+    if (/bt client not connected|timeout connection get torrent info/i.test(lower)) {
+      this.scheduleRestart('bt-client-not-ready');
+      return;
+    }
+
     // 3) P2P / DHT / UPnP / NAT-PMP сбои → сброс сетевых настроек
     if (/dht.*0 nodes|dht.*no nodes|upnp.*error|nat.?pmp.*fail|upnp.*fail|port mapping.*fail/i.test(lower)) {
       this.applyNetworkSettings();
@@ -470,6 +479,23 @@ export class TorrServerManager {
         /* порт свободен — ок */
       }
 
+      // ── Сброс настроек TorrServer (BT-клиент fix) ──
+      // Сохранённый в settings.json PeersListenPort=43211 применяется сервером
+      // СРАЗУ при старте и ломает инициализацию BT-клиента
+      // («BT client not connected» → 500 на add). Удаляем файл настроек —
+      // сервер пересоздаст дефолтный (порт random autoselect 0), а полная
+      // конфигурация (включая порт 43211) применяется нами через API
+      // после инициализации клиента.
+      try {
+        const settingsFile = path.join(this.dataDir, 'settings.json');
+        if (fs.existsSync(settingsFile)) {
+          fs.unlinkSync(settingsFile);
+          console.log('[TorrServer] Reset settings.json (stale PeersListenPort cleared)');
+        }
+      } catch {
+        /* файла может не быть — ок */
+      }
+
       // Explicitly re-assert exec permissions right before spawn (macOS/Linux)
       this.ensureExecutable(binPath);
       console.log('[TorrServer] Exec permissions enforced (chmod 755)');
@@ -618,6 +644,10 @@ export class TorrServerManager {
         DisableUTP: false,                  // uTP (за NAT)
         DisableTCP: false,
         EnableIPv6: false,
+        // Настройки НЕ пишем в settings.json: сохранённый PeersListenPort
+        // ломает BT-клиент при следующем старте. Конфиг применяется через
+        // API при каждом запуске, поэтому файл не нужен.
+        StoreSettingsInJson: false,
       };
       if (applyPeersPort) {
         sets.PeersListenPort = 43211;       // фиксированный торрент-порт (после инициализации клиента)

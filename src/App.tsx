@@ -11,6 +11,8 @@ import { Movie, TorrServerStatusInfo, UserSettings } from './types';
 import { tmdbService, TMDB_GENRES } from './services/tmdb';
 import { torrServerService } from './services/torrserver';
 import { toastBus } from './services/toast';
+import { library, formatClock, LibraryItem } from './services/library';
+import { Heart, Bookmark, History, Play } from 'lucide-react';
 import { Flame, TrendingUp, Award, Search as SearchIcon, Tv, Zap, Film } from 'lucide-react';
 
 // ── Ambient backdrop hue extractor via canvas ──
@@ -51,6 +53,23 @@ function extractDominantHue(imageUrl: string): Promise<string> {
   });
 }
 
+/** Конвертация элемента библиотеки в Movie для MovieGrid/деталей. */
+function libItemToMovie(item: LibraryItem): Movie {
+  return {
+    id: item.id as any,
+    title: item.title,
+    original_title: item.title,
+    overview: '',
+    poster_path: item.poster || null,
+    backdrop_path: null,
+    release_date: item.year ? `${item.year}-01-01` : undefined,
+    vote_average: 0,
+    genre_ids: [],
+    media_type: item.mediaType || 'movie',
+    year: item.year,
+  };
+}
+
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('home');
   const [searchQuery, setSearchQuery] = useState('');
@@ -72,7 +91,25 @@ export const App: React.FC = () => {
     poster?: string;
     videoCodec?: string;
     audioCodec?: string;
+    mediaId?: string;
+    mediaType?: 'movie' | 'tv';
+    year?: string;
+    startPosition?: number;
   } | null>(null);
+
+  // ── Личная библиотека (localStorage) ──
+  const [favorites, setFavorites] = useState<LibraryItem[]>([]);
+  const [later, setLater]         = useState<LibraryItem[]>([]);
+  const [history, setHistory]     = useState<LibraryItem[]>([]);
+
+  const refreshLibrary = () => {
+    setFavorites(library.getFavorites());
+    setLater(library.getLater());
+    setHistory(library.getHistory());
+  };
+  useEffect(() => {
+    refreshLibrary();
+  }, []);
   const [isSettingsOpen, setIsSettingsOpen]   = useState(false);
   const [isMagnetModalOpen, setIsMagnetModalOpen] = useState(false);
 
@@ -302,6 +339,93 @@ export const App: React.FC = () => {
               <HeroBanner movie={heroMovie} onSelectMovie={setSelectedMovie} />
             )}
 
+            {/* ── Личная библиотека: Избранное / Позже / История ── */}
+            {(activeTab === 'favorites' || activeTab === 'later') && (
+              <MovieGrid
+                title={activeTab === 'favorites' ? 'Избранное' : 'Посмотреть позже'}
+                movies={(activeTab === 'favorites' ? favorites : later).map(libItemToMovie)}
+                onSelectMovie={setSelectedMovie}
+                icon={activeTab === 'favorites' ? <Heart size={20} /> : <Bookmark size={20} />}
+                accentColor={activeTab === 'favorites' ? 'var(--coral)' : 'var(--cyan)'}
+              />
+            )}
+
+            {activeTab === 'history' && (
+              <div style={{ marginBottom: '2rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '1.2rem' }}>
+                  <History size={20} style={{ color: 'var(--cyan)' }} />
+                  <h2 style={{ fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-primary)' }}>История просмотра</h2>
+                </div>
+                {history.length === 0 ? (
+                  <div style={{ padding: '3rem', textAlign: 'center', border: '1px dashed rgba(255,255,255,0.12)', borderRadius: '20px' }}>
+                    <History size={32} style={{ color: 'var(--text-muted)', margin: '0 auto 0.8rem', display: 'block' }} />
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Здесь появятся фильмы, которые вы смотрели</p>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                    {history.map((item) => {
+                      const pct = item.duration ? Math.min(100, Math.round(((item.position || 0) / item.duration) * 100)) : 0;
+                      return (
+                        <div
+                          key={item.id}
+                          onClick={() => setSelectedMovie(libItemToMovie(item))}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '1rem',
+                            padding: '0.7rem 1rem',
+                            borderRadius: '16px',
+                            background: 'rgba(255,255,255,0.025)',
+                            border: '1px solid rgba(255,255,255,0.06)',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s ease',
+                          }}
+                          onMouseEnter={(e) => {
+                            (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.05)';
+                            (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(0,242,254,0.2)';
+                          }}
+                          onMouseLeave={(e) => {
+                            (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.025)';
+                            (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(255,255,255,0.06)';
+                          }}
+                        >
+                          <img
+                            src={tmdbService.getImageUrl(item.poster, 'w185')}
+                            alt={item.title}
+                            style={{ width: '56px', aspectRatio: '2/3', objectFit: 'cover', borderRadius: '10px', background: '#121318', flexShrink: 0 }}
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {item.title}
+                            </div>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
+                              {item.year || ''} · просмотрено {new Date(item.updatedAt).toLocaleDateString()}
+                            </div>
+                            <div style={{ height: '4px', background: 'rgba(255,255,255,0.08)', borderRadius: '99px', marginTop: '0.5rem', overflow: 'hidden' }}>
+                              <div style={{ width: `${pct}%`, height: '100%', background: 'linear-gradient(90deg, #00F2FE, #8A2BE2)', borderRadius: '99px' }} />
+                            </div>
+                          </div>
+                          {item.position && item.duration && item.position > 5 && item.position < item.duration - 10 && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedMovie(libItemToMovie(item));
+                              }}
+                              className="btn-primary"
+                              style={{ borderRadius: '10px', padding: '0.5rem 0.9rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', flexShrink: 0 }}
+                            >
+                              <Play size={12} fill="white" />
+                              Продолжить с {formatClock(item.position)}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* ── HDRezka / Filmix Catalog Rails ── */}
             {(activeTab === 'home' || activeTab === 'movies') && (
               <MovieGrid
@@ -373,8 +497,16 @@ export const App: React.FC = () => {
           movie={selectedMovie}
           onClose={() => setSelectedMovie(null)}
           onPlayTorrent={(torrent) => {
+            const prog = selectedMovie ? library.getProgress(String(selectedMovie.id)) : null;
             setSelectedMovie(null);
-            setActiveStream(torrent);
+            setActiveStream({
+              ...torrent,
+              mediaId: selectedMovie ? String(selectedMovie.id) : undefined,
+              mediaType: selectedMovie?.media_type,
+              year: selectedMovie?.year || (selectedMovie?.release_date || '').slice(0, 4),
+              startPosition: prog?.position,
+            });
+            refreshLibrary();
           }}
         />
       )}
@@ -386,8 +518,18 @@ export const App: React.FC = () => {
           poster={activeStream.poster}
           videoCodec={activeStream.videoCodec}
           audioCodec={activeStream.audioCodec}
+          startPosition={activeStream.startPosition}
           transcodeAudioToAac={settings.transcodeAudioToAac}
-          onClose={() => setActiveStream(null)}
+          onProgressSave={(cur, dur) => {
+            if (activeStream.mediaId) {
+              library.saveProgress(
+                { id: activeStream.mediaId, title: activeStream.title, poster: activeStream.poster, year: activeStream.year, mediaType: activeStream.mediaType },
+                cur, dur
+              );
+              refreshLibrary();
+            }
+          }}
+          onClose={() => { refreshLibrary(); setActiveStream(null); }}
         />
       )}
 

@@ -22,6 +22,14 @@ export class TorrServerService {
     return { running: false };
   }
 
+  /** Полный рестарт сервера — самолечение зависшего BT-клиента. */
+  public async restartServer(): Promise<TorrServerStatusInfo> {
+    if (window.electronAPI?.restartTorrServer) {
+      return await window.electronAPI.restartTorrServer();
+    }
+    return { running: false, port: 8090 };
+  }
+
   public async configureServer(ramCacheMB: number) {
     if (window.electronAPI?.configureTorrServer) {
       return await window.electronAPI.configureTorrServer(ramCacheMB);

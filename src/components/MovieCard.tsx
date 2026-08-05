@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Star, Play, Film } from 'lucide-react';
 import { Movie } from '../types';
 import { tmdbService } from '../services/tmdb';
+import { extractYear } from '../utils/year';
 
 interface MovieCardProps {
   movie: Movie;
@@ -29,11 +30,7 @@ export const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, index = 0 
     }
   }, [posterUrl]);
 
-  const year = movie.release_date
-    ? new Date(movie.release_date).getFullYear()
-    : movie.first_air_date
-    ? new Date(movie.first_air_date).getFullYear()
-    : movie.year || '';
+  const year = extractYear(movie.release_date || movie.first_air_date) || extractYear(movie.year) || '';
   const rating = movie.vote_average?.toFixed(1) || '—';
   const isHighRated = parseFloat(rating) >= 8.0;
 

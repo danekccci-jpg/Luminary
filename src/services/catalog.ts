@@ -1,4 +1,5 @@
 import { CatalogItem, CatalogPage, Movie } from '../types';
+import { extractYear } from '../utils/year';
 
 /** Max items per page — pulled from proxy. */
 const PAGE_SIZE = 30;
@@ -9,7 +10,7 @@ const PAGE_SIZE = 30;
  */
 function catalogItemToMovie(item: CatalogItem): Movie {
   const rating = parseFloat(item.rating) || 6.0;
-  const year = item.year || '';
+  const year = extractYear(item.year);
   return {
     id: item.id as any,
     title: item.title,

@@ -7,6 +7,9 @@ import {
   Server,
   X,
   Zap,
+  Heart,
+  Bookmark,
+  History,
 } from 'lucide-react';
 import { TorrServerStatusInfo } from '../types';
 
@@ -33,9 +36,12 @@ export const Header: React.FC<HeaderProps> = ({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const tabs = [
-    { id: 'home',   label: 'Главная' },
-    { id: 'movies', label: 'Фильмы' },
-    { id: 'top',    label: 'Топ' },
+    { id: 'home',      label: 'Главная' },
+    { id: 'movies',    label: 'Фильмы' },
+    { id: 'top',       label: 'Топ' },
+    { id: 'favorites', label: 'Избранное', icon: <Heart size={12} /> },
+    { id: 'later',     label: 'Позже',     icon: <Bookmark size={12} /> },
+    { id: 'history',   label: 'История',   icon: <History size={12} /> },
   ];
 
   return (
@@ -154,6 +160,9 @@ export const Header: React.FC<HeaderProps> = ({
                     : 'none',
               }}
             >
+              {'icon' in tab && tab.icon && (
+                <span style={{ display: 'inline-flex', marginRight: '0.25rem' }}>{tab.icon}</span>
+              )}
               {tab.label}
             </button>
           ))}

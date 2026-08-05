@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { Play, Info, Star, Calendar, Zap, ChevronRight } from 'lucide-react';
 import { Movie } from '../types';
 import { tmdbService } from '../services/tmdb';
+import { extractYear } from '../utils/year';
 
 interface HeroBannerProps {
   movie: Movie;
@@ -12,11 +13,7 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({ movie, onSelectMovie }) 
   // TMDB CDN напрямую (w1280 для бэкдропа, w500 для постера)
   const backdropUrl = tmdbService.getImageUrl(movie.backdrop_path, 'w1280');
   const posterUrl = tmdbService.getImageUrl(movie.poster_path, 'w500');
-  const year = movie.release_date
-    ? new Date(movie.release_date).getFullYear()
-    : movie.first_air_date
-    ? new Date(movie.first_air_date).getFullYear()
-    : '';
+  const year = extractYear(movie.release_date || movie.first_air_date) || '';
   const rating = movie.vote_average?.toFixed(1) || '8.0';
   const ratingNum = parseFloat(rating);
 
@@ -64,6 +61,15 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({ movie, onSelectMovie }) 
           inset: 0,
           background:
             'linear-gradient(to right, rgba(10,11,14,0.98) 0%, rgba(10,11,14,0.7) 40%, rgba(10,11,14,0.2) 70%, transparent 100%)',
+        }}
+      />
+      {/* Верхнее затемнение: безопасный отступ — лица/заголовки не теряются у края */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          background:
+            'linear-gradient(to bottom, rgba(10,11,14,0.55) 0%, transparent 18%, transparent 100%)',
         }}
       />
 

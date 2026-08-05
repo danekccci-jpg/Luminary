@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Tv, MonitorPlay } from 'lucide-react';
+import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Tv, MonitorPlay, Heart, Bookmark } from 'lucide-react';
+import { library, LibraryItem } from '../services/library';
+import { extractYear } from '../utils/year';
 import { Movie, TorrentRelease, OnlineStream } from '../types';
 import { tmdbService } from '../services/tmdb';
 import { torrServerService } from '../services/torrserver';
@@ -24,6 +26,19 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   onPlayTorrent,
 }) => {
   const [details, setDetails] = useState<Movie | null>(null);
+  const [isFav, setIsFav] = useState(() => library.isFavorite(String(movie.id)));
+  const [isLater, setIsLater] = useState(() => library.isInLater(String(movie.id)));
+
+  const libItem = (): Omit<LibraryItem, 'updatedAt'> => ({
+    id: String(movie.id),
+    title: movie.title || movie.name || 'Без названия',
+    poster: movie.poster_path,
+    year: movie.year || (movie.release_date || '').slice(0, 4),
+    mediaType: movie.media_type || 'movie',
+  });
+
+  const toggleFav = () => { setIsFav(library.toggleFavorite(libItem())); };
+  const toggleLater = () => { setIsLater(library.toggleLater(libItem())); };
   const [releases, setReleases] = useState<TorrentRelease[]>([]);
   const [streams, setStreams] = useState<OnlineStream[]>([]);
   const [isScraping, setIsScraping] = useState(true);
@@ -35,9 +50,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   const posterUrl   = tmdbService.getImageUrl(movie.poster_path, 'w500');
 
   // Extract year from movie (supports both TMDB release_date and HDRezka/Filmix year field)
-  const year = movie.year
-    || (movie.release_date ? new Date(movie.release_date).getFullYear().toString() : '')
-    || (movie.first_air_date ? new Date(movie.first_air_date).getFullYear().toString() : '');
+  const year = extractYear(movie.year) || extractYear(movie.release_date || movie.first_air_date) || '';
 
   useEffect(() => {
     // TMDB-First: мгновенно показываем данные из карточки, фоном обогащаем деталями
@@ -236,6 +249,56 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                   </span>
                   {year && <span style={{ padding: '3px 9px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', color: 'rgba(240,242,248,0.65)', fontSize: '0.75rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '3px' }}><Calendar size={11}/>{year}</span>}
                   {details?.runtime && <span style={{ padding: '3px 9px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', color: 'rgba(240,242,248,0.65)', fontSize: '0.75rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '3px' }}><Clock size={11}/>{details.runtime} мин</span>}
+                </div>
+
+                {/* Library actions */}
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.6rem' }}>
+                  <button
+                    onClick={toggleFav}
+                    title={isFav ? 'Убрать из избранного' : 'В избранное'}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                      padding: '0.4rem 0.85rem',
+                      borderRadius: '999px',
+                      border: `1px solid ${isFav ? 'rgba(255,84,112,0.5)' : 'rgba(255,255,255,0.14)'}`,
+                      background: isFav ? 'rgba(255,84,112,0.15)' : 'rgba(255,255,255,0.05)',
+                      color: isFav ? '#FF5470' : 'rgba(240,242,248,0.7)',
+                      fontSize: '0.74rem',
+                      fontWeight: 700,
+                      fontFamily: 'inherit',
+                      cursor: 'pointer',
+                      backdropFilter: 'blur(10px)',
+                      transition: 'all 0.2s ease',
+                    }}
+                  >
+                    <Heart size={13} fill={isFav ? '#FF5470' : 'none'} />
+                    {isFav ? 'В избранном' : 'Избранное'}
+                  </button>
+                  <button
+                    onClick={toggleLater}
+                    title={isLater ? 'Убрать из «Посмотреть позже»' : 'В «Посмотреть позже»'}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                      padding: '0.4rem 0.85rem',
+                      borderRadius: '999px',
+                      border: `1px solid ${isLater ? 'rgba(0,242,254,0.5)' : 'rgba(255,255,255,0.14)'}`,
+                      background: isLater ? 'rgba(0,242,254,0.12)' : 'rgba(255,255,255,0.05)',
+                      color: isLater ? '#00F2FE' : 'rgba(240,242,248,0.7)',
+                      fontSize: '0.74rem',
+                      fontWeight: 700,
+                      fontFamily: 'inherit',
+                      cursor: 'pointer',
+                      backdropFilter: 'blur(10px)',
+                      transition: 'all 0.2s ease',
+                    }}
+                  >
+                    <Bookmark size={13} fill={isLater ? '#00F2FE' : 'none'} />
+                    {isLater ? 'В списке' : 'Позже'}
+                  </button>
                 </div>
 
                 {/* Title */}

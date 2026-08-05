@@ -141,7 +141,13 @@ export class TMDBService {
   }
 
   public async getTopRatedMovies(): Promise<Movie[]> {
-    return this.fetchPaged('/movie/top_rated', 2);
+    // Классический топ «всех времён»: /movie/top_rated с language=ru отдаёт
+    // региональную смесь с новинками текущего года. Используем discover
+    // с сортировкой по рейтингу и минимальным числом голосов.
+    return this.fetchPaged('/discover/movie', 2, {
+      sort_by: 'vote_average.desc',
+      'vote_count.gte': 300,
+    });
   }
 
   /** Now playing / fresh HD releases in RU region. */

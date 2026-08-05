@@ -139,6 +139,7 @@ declare global {
       getTorrServerStatus: () => Promise<TorrServerStatusInfo>;
       startTorrServer: () => Promise<TorrServerStatusInfo>;
       stopTorrServer: () => Promise<{ running: boolean }>;
+      restartTorrServer: () => Promise<TorrServerStatusInfo>;
       configureTorrServer: (ramCacheMB: number) => Promise<any>;
       /** Push-подписка на изменения статуса TorrServer из Main Process. Возвращает unsubscribe. */
       onTorrServerStatusChanged: (callback: (status: TorrServerStatusInfo) => void) => () => void;
