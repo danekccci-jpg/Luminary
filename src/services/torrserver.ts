@@ -1,4 +1,5 @@
 import { TorrServerStatusInfo, TorrentRelease, TorrServerStats } from '../types';
+import { searchJacRed, mergeReleasesByHash } from './scrapers/jacred';
 
 export class TorrServerService {
   public async getStatus(): Promise<TorrServerStatusInfo> {
@@ -139,28 +140,43 @@ export class TorrServerService {
     imdbId?: string,
     fallbackQuery?: string
   ): Promise<{ releases: TorrentRelease[]; error?: string }> {
-    if (window.electronAPI?.searchTorrents) {
-      try {
-        const res = await window.electronAPI.searchTorrents(
-          query,
-          year,
-          jackettUrl,
-          jackettApiKey,
-          imdbId,
-          fallbackQuery
-        );
-        if (res.success && res.releases) {
-          return { releases: res.releases };
-        }
-        // Surface the real failure instead of silently showing demo data
-        return { releases: [], error: res.error || 'Не удалось найти торренты' };
-      } catch (err: any) {
-        console.error('[TorrServerService] searchTorrents error:', err);
-        return { releases: [], error: 'Не удалось выполнить поиск торрентов' };
-      }
+    // Два независимых источника, запрашиваются ПАРАЛЛЕЛЬНО:
+    // 1) Electron-скрапер (Torrentio + Rutor + Jackett при настройке);
+    // 2) JacRed API (RuTracker / NNM-Club / Rutor) — отказоустойчивый клиент
+    //    с пулом инстансов и авто-фолбэком (src/services/scrapers/jacred.ts).
+    let ipcErrorMsg: string | undefined;
+    const ipcPromise: Promise<TorrentRelease[]> = window.electronAPI?.searchTorrents
+      ? window.electronAPI
+          .searchTorrents(query, year, jackettUrl, jackettApiKey, imdbId, fallbackQuery)
+          .then((res) => {
+            if (!res.success) ipcErrorMsg = res.error || 'Не удалось найти торренты';
+            return res.success && Array.isArray(res.releases) ? res.releases : [];
+          })
+          .catch((err: any) => {
+            ipcErrorMsg = 'Не удалось выполнить поиск торрентов';
+            console.error('[TorrServerService] searchTorrents error:', err);
+            return [];
+          })
+      : Promise.resolve([]);
+
+    const jacredPromise = searchJacRed(query, year).catch((err: any) => {
+      console.warn('[TorrServerService] JacRed search failed:', err?.message || err);
+      return [];
+    });
+
+    const [ipcReleases, jacredReleases] = await Promise.all([ipcPromise, jacredPromise]);
+
+    // Мёрдж: дедуп по BTIH-хэшу magnet + приоритет 4K/2160p → 1080p (по сидам)
+    const merged = mergeReleasesByHash(ipcReleases, jacredReleases);
+    if (merged.length > 0) {
+      return { releases: merged };
     }
-    // Browser demo mode — no Electron bridge, show demo releases
-    return { releases: this.demoReleases(query, year) };
+
+    // Browser demo mode — нет Electron-моста: показываем демо-раздачи
+    if (!window.electronAPI?.searchTorrents) {
+      return { releases: this.demoReleases(query, year) };
+    }
+    return { releases: [], error: ipcErrorMsg || 'Не удалось найти торренты' };
   }
 
   private demoReleases(query: string, year?: string): TorrentRelease[] {

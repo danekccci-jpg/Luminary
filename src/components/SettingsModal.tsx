@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { X, Server, Key, Power, Cpu, Database, RefreshCw, ScrollText, AlertTriangle } from 'lucide-react';
+import { X, Key, Power, Cpu, Database, RefreshCw, ScrollText, AlertTriangle } from 'lucide-react';
+import logoUrl from '../assets/logo.png';
 import { TorrServerStatusInfo, UserSettings } from '../types';
 import { torrServerService } from '../services/torrserver';
 
@@ -138,9 +139,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.8rem' }}>
-          <div style={{ width: '40px', height: '40px', borderRadius: '12px', background: 'linear-gradient(135deg, rgba(0,198,251,0.15), rgba(138,43,226,0.15))', border: '1px solid rgba(0,242,254,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 16px rgba(0,242,254,0.12)', flexShrink: 0 }}>
-            <Server size={18} style={{ color: 'var(--cyan)' }} />
-          </div>
+          <img
+            src={logoUrl}
+            alt="Luminary"
+            draggable={false}
+            style={{ width: '40px', height: '40px', borderRadius: '12px', objectFit: 'cover', flexShrink: 0, boxShadow: '0 0 16px rgba(0,242,254,0.12)' }}
+          />
           <div>
             <h2 style={{ fontSize: '1.05rem', fontWeight: 800, color: 'var(--text-primary)', lineHeight: 1 }}>Настройки Luminary</h2>
             <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>TorrServer MatriX · TMDB · Парсер торрентов</p>

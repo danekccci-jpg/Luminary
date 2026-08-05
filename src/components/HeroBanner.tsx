@@ -247,32 +247,6 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({ movie, onSelectMovie }) 
         </div>
       </div>
 
-      {/* Right side: cinematic accent line */}
-      <div
-        style={{
-          position: 'absolute',
-          top: '50%',
-          right: '2.5rem',
-          transform: 'translateY(-50%)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: '6px',
-          opacity: 0.4,
-        }}
-      >
-        {Array.from({ length: 8 }).map((_, i) => (
-          <div
-            key={i}
-            style={{
-              width: '2px',
-              height: i === 3 || i === 4 ? '20px' : '8px',
-              borderRadius: '1px',
-              background: 'linear-gradient(to bottom, #00F2FE, #8A2BE2)',
-            }}
-          />
-        ))}
-      </div>
     </div>
   );
 };

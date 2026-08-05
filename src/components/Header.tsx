@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef } from 'react';
+import logoUrl from '../assets/logo.png';
 import {
-  Film,
   Search,
   Settings as SettingsIcon,
   Link,
@@ -74,21 +74,21 @@ export const Header: React.FC<HeaderProps> = ({
             flexShrink: 0,
           }}
         >
-          <div
+          {/* Логотип приложения (build/icon.png → src/assets/logo.png) */}
+          <img
+            src={logoUrl}
+            alt="Luminary"
+            draggable={false}
             style={{
               width: '36px',
               height: '36px',
               borderRadius: '12px',
-              background: 'linear-gradient(135deg, #00c6fb 0%, #8A2BE2 100%)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 0 20px rgba(0, 198, 251, 0.3)',
+              objectFit: 'cover',
               flexShrink: 0,
+              boxShadow: '0 0 20px rgba(0, 198, 251, 0.25)',
+              userSelect: 'none',
             }}
-          >
-            <Film size={18} color="#fff" />
-          </div>
+          />
           <div>
             <div
               style={{

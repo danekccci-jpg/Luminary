@@ -7,6 +7,8 @@ import { PlayerModal } from './components/PlayerModal';
 import { SettingsModal } from './components/SettingsModal';
 import { MagnetInputModal } from './components/MagnetInputModal';
 import { Toaster } from './components/Toaster';
+import { extractYear } from './utils/year';
+import { clearMetaCache } from './services/cache';
 import { Movie, TorrServerStatusInfo, UserSettings } from './types';
 import { tmdbService, TMDB_GENRES } from './services/tmdb';
 import { torrServerService } from './services/torrserver';
@@ -91,6 +93,9 @@ export const App: React.FC = () => {
     poster?: string;
     videoCodec?: string;
     audioCodec?: string;
+    /** Прямой HLS/MP4 поток (VK Video) — плеер играет без TorrServer. */
+    directUrl?: string;
+    directQuality?: string;
     mediaId?: string;
     mediaType?: 'movie' | 'tv';
     year?: string;
@@ -131,6 +136,8 @@ export const App: React.FC = () => {
 
   // Initial data load
   useEffect(() => {
+    // Сброс кеша метаданных (IndexedDB v2) — старые года раздач перезапросятся из TMDB
+    clearMetaCache();
     fetchCatalog();
     checkTorrServerStatus();
     // Push-подписка на изменения статуса TorrServer из Main Process —
@@ -505,7 +512,8 @@ export const App: React.FC = () => {
               ...torrent,
               mediaId: selectedMovie ? String(selectedMovie.id) : undefined,
               mediaType: selectedMovie?.media_type,
-              year: selectedMovie?.year || (selectedMovie?.release_date || '').slice(0, 4),
+              // Год — приоритет оригинальной даты TMDB, не year раздачи/ремастера
+              year: extractYear(selectedMovie?.release_date || selectedMovie?.first_air_date) || selectedMovie?.year,
               startPosition: prog?.position,
             });
             refreshLibrary();
@@ -520,6 +528,7 @@ export const App: React.FC = () => {
           poster={activeStream.poster}
           videoCodec={activeStream.videoCodec}
           audioCodec={activeStream.audioCodec}
+          directUrl={activeStream.directUrl}
           startPosition={activeStream.startPosition}
           transcodeAudioToAac={settings.transcodeAudioToAac}
           onProgressSave={(cur, dur) => {

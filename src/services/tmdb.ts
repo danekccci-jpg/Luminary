@@ -28,12 +28,14 @@ export class TMDBService {
     this.apiKey = key || DEFAULT_TMDB_KEY;
   }
 
-  /** Shared locale params for RU catalog (Lampa-style). */
+  /** Shared locale params для RU-каталога (Lampa-style).
+   *  ВАЖНО: `region` НЕ передаём — TMDB подменяет release_date на региональную
+   *  дату проката/переиздания (например, Шоушенк в РФ: 2019-10-24 вместо 1994).
+   *  Год должен биндиться строго из ОРИГИНАЛЬНОЙ мировой даты релиза. */
   private localeParams(extra: Record<string, string | number> = {}) {
     return {
       api_key: this.apiKey,
       language: 'ru-RU',
-      region: 'RU',
       include_adult: false,
       ...extra,
     };

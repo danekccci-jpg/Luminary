@@ -22,6 +22,9 @@ interface PlayerModalProps {
   audioCodec?: string;
   videoCodec?: string;
   transcodeAudioToAac?: boolean;
+  /** Прямой HLS/MP4 поток (VK Video) — играем без TorrServer и GStreamer:
+   *  .m3u8 уходит в Hls.js, mp4 — в нативный <video>. */
+  directUrl?: string;
   /** Сохранение прогресса просмотра (история) при закрытии/завершении. */
   onProgressSave?: (current: number, duration: number) => void;
   /** Возобновить просмотр с этого таймкода (из истории). */
@@ -271,7 +274,7 @@ const NeonRingSpinner: React.FC<{ percent: number }> = ({ percent: raw }) => {
 };
 
 export const PlayerModal: React.FC<PlayerModalProps> = ({
-  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, onProgressSave, startPosition, onClose,
+  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, directUrl, onProgressSave, startPosition, onClose,
 }) => {
   const videoRef     = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -477,6 +480,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
           break;
         case 'f':
         case 'F':
+        case 'а': // русская раскладка (F / А)
+        case 'А':
           e.preventDefault();
           toggleFullscreen();
           break;
@@ -532,7 +537,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     const riskyVideo = v.includes('HEVC') || v.includes('H.265') || v.includes('X265') || v.includes('H265');
     const mkv = ext === 'mkv' || ext === 'mka';
     const risky = riskyAudio || (riskyVideo && mkv);
-    return { risky, audio: a || '—', video: v || '—', ext: ext || '—' };
+    return { risky, riskyAudio, audio: a || '—', video: v || '—', ext: ext || '—' };
   }, [videoCodec, audioCodec, containerExt]);
 
   // Init torrent: предзагрузка + проверка HTTP 200 потока перед монтированием <video>
@@ -606,6 +611,23 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
     const init = async () => {
       try {
+        // ── Прямой поток (VK Video HLS/MP4): без TorrServer и GStreamer.
+        //    URL сразу уходит в адаптивный эффект (Hls.js для .m3u8 /
+        //    нативный src для mp4), буферизационный экран пропускается. ──
+        if (directUrl) {
+          if (!/^https?:\/\//i.test(directUrl)) {
+            throw new Error('Некорректная прямая ссылка потока (VK Video)');
+          }
+          currentUrl = directUrl;
+          if (!cancelled) {
+            setStreamUrl(directUrl);
+            setStreamReady(true);
+            setSkipRequested(true);
+            setIsBuffering(false);
+          }
+          return;
+        }
+
         // ── Блокировка отправки хэшей: ждём готовности TorrServer (/echo 200) ──
         const st = await torrServerService.getStatus();
         if (!st.running) {
@@ -680,9 +702,16 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         currentUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, transcodeAudioToAac);
         if (!cancelled) setStreamUrl(currentUrl);
 
+        // ── Предзагрузка ВСЕГДА по обычному /stream (Range 0-250MB) ──
+        // Прелоад m3u8-плейлиста (/gst/master.m3u8) НЕ востребует данные торрента —
+        // TorrServer качает только запрошенные сегменты → экран буферизации висит
+        // на 0.0 MB/s. Плейлист (gst) уходит только в <video> через hls.js.
+        const preloadUrl =
+          (await torrServerService.getStreamUrl(torrentHash, videoIndex, false).catch(() => null)) || currentUrl;
+
         // ── Сразу открываем непрерывный поток: TorrServer начинает качать
         //    незамедлительно, экран буферизации показывает реальную скорость ──
-        startPreload(currentUrl);
+        startPreload(preloadUrl);
 
         // ── 1) Статистика торрента: кольцо буфера, скорость, пиры, контейнер ──
         statsInterval = setInterval(async () => {
@@ -706,7 +735,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                       if (u && !cancelled && u !== currentUrl) {
                         currentUrl = u;
                         setStreamUrl(u);
-                        restartPreload(u);
+                        restartPreload(preloadUrl);
                       }
                     });
                   } else {
@@ -727,12 +756,12 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                 console.warn(`[Player] DownloadSpeed=0 for 5s — forcing torrent restart (rem+add) to re-announce DHT/trackers`);
                 torrServerService.reconnect(torrentHash, magnet).catch(() => {});
                 // После пересоздания торрента переоткрываем предзагрузочный поток
-                setTimeout(() => restartPreload(currentUrl), 4000);
+                setTimeout(() => restartPreload(preloadUrl), 4000);
               } else if (speedZero && elapsedSec >= 15 && !restartedTwice) {
                 restartedTwice = true;
                 console.warn('[Player] Still 0 MB/s — second torrent restart (rem+add)');
                 torrServerService.reconnect(torrentHash, magnet).catch(() => {});
-                setTimeout(() => restartPreload(currentUrl), 4000);
+                setTimeout(() => restartPreload(preloadUrl), 4000);
               }
               // Выходим из буферизации только при подтверждённом потоке
               // + (достаточно данных ИЛИ пользователь нажал «Пропустить»)
@@ -790,7 +819,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       if (probeInterval) clearInterval(probeInterval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [magnet, title, poster, transcodeAudioToAac]);
+  }, [magnet, title, poster, transcodeAudioToAac, directUrl]);
 
   /** «Пропустить буферизацию»: НЕ монтируем пустой <video> мгновенно —
    *  продолжаем ждать валидный HTTP 200 от потока, но без ожидания порога предзагрузки. */
@@ -898,6 +927,30 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     // и применяет поток (src / Hls.js) — иначе видео оставалось бы без источника.
     if (!video || !streamReady) return;
     destroyHls();
+
+    // Рискованное аудио (AC3/DTS/TrueHD/EAC3): нативный путь даст видео БЕЗ звука —
+    // переключаемся на HLS-транскод (gst → AAC), но ТОЛЬКО когда данные уже начали
+    // качаться (streamReady = HTTP 200 /stream) — иначе gst-discoverer не сможет
+    // проанализировать ещё не скачанный файл («no stream info»).
+    if (
+      codecRisk.riskyAudio &&
+      transcodeAudioToAac &&
+      !streamUrl.includes('/gst/') &&
+      hash &&
+      videoIndexRef.current
+    ) {
+      torrServerService
+        .getStreamUrl(hash, videoIndexRef.current, true)
+        .then((gstUrl) => {
+          if (gstUrl && gstUrl !== streamUrl && videoRef.current && hlsRef.current === null) {
+            console.warn('[Player] AC3/DTS — переключение на HLS-транскод (AAC) после начала загрузки');
+            setStreamUrl(gstUrl);
+          }
+        })
+        .catch(() => {});
+      return;
+    }
+
     const isHlsUrl =
       streamUrl.includes('.m3u8') || streamUrl.includes('/gst/') || streamUrl.includes('hls=true');
     if (isHlsUrl && Hls.isSupported()) {
@@ -906,6 +959,13 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         lowLatencyMode: false,
         maxBufferLength: 60,
         maxMaxBufferLength: 120,
+        // VK CDN (vkvd/vkuservideo) отдаёт 403 без Referer — добавляем его
+        // для прямых VK-потоков (VK Video), gst-манифесты TorrServer не трогаем.
+        xhrSetup: (xhr) => {
+          if (/vk\.com|vkvd|vkuservideo/i.test(streamUrl)) {
+            xhr.setRequestHeader('Referer', 'https://vk.com/');
+          }
+        },
       });
       let netRetries = 0;
       hlsRef.current = hls;
@@ -1052,6 +1112,25 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     if (!videoRef.current) return;
     if (isPlaying) { videoRef.current.pause(); setIsPlaying(false); }
     else { videoRef.current.play(); setIsPlaying(true); }
+  };
+
+  // ── Клик по видео: одиночный — Play/Pause, двойной — Fullscreen.
+  //    Одиночный клик откладывается на 260 мс и отменяется при dblclick,
+  //    чтобы двойной клик не «мигал» паузой перед переключением fullscreen.
+  const singleClickTimer = useRef<number | null>(null);
+  const handleVideoClick = () => {
+    if (singleClickTimer.current) window.clearTimeout(singleClickTimer.current);
+    singleClickTimer.current = window.setTimeout(() => {
+      singleClickTimer.current = null;
+      togglePlay();
+    }, 260);
+  };
+  const handleVideoDoubleClick = () => {
+    if (singleClickTimer.current) {
+      window.clearTimeout(singleClickTimer.current);
+      singleClickTimer.current = null;
+    }
+    toggleFullscreen();
   };
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -1429,7 +1508,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             onPause={() => setIsPlaying(false)}
             onTimeUpdate={handleTimeUpdate}
             onEnded={handleEnded}
-            onClick={togglePlay}
+            onClick={handleVideoClick}
+            onDoubleClick={handleVideoDoubleClick}
             style={{ width: '100%', height: '100%', cursor: showControls ? 'default' : 'none', ...objectFitStyle }}
           />
 
@@ -1643,9 +1723,12 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
               pointerEvents: showControls ? 'auto' : 'none',
             }}
           >
-            {/* Bottom gradient backdrop */}
+            {/* Bottom gradient backdrop — position:relative, чтобы выпадающая
+                панель настроек (bottom:100%) открывалась НАД панелью, а не
+                уходила за нижний край экрана */}
             <div
               style={{
+                position: 'relative',
                 background: 'linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.6) 60%, transparent 100%)',
                 padding: '0 1.5rem 1.5rem',
               }}
@@ -1769,7 +1852,59 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
               {/* Controls Row */}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                {/* Left Controls */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                {/* Video Filters / Settings Toggle */}
+                <button
+                  onClick={(e) => {
+                    // stopPropagation: клик по кнопке не должен «уходить» к видео
+                    // (клик по экрану = play/pause) и сразу закрываться
+                    e.stopPropagation();
+                    setShowFilters(!showFilters);
+                  }}
+                  className="btn-icon"
+                  style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '10px',
+                    background: showFilters ? 'rgba(0,242,254,0.15)' : undefined,
+                    border: showFilters ? '1px solid rgba(0,242,254,0.35)' : undefined,
+                    zIndex: 60,
+                    pointerEvents: 'auto',
+                  }}
+                  title="Настройки и фильтры"
+                >
+                  <SlidersHorizontal size={15} style={{ color: showFilters ? 'var(--cyan)' : undefined }} />
+                </button>
+
+                {/* Picture-in-Picture */}
+                <button
+                  onClick={togglePip}
+                  className="btn-icon"
+                  title="Картинка в картинке"
+                  style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '10px',
+                    background: isPip ? 'rgba(0,242,254,0.15)' : undefined,
+                    border: isPip ? '1px solid rgba(0,242,254,0.35)' : undefined,
+                  }}
+                >
+                  <PictureInPicture2 size={15} style={{ color: isPip ? 'var(--cyan)' : undefined }} />
+                </button>
+
+
+                {/* Fullscreen */}
+                <button
+                  onClick={toggleFullscreen}
+                  className="btn-icon"
+                  title="Полный экран (F)"
+                  style={{ width: '36px', height: '36px', borderRadius: '10px' }}
+                >
+                  {isFullscreen ? <Minimize size={15} /> : <Maximize size={15} />}
+                </button>
+                </div>
+
+                {/* Center Controls → right-aligned */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   {/* Skip Back */}
                   <button
@@ -1841,76 +1976,16 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                     </div>
                   </div>
                 </div>
-
-                {/* Video Filters Toggle */}
-                <button
-                  onClick={() => setShowFilters(!showFilters)}
-                  className="btn-icon"
-                  style={{
-                    width: '36px',
-                    height: '36px',
-                    borderRadius: '10px',
-                    background: showFilters ? 'rgba(0,242,254,0.15)' : undefined,
-                    border: showFilters ? '1px solid rgba(0,242,254,0.35)' : undefined,
-                  }}
-                  title="Настройки и фильтры"
-                >
-                  <SlidersHorizontal size={15} style={{ color: showFilters ? 'var(--cyan)' : undefined }} />
-                </button>
-
-                {/* Picture-in-Picture */}
-                <button
-                  onClick={togglePip}
-                  className="btn-icon"
-                  title="Картинка в картинке"
-                  style={{
-                    width: '36px',
-                    height: '36px',
-                    borderRadius: '10px',
-                    background: isPip ? 'rgba(0,242,254,0.15)' : undefined,
-                    border: isPip ? '1px solid rgba(0,242,254,0.35)' : undefined,
-                  }}
-                >
-                  <PictureInPicture2 size={15} style={{ color: isPip ? 'var(--cyan)' : undefined }} />
-                </button>
-
-                {/* Quick VLC / IINA switcher: пауза БЕЗ размонтирования видео,
-                    поток остаётся в кэше TorrServer — переключение без зависания */}
-                <button
-                  onClick={() => { videoRef.current?.pause(); openExternalPlayer(); }}
-                  className="btn-icon"
-                  title={codecRisk.risky
-                    ? 'Проблемы с кодеком (AC3/DTS/HEVC)? Открыть поток в VLC / IINA'
-                    : 'Открыть поток во внешнем плеере (VLC / IINA)'}
-                  style={{
-                    width: '36px',
-                    height: '36px',
-                    borderRadius: '10px',
-                    background: codecRisk.risky ? 'rgba(255,184,0,0.12)' : undefined,
-                    border: codecRisk.risky ? '1px solid rgba(255,184,0,0.35)' : undefined,
-                  }}
-                >
-                  <ExternalLink size={15} style={{ color: codecRisk.risky ? '#FFB800' : undefined }} />
-                </button>
-
-                {/* Fullscreen */}
-                <button
-                  onClick={toggleFullscreen}
-                  className="btn-icon"
-                  title="Полный экран (F)"
-                  style={{ width: '36px', height: '36px', borderRadius: '10px' }}
-                >
-                  {isFullscreen ? <Minimize size={15} /> : <Maximize size={15} />}
-                </button>
               </div>
 
-              {/* ── Video Filters Panel ── */}
+              {/* ── Video Filters Panel (настройки: фильтры, аудио, субтитры) ── */}
               {showFilters && (
                 <div
                   style={{
                     position: 'absolute',
                     bottom: '100%',
-                    right: '0.5rem',
+                    left: '0.5rem',
+                    right: 'auto',
                     marginBottom: '0.75rem',
                     background: 'rgba(14,15,21,0.97)',
                     border: '1px solid rgba(0,242,254,0.2)',
@@ -1922,7 +1997,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                     display: 'flex',
                     flexDirection: 'column',
                     gap: '0.85rem',
-                    zIndex: 55,
+                    zIndex: 70,
+                    pointerEvents: 'auto',
                   }}
                 >
                   {/* Panel Header */}

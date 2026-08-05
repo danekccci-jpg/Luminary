@@ -5,7 +5,8 @@
  */
 
 const DB_NAME = 'luminary_cache';
-const DB_VERSION = 1;
+// v2: сброс старого кеша метаданных (некорректные годы из прежних источников)
+const DB_VERSION = 2;
 const STORE_NAME = 'catalog_cache';
 
 interface CacheEntry<T = any> {
@@ -20,9 +21,12 @@ function openDB(): Promise<IDBDatabase> {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'key' });
+      // v1 → v2: удаляем старый кеш целиком (в нём могли остаться неверные
+      // годы из прежних источников/раздач) и пересоздаём пустое хранилище
+      if (db.objectStoreNames.contains(STORE_NAME)) {
+        db.deleteObjectStore(STORE_NAME);
       }
+      db.createObjectStore(STORE_NAME, { keyPath: 'key' });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -161,3 +165,20 @@ export const cacheKeys = {
   movieDetails: (id: string) => `details:${id}`,
   onlineStreams: (title: string, year?: string) => `streams:${title}:${year || ''}`,
 };
+
+/** Полная очистка кеша метаданных (IndexedDB) — вызывается при старте приложения,
+ *  чтобы устаревшие/некорректные данные (например, годы раздач) перезапросились. */
+export async function clearMetaCache(): Promise<void> {
+  try {
+    const db = await openDB();
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+    db.close();
+  } catch {
+    /* IndexedDB недоступен — не критично */
+  }
+}

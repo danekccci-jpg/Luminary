@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Tv, MonitorPlay, Heart, Bookmark } from 'lucide-react';
-import { library, LibraryItem } from '../services/library';
+import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Video, Heart, Bookmark } from 'lucide-react';
+import { library, LibraryItem, formatClock } from '../services/library';
 import { extractYear } from '../utils/year';
-import { Movie, TorrentRelease, OnlineStream } from '../types';
+import { Movie, TorrentRelease } from '../types';
 import { tmdbService } from '../services/tmdb';
 import { torrServerService } from '../services/torrserver';
 import { toastBus } from '../services/toast';
+import { searchVkVideo, VkVideoItem } from '../services/vkVideoService';
 import { TorrentSelector } from './TorrentSelector';
 
 interface MovieDetailsModalProps {
@@ -17,6 +18,9 @@ interface MovieDetailsModalProps {
     poster?: string;
     videoCodec?: string;
     audioCodec?: string;
+    /** Прямой HLS/MP4 поток (VK Video) — плеер играет без TorrServer. */
+    directUrl?: string;
+    directQuality?: string;
   }) => void;
 }
 
@@ -40,23 +44,24 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   const toggleFav = () => { setIsFav(library.toggleFavorite(libItem())); };
   const toggleLater = () => { setIsLater(library.toggleLater(libItem())); };
   const [releases, setReleases] = useState<TorrentRelease[]>([]);
-  const [streams, setStreams] = useState<OnlineStream[]>([]);
+  const [vkItems, setVkItems] = useState<VkVideoItem[]>([]);
   const [isScraping, setIsScraping] = useState(true);
-  const [isFindingStreams, setIsFindingStreams] = useState(true);
+  const [isSearchingVk, setIsSearchingVk] = useState(true);
   const [searchError, setSearchError] = useState<string | null>(null);
 
   // TMDB-First: прямые постеры с CDN
   const backdropUrl = tmdbService.getImageUrl(movie.backdrop_path, 'w1280');
   const posterUrl   = tmdbService.getImageUrl(movie.poster_path, 'w500');
 
-  // Extract year from movie (supports both TMDB release_date and HDRezka/Filmix year field)
-  const year = extractYear(movie.year) || extractYear(movie.release_date || movie.first_air_date) || '';
+  // Год — строго из оригинальной даты релиза (release_date / first_air_date),
+  // movie.year (год раздачи HDRezka/Filmix, ремастер 4K) — только как fallback.
+  const year = extractYear(movie.release_date || movie.first_air_date) || extractYear(movie.year) || '';
 
   useEffect(() => {
     // TMDB-First: мгновенно показываем данные из карточки, фоном обогащаем деталями
     setDetails(movie);
     setIsScraping(true);
-    setIsFindingStreams(true);
+    setIsSearchingVk(true);
     setSearchError(null);
 
     // Lampa-style dual-language search:
@@ -82,17 +87,18 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
         .catch(() => { /* карточка уже на экране — не критично */ });
     }
 
-    // ── 1) Прямые плееры HDRezka / Filmix (on-demand) ──
-    window.electronAPI?.findPlayers(primaryQuery, movie.original_title || '', year)
-      .then((res) => {
+    // ── 1) VK Video: прямые HLS-потоки (Lampa-style, без TorrServer) ──
+    searchVkVideo(`${primaryQuery}${year ? ' ' + year : ''}`.trim())
+      .then((items) => {
         if (cancelled) return;
-        setStreams(res.success ? res.streams : []);
-        setIsFindingStreams(false);
+        setVkItems(items);
       })
-      .catch(() => {
+      .catch((err: any) => {
         if (cancelled) return;
-        setStreams([]);
-        setIsFindingStreams(false);
+        console.warn('[MovieDetailsModal] VK Video search failed:', err?.message || err);
+      })
+      .finally(() => {
+        if (!cancelled) setIsSearchingVk(false);
       });
 
     // ── 2) Торренты через TorrServer / JacRed (on-demand) ──
@@ -133,9 +139,20 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     });
   }, [movie, onPlayTorrent, posterUrl]);
 
-  /** Открыть прямой плеер (HDRezka/Filmix) во внешнем браузере. */
-  const handleOpenStream = (stream: OnlineStream) => {
-    window.electronAPI?.openExternal(stream.url);
+  /** Воспроизвести VK-поток в нативном плеере Luminary (Hls.js, без TorrServer). */
+  const handlePlayVk = (item: VkVideoItem) => {
+    const url = item.hlsUrl || item.mp4Url;
+    if (!url) {
+      toastBus.push('У этого VK-видео не удалось получить поток', 'error');
+      return;
+    }
+    onPlayTorrent({
+      magnet: '',
+      title: `${movie.title} [VK ${item.quality}]`,
+      poster: posterUrl,
+      directUrl: url,
+      directQuality: item.quality,
+    });
   };
 
   return (
@@ -400,7 +417,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
               </div>
             )}
 
-            {/* ── Смотреть онлайн: прямые плееры HDRezka/Filmix ── */}
+            {/* ── Онлайн / VK Video: прямые HLS-потоки (без TorrServer) ── */}
             <div
               style={{
                 marginBottom: '1rem',
@@ -424,75 +441,129 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                     width: '34px',
                     height: '34px',
                     borderRadius: '10px',
-                    background: 'linear-gradient(135deg, rgba(138,43,226,0.2), rgba(0,198,251,0.2))',
-                    border: '1px solid rgba(138,43,226,0.25)',
+                    background: 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(16,245,172,0.15))',
+                    border: '1px solid rgba(0,242,254,0.25)',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    boxShadow: '0 0 12px rgba(138,43,226,0.15)',
+                    boxShadow: '0 0 12px rgba(0,242,254,0.15)',
                     flexShrink: 0,
                   }}
                 >
-                  <MonitorPlay size={16} style={{ color: 'var(--purple)' }} />
+                  <Video size={16} style={{ color: 'var(--cyan)' }} />
                 </div>
-                <div>
+                <div style={{ flex: 1 }}>
                   <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--text-primary)' }}>
-                    Смотреть онлайн
+                    Онлайн / VK Video
                   </div>
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 500 }}>
-                    Прямые плееры HDRezka · Filmix
+                    Прямые HLS-потоки из VK · без TorrServer
                   </div>
                 </div>
+                {vkItems.length > 0 && (
+                  <span
+                    style={{
+                      padding: '2px 8px',
+                      borderRadius: '999px',
+                      background: 'rgba(0,242,254,0.12)',
+                      border: '1px solid rgba(0,242,254,0.3)',
+                      color: 'var(--cyan)',
+                      fontSize: '0.7rem',
+                      fontWeight: 800,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {vkItems.length}
+                  </span>
+                )}
               </div>
-              <div style={{ padding: '1rem 1.4rem 1.2rem' }}>
-                {isFindingStreams ? (
+              <div style={{ padding: '0.8rem 1.4rem 1.1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                {isSearchingVk ? (
                   <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                     {[1, 2, 3].map((n) => (
-                      <div key={n} className="skeleton" style={{ width: '120px', height: '36px', borderRadius: '10px' }} />
+                      <div key={n} className="skeleton" style={{ width: '140px', height: '40px', borderRadius: '10px' }} />
                     ))}
                   </div>
-                ) : streams.length === 0 ? (
+                ) : vkItems.length === 0 ? (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                    <Tv size={14} />
-                    Онлайн-плееры не найдены — используйте торренты ниже
+                    <Video size={14} />
+                    VK-потоки не найдены — используйте торренты ниже
                   </div>
                 ) : (
-                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                    {streams.map((stream) => (
-                      <button
-                        key={stream.id}
-                        onClick={() => handleOpenStream(stream)}
-                        title={`Открыть плеер в браузере: ${stream.dubbing}`}
+                  vkItems.map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => handlePlayVk(item)}
+                      title={`Воспроизвести в плеере Luminary: ${item.title}`}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.6rem',
+                        padding: '0.55rem 0.9rem',
+                        borderRadius: '12px',
+                        background: 'rgba(255,255,255,0.025)',
+                        border: '1px solid rgba(255,255,255,0.06)',
+                        color: 'var(--text-primary)',
+                        fontFamily: 'inherit',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                        textAlign: 'left',
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(0,242,254,0.08)';
+                        e.currentTarget.style.borderColor = 'rgba(0,242,254,0.3)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'rgba(255,255,255,0.025)';
+                        e.currentTarget.style.borderColor = 'rgba(255,255,255,0.06)';
+                      }}
+                    >
+                      {/* Пометка качества */}
+                      <span
                         style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '0.4rem',
-                          padding: '0.5rem 1rem',
-                          borderRadius: '12px',
-                          background: 'rgba(138,43,226,0.12)',
-                          border: '1px solid rgba(138,43,226,0.4)',
-                          color: '#B57BFF',
-                          fontSize: '0.8rem',
-                          fontWeight: 700,
-                          fontFamily: 'inherit',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s ease',
-                          boxShadow: '0 0 12px rgba(138,43,226,0.12)',
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.background = 'rgba(138,43,226,0.22)';
-                          e.currentTarget.style.boxShadow = '0 0 16px rgba(138,43,226,0.3)';
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.background = 'rgba(138,43,226,0.12)';
-                          e.currentTarget.style.boxShadow = '0 0 12px rgba(138,43,226,0.12)';
+                          flexShrink: 0,
+                          padding: '2px 7px',
+                          borderRadius: '6px',
+                          fontSize: '0.64rem',
+                          fontWeight: 900,
+                          letterSpacing: '0.05em',
+                          background: item.quality === '4K'
+                            ? 'rgba(255,184,0,0.14)'
+                            : item.quality === '1080p'
+                            ? 'rgba(0,242,254,0.12)'
+                            : item.quality === '720p'
+                            ? 'rgba(16,245,172,0.12)'
+                            : 'rgba(255,255,255,0.07)',
+                          color: item.quality === '4K' ? '#FFB800' : item.quality === '1080p' ? '#00F2FE' : item.quality === '720p' ? '#10F5AC' : 'rgba(240,242,248,0.55)',
+                          border: `1px solid ${item.quality === '4K' ? 'rgba(255,184,0,0.4)' : item.quality === '1080p' ? 'rgba(0,242,254,0.35)' : item.quality === '720p' ? 'rgba(16,245,172,0.3)' : 'rgba(255,255,255,0.1)'}`,
                         }}
                       >
-                        <Play size={12} fill="#B57BFF" />
-                        {stream.dubbing}
-                      </button>
-                    ))}
-                  </div>
+                        {item.quality}
+                      </span>
+                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', fontWeight: 600 }}>
+                        {item.title}
+                      </span>
+                      {item.duration ? (
+                        <span style={{ flexShrink: 0, fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                          {formatClock(item.duration)}
+                        </span>
+                      ) : null}
+                      <span
+                        style={{
+                          flexShrink: 0,
+                          width: '34px',
+                          height: '34px',
+                          borderRadius: '10px',
+                          background: 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(138,43,226,0.2))',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <Play size={13} fill="white" style={{ color: '#fff', marginLeft: '1px' }} />
+                      </span>
+                    </button>
+                  ))
                 )}
               </div>
             </div>

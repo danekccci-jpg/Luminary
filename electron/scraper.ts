@@ -87,11 +87,16 @@ export class TorrentScraper {
 
     const results: TorrentRelease[] = [];
     const sources: Array<{ name: string; run: () => Promise<TorrentRelease[]> }> = [
-      { name: 'JacRed', run: () => this.queryJacRed(safeQuery, safeYear) },
+      // JacRed (RuTracker / NNM-Club / Rutor) вынесен в renderer:
+      // src/services/scrapers/jacred.ts — пул инстансов + авто-фолбэк, мёрдж
+      // с этой выдачей происходит в src/services/torrserver.ts (по BTIH-хэшу).
       { name: 'Torrentio', run: () => this.queryTorrentio(safeQuery, safeYear, imdbId) },
       { name: 'Rutor', run: () => this.scrapeRutor(safeQuery, safeYear) },
-      { name: 'RuTracker', run: () => this.scrapeRuTracker(safeQuery, safeYear) },
-      { name: 'VK Video', run: () => this.queryVKVideo(safeQuery, safeYear) },
+      // RuTracker.org — НЕ скрейпим HTML напрямую (фрагментно, капча): трекер
+      // отдаётся через JacRed-инстансы (tracker=RuTracker.org).
+      // VK Video НЕ источник торрентов: раньше генерировал фейковые magnet
+      // (btih из нулей) → битые «раздачи» в UI. Реальный VK-поиск (HLS-потоки)
+      // вынесен в renderer — src/services/vkVideoService.ts (блок «Онлайн / VK»).
     ];
 
     if (jackettUrl && jackettApiKey) {
@@ -180,89 +185,10 @@ export class TorrentScraper {
   }
 
   private async queryJacRed(query: string, year?: string): Promise<TorrentRelease[]> {
-    const searchStr = year ? `${query} ${year}` : query;
-    const encoded = encodeURIComponent(searchStr);
-
-    // Pool of public JacRed instances — queried in parallel
-    const instances = [
-      `http://jacred.xyz/api/v1.0/torrents?search=${encoded}`,
-      `http://torrents.jacred.ru/api/v1.0/torrents?search=${encoded}`,
-      `http://jacred.xyz/api/v2.0/torrents?search=${encoded}`,
-      `http://torrents.jacred.ru/api/v2.0/torrents?search=${encoded}`,
-    ];
-
-    // Fire all in parallel, collect any successful responses
-    const settled = await Promise.allSettled(
-      instances.map((url) =>
-        axios.get(url, {
-          timeout: 5000,
-          validateStatus: (s) => s >= 200 && s < 300,
-          maxRedirects: 0,
-        })
-      )
-    );
-
-    const allItems: any[] = [];
-    let lastErr: unknown = null;
-
-    for (const outcome of settled) {
-      if (outcome.status === 'fulfilled') {
-        const data = outcome.value.data;
-        const items: any[] = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.Results)
-            ? data.Results
-            : Array.isArray(data?.results)
-              ? data.results
-              : Array.isArray(data?.torrents)
-                ? data.torrents
-                : [];
-        allItems.push(...items);
-      } else {
-        lastErr = outcome.reason;
-      }
-    }
-
-    // Deduplicate by magnet hash
-    const seen = new Set<string>();
-    const items = allItems.filter((item: any) => {
-      const magnet = String(item.magnet || item.MagnetUri || item.link || item.url || '');
-      const hashMatch = magnet.match(/btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/i);
-      const key = hashMatch ? hashMatch[1].toLowerCase() : magnet;
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-
-    if (items.length === 0 && lastErr) {
-      throw lastErr;
-    }
-
-    return items
-      .filter((item: any) => item && (item.magnet || item.MagnetUri || item.link || item.url))
-      .map((item: any, i: number) => {
-        const title = String(item.title || item.Title || item.name || searchStr);
-        const sizeBytes =
-          typeof item.size === 'number'
-            ? item.size
-            : typeof item.Size === 'number'
-              ? item.Size
-              : this.parseSizeBytes(String(item.sizeName || item.size_str || item.SizeStr || '4 GB'));
-        const seeders = Number(item.seeders ?? item.Seeders ?? item.seeds ?? 0) || 0;
-        const leechers = Number(item.leechers ?? item.Peers ?? item.peers ?? 0) || 0;
-        const magnet = String(item.magnet || item.MagnetUri || item.link || item.url || '');
-
-        return this.normalizeRelease(
-          `jacred-${i}-${Date.now()}`,
-          title,
-          magnet,
-          sizeBytes,
-          seeders,
-          leechers,
-          'JacRed Aggregator'
-        );
-      })
-      .filter((r) => r.magnet.startsWith('magnet:'));
+    // Удалено: JacRed вынесен в renderer — src/services/scrapers/jacred.ts
+    // (пул публичных инстансов + авто-фолбэк, фильтр трекеров RuTracker/NNM/Rutor,
+    // 4K-приоритизация). Мёрдж с локальной выдачей — в src/services/torrserver.ts.
+    return [];
   }
 
   /**
@@ -340,16 +266,33 @@ export class TorrentScraper {
 
   private async scrapeRutor(query: string, year?: string): Promise<TorrentRelease[]> {
     const searchStr = year ? `${query} ${year}` : query;
-    const url = `http://rutor.info/search/0/0/100/0/${encodeURIComponent(searchStr)}`;
+    // Пул зеркал Rutor (публичный, без авторизации)
+    const mirrors = [
+      `http://rutor.info/search/0/0/100/0/${encodeURIComponent(searchStr)}`,
+      `http://rutor.is/search/0/0/100/0/${encodeURIComponent(searchStr)}`,
+    ];
 
-    const response = await axios.get(url, {
-      timeout: 5500,
-      validateStatus: (s) => s >= 200 && s < 300,
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      },
-    });
+    let response;
+    let lastErr: unknown;
+    for (const url of mirrors) {
+      try {
+        response = await axios.get(url, {
+          timeout: 5500,
+          validateStatus: (s) => s >= 200 && s < 300,
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          },
+        });
+        break;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    if (!response) {
+      if (lastErr) throw lastErr;
+      return [];
+    }
 
     const $ = cheerio.load(response.data);
     const releases: TorrentRelease[] = [];
@@ -397,6 +340,9 @@ export class TorrentScraper {
       apiKey
     )}&Query=${encodeURIComponent(searchStr)}`;
 
+    // Jackett/Prowlarr со всеми indexer'ами: приватные RU-трекеры (NNM-Club,
+    // CinemaZ, Megapeer) приходят, если пользователь добавил их в Jackett
+    // с авторизацией. Запрос идёт по `all` — сортировка по сидам ниже (dedupeAndSort).
     const res = await axios.get(reqUrl, {
       timeout: 7000,
       validateStatus: (s) => s >= 200 && s < 300,
@@ -419,137 +365,16 @@ export class TorrentScraper {
   }
 
   // ═══════════════════════════════════════════════════════
-  //  RuTracker.org — HTML scraper
+  //  RuTracker.org — НЕ скрейпим HTML напрямую (гостевой magnet недоступен,
+  //  капча/фрагмент): трекер отдаётся через JacRed-инстансы (renderer-клиент
+  //  src/services/scrapers/jacred.ts, tracker=RuTracker.org, авторизация инстансов).
   // ═══════════════════════════════════════════════════════
-  private async scrapeRuTracker(query: string, year?: string): Promise<TorrentRelease[]> {
-    const searchStr = year ? `${query} ${year}` : query;
-    // Пул зеркал RuTracker (форум гостевой доступен на чтение)
-    const mirrors = [
-      `https://rutracker.org/forum/tracker.php?nm=${encodeURIComponent(searchStr)}`,
-      `https://rutracker.net/forum/tracker.php?nm=${encodeURIComponent(searchStr)}`,
-      `https://rutracker.nl/forum/tracker.php?nm=${encodeURIComponent(searchStr)}`,
-    ];
-
-    let html = '';
-    let lastErr: unknown;
-
-    for (const url of mirrors) {
-      try {
-        const response = await axios.get(url, {
-          timeout: 6000,
-          validateStatus: (s) => s >= 200 && s < 300,
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml',
-            'Accept-Language': 'ru-RU,ru;q=0.9',
-          },
-          maxRedirects: 2,
-        });
-        html = response.data;
-        break;
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-
-    if (!html) {
-      if (lastErr) throw lastErr;
-      return [];
-    }
-
-    const $ = cheerio.load(html);
-    const releases: TorrentRelease[] = [];
-    const seenMagnet = new Set<string>();
-
-    // ⚠️ Только РЕАЛЬНЫЕ magnet-ссылки. Анонимный RuTracker НЕ отдаёт magnet
-    // гостям — НЕ генерируем фейковые btih:0000… (такие раздачи дают
-    // «Ошибка добавления торрента»). Реальные magnet для RuTracker приходят
-    // через JacRed-агрегаторы (их rutracker-модули авторизованы инстансами).
-    $('tr:has(a[href^="magnet:"])').each((i, el) => {
-      const magnet = $(el).find('a[href^="magnet:"]').first().attr('href') || '';
-      if (!magnet.startsWith('magnet:?xt=urn:btih:') || magnet.includes('btih:0000')) return;
-
-      const cells = $(el).find('td');
-      if (cells.length < 3) return;
-
-      const titleText =
-        $(cells).eq(1).find('a[href*="viewtopic"]').text().trim() ||
-        $(cells).eq(1).text().trim() ||
-        $(el).find('a[href*="viewtopic"]').first().text().trim();
-      if (!titleText || seenMagnet.has(magnet)) return;
-      seenMagnet.add(magnet);
-
-      const sizeText = $(cells).eq(4).text().trim() || '0 GB';
-      const seedText = $(cells).eq(5).text().trim() || '0';
-      const leechText = $(cells).eq(6).text().trim() || '0';
-
-      releases.push(
-        this.normalizeRelease(
-          `rutracker-${i}-${Date.now()}`,
-          titleText,
-          magnet,
-          this.parseSizeBytes(sizeText),
-          parseInt(seedText, 10) || 0,
-          parseInt(leechText, 10) || 0,
-          'RuTracker.org'
-        )
-      );
-    });
-
-    return releases;
-  }
 
   // ═══════════════════════════════════════════════════════
-  //  VK Video — direct stream lookup
+  //  VK Video — перенесён в renderer (src/services/vkVideoService.ts):
+  //  реальный поиск по VK + извлечение HLS-манифеста из playerParams.
+  //  Здесь больше не создаём фейковые magnet-раздачи (btih из нулей).
   // ═══════════════════════════════════════════════════════
-  private async queryVKVideo(query: string, year?: string): Promise<TorrentRelease[]> {
-    const searchStr = year ? `${query} ${year}` : query;
-
-    try {
-      // VK Video search API (public endpoint)
-      const apiUrl = `https://api.vk.com/method/video.search?q=${encodeURIComponent(searchStr)}&sort=2&hd=1&adult=0&count=10&v=5.199&access_token=anonymous`;
-      const response = await axios.get(apiUrl, {
-        timeout: 5000,
-        validateStatus: (s) => s >= 200 && s < 300,
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-          'Accept-Language': 'ru-RU,ru;q=0.9',
-        },
-      });
-
-      const data = response.data;
-      const items = data?.response?.items || [];
-
-      return items.map((item: any, i: number) => {
-        const title = `${item.title || searchStr} [VK Video]`;
-        const duration = item.duration || 5400;
-        // Estimate video size based on duration and assumed bitrate
-        const estimatedBytes = duration * 250 * 1024; // ~2 Mbps
-        const qualityStr = item.width >= 1920 ? '1080p' : item.width >= 1280 ? '720p' : 'SD';
-
-        // Create a direct stream URL-style magnet
-        const playerUrl = item.player || `https://vk.com/video${item.owner_id}_${item.id}`;
-        const magnet = `magnet:?xt=urn:btih:${'0'.repeat(40)}&dn=${encodeURIComponent(title)}&tr=${encodeURIComponent(playerUrl)}`;
-
-        return this.normalizeRelease(
-          `vkvideo-${item.id || i}`,
-          title,
-          magnet,
-          estimatedBytes,
-          item.views ? Math.min(Math.floor(item.views / 100), 999) : 25,
-          5,
-          'VK Video Direct'
-        );
-      });
-    } catch (err: any) {
-      // VK Video API may be rate-limited or blocked — return empty gracefully
-      console.warn(`[Scraper] VK Video:`, this.formatAxiosError(err));
-      return [];
-    }
-  }
 
   private normalizeRelease(
     id: string,
