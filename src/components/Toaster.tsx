@@ -53,7 +53,6 @@ export const Toaster: React.FC = () => {
             borderRadius: '14px',
             background: COLORS[t.type],
             border: `1px solid ${BORDERS[t.type]}`,
-            backdropFilter: 'blur(14px)',
             WebkitBackdropFilter: 'blur(14px)',
             boxShadow: '0 12px 32px rgba(0,0,0,0.55)',
             fontSize: '0.82rem',

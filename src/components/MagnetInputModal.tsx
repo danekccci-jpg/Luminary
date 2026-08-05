@@ -29,9 +29,7 @@ export const MagnetInputModal: React.FC<MagnetInputModalProps> = ({
         alignItems: 'center',
         justifyContent: 'center',
         padding: '1.5rem',
-        background: 'rgba(0,0,0,0.8)',
-        backdropFilter: 'blur(16px)',
-        WebkitBackdropFilter: 'blur(16px)',
+        background: 'rgba(0,0,0,0.9)',
         animation: 'fadeIn 0.2s ease',
       }}
       onClick={e => e.target === e.currentTarget && onClose()}
@@ -41,9 +39,7 @@ export const MagnetInputModal: React.FC<MagnetInputModalProps> = ({
           position: 'relative',
           width: '100%',
           maxWidth: '460px',
-          background: 'rgba(11,12,17,0.97)',
-          backdropFilter: 'blur(30px)',
-          WebkitBackdropFilter: 'blur(30px)',
+          background: 'rgba(11,12,17,0.99)',
           border: '1px solid rgba(255,255,255,0.08)',
           borderRadius: '24px',
           padding: '1.8rem',

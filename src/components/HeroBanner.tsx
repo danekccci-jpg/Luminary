@@ -30,7 +30,8 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({ movie, onSelectMovie }) 
         boxShadow: '0 24px 80px rgba(0,0,0,0.7), 0 8px 24px rgba(0,0,0,0.5)',
       }}
     >
-      {/* Background Image */}
+      {/* Background Image — центрирован по центру кадра (без смещения вправо),
+          cover + translateZ для GPU-композитинга при скролле */}
       <img
         src={backdropUrl}
         alt={movie.title}
@@ -40,8 +41,9 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({ movie, onSelectMovie }) 
           width: '100%',
           height: '100%',
           objectFit: 'cover',
-          objectPosition: 'center top',
-          transition: 'transform 8s ease',
+          objectPosition: 'center center',
+          transform: 'translateZ(0)',
+          willChange: 'transform',
         }}
       />
 

@@ -49,8 +49,6 @@ export const Header: React.FC<HeaderProps> = ({
       className="sticky top-0 z-40 w-full"
       style={{
         background: 'rgba(10, 11, 14, 0.85)',
-        backdropFilter: 'blur(24px) saturate(180%)',
-        WebkitBackdropFilter: 'blur(24px) saturate(180%)',
         borderBottom: '1px solid rgba(255,255,255,0.06)',
       }}
     >

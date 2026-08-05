@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Play, Download, Users, HardDrive, Search,
   AlertTriangle, Zap, Volume2,
@@ -98,7 +98,7 @@ const getQualityStyle = (q: string) => {
   }
 };
 
-export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
+export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
   releases,
   isLoading,
   onPlayRelease,
@@ -136,13 +136,20 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
     return 0;
   });
 
+  // Кэш разбора метаданных (озвучки/серии/аудио) — избегаем повторного
+  // parseTorrentMeta на каждый рендер карточки (до 13 вызовов на раздачу).
+  const metaCache = useMemo(() => {
+    const m = new Map<string, ReturnType<typeof parseTorrentMeta>>();
+    for (const r of releases) m.set(r.id, parseTorrentMeta(r.title));
+    return m;
+  }, [releases]);
+  const metaOf = (r: TorrentRelease) => metaCache.get(r.id) || parseTorrentMeta(r.title);
+
   return (
     <div
       style={{
         marginTop: '2rem',
-        background: 'rgba(14,15,21,0.7)',
-        backdropFilter: 'blur(20px)',
-        WebkitBackdropFilter: 'blur(20px)',
+        background: 'rgba(14,15,21,0.93)',
         border: '1px solid rgba(255,255,255,0.07)',
         borderRadius: '22px',
         overflow: 'hidden',
@@ -299,7 +306,16 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
       </div>
 
       {/* ── Release List ── */}
-      <div style={{ padding: '0.6rem 0.8rem', maxHeight: '480px', overflowY: 'auto' }}>
+      <div
+        style={{
+          padding: '0.6rem 0.8rem',
+          maxHeight: '480px',
+          overflowY: 'auto',
+          // GPU-композитинг скролл-контейнера (микро-фризы на M1 при repaint)
+          transform: 'translateZ(0)',
+          willChange: 'transform',
+        }}
+      >
         {isLoading ? (
           <div style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
             {[1, 2, 3].map(n => (
@@ -437,12 +453,12 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
                     </div>
 
                     {/* ── Метаданные из названия: озвучки, серии/сезоны, аудио ── */}
-                    {(parseTorrentMeta(release.title).dubbings.length > 0 ||
-                      parseTorrentMeta(release.title).seasons ||
-                      parseTorrentMeta(release.title).episodes ||
-                      parseTorrentMeta(release.title).audioTracks.length > 0) && (
+                    {(metaOf(release).dubbings.length > 0 ||
+                      metaOf(release).seasons ||
+                      metaOf(release).episodes ||
+                      metaOf(release).audioTracks.length > 0) && (
                       <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.45rem', alignItems: 'center' }}>
-                        {parseTorrentMeta(release.title).dubbings.slice(0, 4).map((d) => (
+                        {metaOf(release).dubbings.slice(0, 4).map((d) => (
                           <span
                             key={d}
                             style={{
@@ -458,7 +474,7 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
                             {d}
                           </span>
                         ))}
-                        {parseTorrentMeta(release.title).seasons != null && (
+                        {metaOf(release).seasons != null && (
                           <span
                             style={{
                               padding: '1px 7px',
@@ -470,11 +486,11 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
                               fontWeight: 700,
                             }}
                           >
-                            S{parseTorrentMeta(release.title).seasons}
-                            {parseTorrentMeta(release.title).episodes != null ? `E${parseTorrentMeta(release.title).episodes}` : ''}
+                            S{metaOf(release).seasons}
+                            {metaOf(release).episodes != null ? `E${metaOf(release).episodes}` : ''}
                           </span>
                         )}
-                        {parseTorrentMeta(release.title).episodes != null && parseTorrentMeta(release.title).seasons == null && (
+                        {metaOf(release).episodes != null && metaOf(release).seasons == null && (
                           <span
                             style={{
                               padding: '1px 7px',
@@ -486,10 +502,10 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
                               fontWeight: 700,
                             }}
                           >
-                            {parseTorrentMeta(release.title).episodes} серий
+                            {metaOf(release).episodes} серий
                           </span>
                         )}
-                        {parseTorrentMeta(release.title).audioTracks.slice(0, 3).map((a) => (
+                        {metaOf(release).audioTracks.slice(0, 3).map((a) => (
                           <span
                             key={a}
                             title="Аудиодорожка"
@@ -532,4 +548,4 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
       </div>
     </div>
   );
-};
+});

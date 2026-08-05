@@ -10,7 +10,7 @@ interface MovieCardProps {
   index?: number;
 }
 
-export const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, index = 0 }) => {
+export const MovieCard: React.FC<MovieCardProps> = React.memo(({ movie, onClick, index = 0 }) => {
   const [hovered, setHovered] = useState(false);
   const displayTitle = movie.title || movie.name || 'Без названия';
 
@@ -63,6 +63,7 @@ export const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, index = 0 
           : '0 4px 16px rgba(0,0,0,0.4)',
         transform: hovered ? 'translateY(-8px) scale(1.02)' : 'translateY(0) scale(1)',
         transition: 'all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1)',
+        willChange: 'transform',
         animation: `fadeUp 0.4s ease ${Math.min(index, 24) * 0.03}s both`,
       }}
     >
@@ -238,8 +239,7 @@ export const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, index = 0 
               gap: '3px',
               padding: '3px 8px',
               borderRadius: '999px',
-              background: 'rgba(10,11,14,0.75)',
-              backdropFilter: 'blur(8px)',
+              background: 'rgba(10,11,14,0.88)',
               border: '1px solid rgba(255,184,0,0.35)',
               fontSize: '0.7rem',
               fontWeight: 800,
@@ -272,4 +272,4 @@ export const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, index = 0 
       </div>
     </div>
   );
-};
+});

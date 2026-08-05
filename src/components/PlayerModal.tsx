@@ -963,7 +963,10 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     window.open(streamUrl, '_blank');
   };
 
-  /** Если видео не начало воспроизводиться за 5 секунд — оверлей «Откройте через VLC». */
+  /** Если видео не начало воспроизводиться за 5 секунд — оверлей «Откройте через VLC».
+   *  Ложные срабатывания исключены: оверлей показывается ТОЛЬКО если видео
+   *  реально не играет (readyState < 2 И currentTime === 0), и автоматически
+   *  скрывается при первом же `playing` / `timeupdate`. */
   useEffect(() => {
     if (isBuffering || errorMsg || codecError || !streamUrl) return;
     const video = videoRef.current;
@@ -971,12 +974,17 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
     let timer: NodeJS.Timeout | null = null;
     const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
-    const onPlaying = () => clearTimer();
+    const onPlaying = () => {
+      clearTimer();
+      // Видео пошло (возможно, медленно после буферизации) — снять ошибочный оверлей
+      if (codecError) setCodecError(false);
+    };
 
     video.addEventListener('playing', onPlaying);
     timer = setTimeout(async () => {
-      // Данные не подгрузились (readyState < 2) — поток не воспроизводится
-      if (!video.error && video.readyState < 2) {
+      // Поток не воспроизводится: данные не подгрузились И таймкод не пошёл.
+      // Если readyState >= 3 или currentTime > 0 — видео УЖЕ играет, оверлей не нужен.
+      if (!video.error && video.readyState < 2 && video.currentTime === 0) {
         // AC3/DTS: сначала фоновая перекодировка в AAC — оверлей только если не помогло
         if (await tryAutoRetranscode()) { clearTimer(); return; }
         console.warn('[Player] Stream did not start within 5s — showing codec fallback');
@@ -1011,11 +1019,16 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   };
 
   const handleTimeUpdate = () => {
-    if (!videoRef.current) return;
-    setCurrentTime(videoRef.current.currentTime);
-    setDuration(videoRef.current.duration || 0);
-    if (videoRef.current.buffered.length > 0) {
-      setBuffered(videoRef.current.buffered.end(videoRef.current.buffered.length - 1));
+    const video = videoRef.current;
+    if (!video) return;
+    setCurrentTime(video.currentTime);
+    setDuration(video.duration || 0);
+    if (video.buffered.length > 0) {
+      setBuffered(video.buffered.end(video.buffered.length - 1));
+    }
+    // Видео реально играет (таймкод пошёл) → снять ложный оверлей ошибки кодека
+    if (codecError && video.currentTime > 0) {
+      setCodecError(false);
     }
   };
 
@@ -1140,8 +1153,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             width: '42px',
             height: '42px',
             borderRadius: '50%',
-            background: 'rgba(10,11,14,0.8)',
-            backdropFilter: 'blur(10px)',
+            background: 'rgba(10,11,14,0.9)',
             border: '1px solid rgba(255,255,255,0.12)',
             color: '#fff',
             cursor: 'pointer',
@@ -1392,7 +1404,6 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             padding: '2.5rem',
             textAlign: 'center',
             background: 'rgba(11,12,17,0.9)',
-            backdropFilter: 'blur(20px)',
             border: '1px solid rgba(255,84,112,0.3)',
             borderRadius: '24px',
           }}
@@ -1437,9 +1448,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                 gap: '0.5rem',
                 padding: '1rem 1.4rem',
                 borderRadius: '18px',
-                background: 'rgba(10,11,14,0.75)',
-                backdropFilter: 'blur(14px)',
-                WebkitBackdropFilter: 'blur(14px)',
+                background: 'rgba(10,11,14,0.88)',
                 border: '1px solid rgba(0,242,254,0.25)',
                 boxShadow: '0 12px 40px rgba(0,0,0,0.6), 0 0 20px rgba(0,242,254,0.08)',
                 animation: 'scaleIn 0.15s cubic-bezier(0.16,1,0.3,1)',
@@ -1474,9 +1483,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                background: 'rgba(0,0,0,0.88)',
-                backdropFilter: 'blur(10px)',
-                WebkitBackdropFilter: 'blur(10px)',
+                background: 'rgba(0,0,0,0.94)',
                 padding: '1.5rem',
               }}
             >
@@ -1536,7 +1543,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
           )}
 
           {/* ── CODEC ERROR OVERLAY: неподдерживаемый формат / зависший поток ── */}
-          {codecError && (
+          {/* Оверлей ошибки кодека — только если видео ДЕЙСТВИТЕЛЬНО не играет
+              (не в состоянии playing). Если поток пошёл — оверлей мгновенно уходит. */}
+          {codecError && !isPlaying && (
             <div
               style={{
                 position: 'absolute',
@@ -1545,9 +1554,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                background: 'rgba(0,0,0,0.85)',
-                backdropFilter: 'blur(12px)',
-                WebkitBackdropFilter: 'blur(12px)',
+                background: 'rgba(0,0,0,0.94)',
                 padding: '1.5rem',
               }}
             >
@@ -1905,9 +1912,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                     bottom: '100%',
                     right: '0.5rem',
                     marginBottom: '0.75rem',
-                    background: 'rgba(14,15,21,0.92)',
-                    backdropFilter: 'blur(20px)',
-                    WebkitBackdropFilter: 'blur(20px)',
+                    background: 'rgba(14,15,21,0.97)',
                     border: '1px solid rgba(0,242,254,0.2)',
                     borderRadius: '18px',
                     padding: '1.2rem 1.3rem',

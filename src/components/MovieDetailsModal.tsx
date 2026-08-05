@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Tv, MonitorPlay, Heart, Bookmark } from 'lucide-react';
 import { library, LibraryItem } from '../services/library';
 import { extractYear } from '../utils/year';
@@ -120,7 +120,9 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     return () => { cancelled = true; };
   }, [movie]);
 
-  const handlePlayRelease = (release: TorrentRelease) => {
+  // useCallback: стабильная ссылка для React.memo(TorrentSelector) — без
+  // перерендера селектора на каждый ре-рендер деталей фильма
+  const handlePlayRelease = useCallback((release: TorrentRelease) => {
     onPlayTorrent({
       magnet: release.magnet,
       title: `${movie.title} (${release.quality})`,
@@ -129,7 +131,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
       videoCodec: release.videoCodec,
       audioCodec: release.audioCodec,
     });
-  };
+  }, [movie, onPlayTorrent, posterUrl]);
 
   /** Открыть прямой плеер (HDRezka/Filmix) во внешнем браузере. */
   const handleOpenStream = (stream: OnlineStream) => {
@@ -146,9 +148,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
         alignItems: 'center',
         justifyContent: 'center',
         padding: '1.5rem',
-        background: 'rgba(0,0,0,0.82)',
-        backdropFilter: 'blur(16px)',
-        WebkitBackdropFilter: 'blur(16px)',
+        background: 'rgba(0,0,0,0.9)',
         animation: 'fadeIn 0.2s ease',
         overflowY: 'auto',
       }}
@@ -159,9 +159,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
           position: 'relative',
           width: '100%',
           maxWidth: '900px',
-          background: 'rgba(11,12,17,0.96)',
-          backdropFilter: 'blur(30px)',
-          WebkitBackdropFilter: 'blur(30px)',
+          background: 'rgba(11,12,17,0.985)',
           border: '1px solid rgba(255,255,255,0.08)',
           borderRadius: '28px',
           overflow: 'hidden',
@@ -183,8 +181,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
             width: '38px',
             height: '38px',
             borderRadius: '50%',
-            background: 'rgba(10,11,14,0.8)',
-            backdropFilter: 'blur(10px)',
+            background: 'rgba(10,11,14,0.9)',
             border: '1px solid rgba(255,255,255,0.1)',
             color: '#fff',
             cursor: 'pointer',
@@ -269,7 +266,6 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                       fontWeight: 700,
                       fontFamily: 'inherit',
                       cursor: 'pointer',
-                      backdropFilter: 'blur(10px)',
                       transition: 'all 0.2s ease',
                     }}
                   >
@@ -292,7 +288,6 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                       fontWeight: 700,
                       fontFamily: 'inherit',
                       cursor: 'pointer',
-                      backdropFilter: 'blur(10px)',
                       transition: 'all 0.2s ease',
                     }}
                   >
@@ -409,9 +404,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
             <div
               style={{
                 marginBottom: '1rem',
-                background: 'rgba(14,15,21,0.7)',
-                backdropFilter: 'blur(20px)',
-                WebkitBackdropFilter: 'blur(20px)',
+                background: 'rgba(14,15,21,0.93)',
                 border: '1px solid rgba(255,255,255,0.07)',
                 borderRadius: '22px',
                 overflow: 'hidden',

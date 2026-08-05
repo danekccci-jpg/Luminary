@@ -132,8 +132,22 @@ export class TorrentScraper {
       }
     }
     const finalResults = Array.from(unique.values());
-    finalResults.sort((a, b) => b.seeders - a.seeders || b.stabilityScore - a.stabilityScore);
+    // Приоритет русскоязычных раздач (кириллица/студии/RU-трекеры) — как в UI
+    finalResults.sort((a, b) => {
+      const ruB = this.russianBonus(b) - this.russianBonus(a);
+      if (ruB !== 0) return ruB;
+      return b.seeders - a.seeders || b.stabilityScore - a.stabilityScore;
+    });
     return finalResults;
+  }
+
+  /** Бонус приоритета русскоязычных раздач: кириллица, RU-студии озвучки, RU-трекеры. */
+  private russianBonus(r: TorrentRelease): number {
+    let score = 0;
+    if (/[а-яё]/i.test(r.title)) score += 40; // русское название раздачи
+    if (/дубляж|\brhs\b|hdrezka|lostfilm|tvshows|кубик в кубе/i.test(r.title)) score += 40; // RU-озвучка
+    if (/rutracker|rutor|jacred/i.test(r.source)) score += 20; // русскоязычные трекеры
+    return score;
   }
 
   /** Strip punctuation Lampa-style: colons, dashes, quotes → spaces; keep letters/digits. */
@@ -409,10 +423,11 @@ export class TorrentScraper {
   // ═══════════════════════════════════════════════════════
   private async scrapeRuTracker(query: string, year?: string): Promise<TorrentRelease[]> {
     const searchStr = year ? `${query} ${year}` : query;
-    // Try multiple RuTracker mirrors
+    // Пул зеркал RuTracker (форум гостевой доступен на чтение)
     const mirrors = [
       `https://rutracker.org/forum/tracker.php?nm=${encodeURIComponent(searchStr)}`,
       `https://rutracker.net/forum/tracker.php?nm=${encodeURIComponent(searchStr)}`,
+      `https://rutracker.nl/forum/tracker.php?nm=${encodeURIComponent(searchStr)}`,
     ];
 
     let html = '';
@@ -421,7 +436,7 @@ export class TorrentScraper {
     for (const url of mirrors) {
       try {
         const response = await axios.get(url, {
-          timeout: 7000,
+          timeout: 6000,
           validateStatus: (s) => s >= 200 && s < 300,
           headers: {
             'User-Agent':
@@ -445,46 +460,29 @@ export class TorrentScraper {
 
     const $ = cheerio.load(html);
     const releases: TorrentRelease[] = [];
+    const seenMagnet = new Set<string>();
 
-    // RuTracker uses <tr> rows with class "tCenter" or similar
-    $('tr.hl-tr, tr:has(a[href^="magnet:"])').each((i, el) => {
+    // ⚠️ Только РЕАЛЬНЫЕ magnet-ссылки. Анонимный RuTracker НЕ отдаёт magnet
+    // гостям — НЕ генерируем фейковые btih:0000… (такие раздачи дают
+    // «Ошибка добавления торрента»). Реальные magnet для RuTracker приходят
+    // через JacRed-агрегаторы (их rutracker-модули авторизованы инстансами).
+    $('tr:has(a[href^="magnet:"])').each((i, el) => {
+      const magnet = $(el).find('a[href^="magnet:"]').first().attr('href') || '';
+      if (!magnet.startsWith('magnet:?xt=urn:btih:') || magnet.includes('btih:0000')) return;
+
       const cells = $(el).find('td');
-      if (cells.length < 5) return;
+      if (cells.length < 3) return;
 
-      const titleCell = $(cells).eq(1); // Usually 2nd column
-      const titleLink = titleCell.find('a[href*="viewtopic"]');
-      const titleText = titleLink.text().trim();
+      const titleText =
+        $(cells).eq(1).find('a[href*="viewtopic"]').text().trim() ||
+        $(cells).eq(1).text().trim() ||
+        $(el).find('a[href*="viewtopic"]').first().text().trim();
+      if (!titleText || seenMagnet.has(magnet)) return;
+      seenMagnet.add(magnet);
 
-      // Magnet link — may be in the row or on detail page
-      const magnetLink =
-        $(el).find('a[href^="magnet:"]').attr('href') ||
-        $(el).find('a.dl-link').attr('href') ||
-        '';
-
-      if (!titleText) return;
-
-      // Size column
       const sizeText = $(cells).eq(4).text().trim() || '0 GB';
-      // Seeds column
       const seedText = $(cells).eq(5).text().trim() || '0';
-      // Leeches column
       const leechText = $(cells).eq(6).text().trim() || '0';
-
-      // Generate magnet from topic ID if not available
-      let magnet = magnetLink;
-      if (!magnet || !magnet.startsWith('magnet:')) {
-        const topicMatch = (titleLink.attr('href') || '').match(/t=(\d+)/);
-        if (topicMatch) {
-          const topicId = topicMatch[1];
-          // Construct info hash placeholder — real hash requires auth
-          magnet = `magnet:?xt=urn:btih:${'0'.repeat(40)}&dn=${encodeURIComponent(titleText)}&tr=udp://opentor.net:6969`;
-        } else {
-          magnet = `magnet:?xt=urn:btih:${'0'.repeat(40)}&dn=${encodeURIComponent(titleText)}`;
-        }
-      }
-
-      const seeders = parseInt(seedText, 10) || 0;
-      const leechers = parseInt(leechText, 10) || 0;
 
       releases.push(
         this.normalizeRelease(
@@ -492,42 +490,12 @@ export class TorrentScraper {
           titleText,
           magnet,
           this.parseSizeBytes(sizeText),
-          seeders,
-          leechers,
+          parseInt(seedText, 10) || 0,
+          parseInt(leechText, 10) || 0,
           'RuTracker.org'
         )
       );
     });
-
-    // If no magnet rows found, try generic table rows
-    if (releases.length === 0) {
-      $('table.forum tr').each((i, el) => {
-        if (i === 0) return;
-        const cells = $(el).find('td');
-        if (cells.length < 4) return;
-
-        const titleEl = $(cells).eq(1).find('a').first();
-        const titleText = titleEl.text().trim();
-        if (!titleText || titleText.length < 3) return;
-
-        const sizeText = $(cells).eq(cells.length - 2).text().trim();
-        const seedText = $(cells).last().text().trim();
-        const seedMatch = seedText.match(/(\d+)/);
-        const seeders = seedMatch ? parseInt(seedMatch[1], 10) : 0;
-
-        releases.push(
-          this.normalizeRelease(
-            `rutracker-gen-${i}-${Date.now()}`,
-            titleText,
-            `magnet:?xt=urn:btih:${'0'.repeat(40)}&dn=${encodeURIComponent(titleText)}`,
-            this.parseSizeBytes(sizeText),
-            seeders,
-            0,
-            'RuTracker.org'
-          )
-        );
-      });
-    }
 
     return releases;
   }
