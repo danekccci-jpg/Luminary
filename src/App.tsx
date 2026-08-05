@@ -14,8 +14,47 @@ import { tmdbService, TMDB_GENRES } from './services/tmdb';
 import { torrServerService } from './services/torrserver';
 import { toastBus } from './services/toast';
 import { library, formatClock, LibraryItem } from './services/library';
+import { setVkToken } from './services/vkVideoService';
+import { setCustomJacredUrl } from './services/scrapers/jacred';
 import { Heart, Bookmark, History, Play } from 'lucide-react';
 import { Flame, TrendingUp, Award, Search as SearchIcon, Tv, Zap, Film } from 'lucide-react';
+
+// ── Настройки: персистентность в localStorage + применение к сервисам ──
+const SETTINGS_STORAGE_KEY = 'luminary_settings';
+
+const defaultSettings: UserSettings = {
+  tmdbApiKey: '',
+  torrServerPort: 8090,
+  ramCacheMB: 512,
+  preBufferMB: 50,
+  jackettUrl: '',
+  jackettApiKey: '',
+  vkToken: '',
+  jacredUrl: '',
+  autoStartTorrServer: true,
+  autoCleanCacheOnClose: true,
+  transcodeAudioToAac: true,
+};
+
+function loadSettings(): UserSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return { ...defaultSettings, ...parsed };
+      }
+    }
+  } catch { /* ignore */ }
+  return { ...defaultSettings };
+}
+
+/** Применить настройки к модулям-сервисам (VK-токен, JacRed-инстанс, TMDB-ключ). */
+function applySettingsToServices(s: UserSettings) {
+  setVkToken(s.vkToken || '');
+  setCustomJacredUrl(s.jacredUrl || '');
+  if (s.tmdbApiKey?.trim()) tmdbService.setApiKey(s.tmdbApiKey.trim());
+}
 
 // ── Ambient backdrop hue extractor via canvas ──
 function extractDominantHue(imageUrl: string): Promise<string> {
@@ -96,6 +135,9 @@ export const App: React.FC = () => {
     /** Прямой HLS/MP4 поток (VK Video) — плеер играет без TorrServer. */
     directUrl?: string;
     directQuality?: string;
+    /** Сезон/серия (для сериалов) — история ведётся по эпизодам. */
+    season?: number;
+    episode?: number;
     mediaId?: string;
     mediaType?: 'movie' | 'tv';
     year?: string;
@@ -122,22 +164,14 @@ export const App: React.FC = () => {
 
   const [ambientColor, setAmbientColor] = useState('rgba(0,242,254,0.05)');
 
-  const [settings, setSettings] = useState<UserSettings>({
-    tmdbApiKey: '',
-    torrServerPort: 8090,
-    ramCacheMB: 512,
-    preBufferMB: 50,
-    jackettUrl: '',
-    jackettApiKey: '',
-    autoStartTorrServer: true,
-    autoCleanCacheOnClose: true,
-    transcodeAudioToAac: true,
-  });
+  const [settings, setSettings] = useState<UserSettings>(loadSettings);
 
   // Initial data load
   useEffect(() => {
     // Сброс кеша метаданных (IndexedDB v2) — старые года раздач перезапросятся из TMDB
     clearMetaCache();
+    // Применяем сохранённые настройки к сервисам (VK-токен, JacRed-инстанс, TMDB-ключ)
+    applySettingsToServices(settings);
     fetchCatalog();
     checkTorrServerStatus();
     // Push-подписка на изменения статуса TorrServer из Main Process —
@@ -229,10 +263,11 @@ export const App: React.FC = () => {
 
   const handleSaveSettings = (newSettings: UserSettings) => {
     setSettings(newSettings);
-    // Пользовательский TMDB-ключ (из настроек) применяется сразу
-    if (newSettings.tmdbApiKey?.trim()) {
-      tmdbService.setApiKey(newSettings.tmdbApiKey.trim());
-    }
+    // Персистентность: токены/URL инстансов переживают перезапуск приложения
+    try {
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(newSettings));
+    } catch { /* переполнение localStorage — игнорируем */ }
+    applySettingsToServices(newSettings);
     fetchCatalog();
   };
 
@@ -503,8 +538,16 @@ export const App: React.FC = () => {
         <MovieDetailsModal
           movie={selectedMovie}
           onClose={() => setSelectedMovie(null)}
+          onOpenSettings={() => {
+            // «Настроить VK» из блока онлайн-плееров: закрываем детали → открываем настройки
+            setSelectedMovie(null);
+            setIsSettingsOpen(true);
+          }}
           onPlayTorrent={(torrent) => {
-            const prog = selectedMovie ? library.getProgress(String(selectedMovie.id)) : null;
+            // Прогресс по конкретному эпизоду сериала (или фильму)
+            const prog = selectedMovie
+              ? library.getProgress(String(selectedMovie.id), torrent.season, torrent.episode)
+              : null;
             // ⚠️ ZONE-навигация: НЕ сбрасываем selectedMovie — детали фильма
             // (выбор торрента/серии) остаются под плеером. X / Escape в плеере
             // возвращают сюда, а не на главный экран.
@@ -514,7 +557,7 @@ export const App: React.FC = () => {
               mediaType: selectedMovie?.media_type,
               // Год — приоритет оригинальной даты TMDB, не year раздачи/ремастера
               year: extractYear(selectedMovie?.release_date || selectedMovie?.first_air_date) || selectedMovie?.year,
-              startPosition: prog?.position,
+              startPosition: torrent.startPosition ?? prog?.position,
             });
             refreshLibrary();
           }}
@@ -534,7 +577,15 @@ export const App: React.FC = () => {
           onProgressSave={(cur, dur) => {
             if (activeStream.mediaId) {
               library.saveProgress(
-                { id: activeStream.mediaId, title: activeStream.title, poster: activeStream.poster, year: activeStream.year, mediaType: activeStream.mediaType },
+                {
+                  id: activeStream.mediaId,
+                  title: activeStream.title,
+                  poster: activeStream.poster,
+                  year: activeStream.year,
+                  mediaType: activeStream.mediaType,
+                  season: activeStream.season,
+                  episode: activeStream.episode,
+                },
                 cur, dur
               );
               refreshLibrary();

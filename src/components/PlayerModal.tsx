@@ -4,11 +4,12 @@ import {
   Maximize, Minimize, Zap, Users,
   AlertTriangle, SkipBack, SkipForward,
   SlidersHorizontal, Sun, Contrast, Palette, Monitor,
-  ExternalLink, Loader2, MonitorPlay, RotateCcw, PictureInPicture2, Gauge, Subtitles, AudioLines,
+  ExternalLink, Loader2, MonitorPlay, RotateCcw, PictureInPicture2, Gauge, Subtitles, AudioLines, Check,
 } from 'lucide-react';
 import { TorrServerStats } from '../types';
 import { torrServerService } from '../services/torrserver';
 import { toastBus } from '../services/toast';
+import { probeAudioTracks, audioTrackLabel as mkvTrackLabel, StreamAudioTrack } from '../services/streamTracks';
 // Hls.js — воспроизведение HLS (/gst/master.m3u8 от TorrServer MatriX.gst):
 // автоматический транскодинг HEVC/H.265, AC3/DTS/TrueHD, 10-bit MKV → MSE.
 // (Chromium не умеет эти кодеки нативно, но умеет их декодировать через MSE.)
@@ -304,6 +305,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const [skipRequested, setSkipRequested] = useState(false); // «Пропустить буферизацию» нажат
   const [containerExt, setContainerExt] = useState('');      // .mkv / .mp4 / .ts из file_stats
   const [codecError, setCodecError]     = useState(false);   // onError / 5s без воспроизведения
+  /** Деталь последней медиа-ошибки (MEDIA_ERR_*) — для понятного сообщения в оверлее. */
+  const [mediaErrorDetail, setMediaErrorDetail] = useState('');
 
   // ── Видео Фильтры ──
   const [filters, setFilters]       = useState<VideoFilters>(loadSavedFilters);
@@ -314,6 +317,11 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const [playbackRate, setPlaybackRate] = useState(1);
   const [audioTracks, setAudioTracks]   = useState<Array<{ index: number; label: string }>>([]);
   const [activeAudioTrack, setActiveAudioTrack] = useState(-1);
+  /** Дорожки из MKV-контейнера (EBML-проба /stream) — языки + студии озвучки. */
+  const [mkvTracks, setMkvTracks]       = useState<StreamAudioTrack[]>([]);
+  const mkvProbeDoneRef = useRef(false);
+  /** Позиция для seek'а после переключения аудиодорожки (поток пересобирается). */
+  const seekOnLoadRef = useRef<number | null>(null);
   const [isPip, setIsPip]           = useState(false);
   const [isEnded, setIsEnded]       = useState(false);
   const [scrubHover, setScrubHover] = useState<{ x: number; time: number } | null>(null);
@@ -422,6 +430,34 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   };
 
   const selectAudioTrack = (index: number) => {
+    // MKV-контейнер: дорожки из EBML-пробы (языки + студии озвучки) — пробрасываем
+    // выбранный audio_index в поток TorrServer gst (`audio=N` → транскод этой дорожки).
+    // Позиция воспроизведения НЕ сбрасывается: seek возвращается после загрузки потока.
+    if (mkvTracks.length > 1) {
+      if (!hash || !videoIndexRef.current) return;
+      const label = mkvTrackLabel(mkvTracks[index]);
+      const video = videoRef.current;
+      const savedTime = video && Number.isFinite(video.currentTime) && video.currentTime > 0 ? video.currentTime : 0;
+      torrServerService
+        .getStreamUrl(hash, videoIndexRef.current, true, index)
+        .then((gstUrl) => {
+          if (!gstUrl) return;
+          setActiveAudioTrack(index);
+          setAudioTrackLabel(label);
+          setShowControls(true);
+          if (gstUrl !== streamUrl) {
+            if (savedTime > 0) seekOnLoadRef.current = savedTime; // вернёмся на позицию
+            console.warn(
+              `[Player] MKV audio → дорожка ${index + 1} (${label}), gst audio=${index}` +
+                (savedTime > 0 ? `, позиция ${Math.round(savedTime)}с сохранится` : '')
+            );
+            setStreamUrl(gstUrl);
+            toastBus.push(`Аудио: ${label}`, 'info');
+          }
+        })
+        .catch(() => {});
+      return;
+    }
     // HLS-режим (Hls.js): переключение через hls.audioTrack (gst отдаёт дорожки в манифесте)
     const hls = hlsRef.current;
     if (hls && isHlsMode) {
@@ -441,6 +477,47 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     setAudioTrackLabel(list[index].label || `Дорожка ${index + 1}`);
     setShowControls(true);
   };
+
+  /** Список дорожек для селектора: MKV-проба (языки/студии) → Chromium audioTracks. */
+  const displayAudioTracks = useMemo(() => {
+    if (mkvTracks.length > 1) {
+      return mkvTracks.map((t, i) => ({ index: i, label: mkvTrackLabel(t) }));
+    }
+    return audioTracks;
+  }, [mkvTracks, audioTracks]);
+
+  /**
+   * Парсинг встроенных аудиопотоков MKV из metadata TorrServer: Range-запрос
+   * первых 2 МБ /stream + EBML-разбор Tracks (язык, студия озвучки, кодек).
+   * Одна проба на сессию; ошибка — не критична (селектор просто не расширится).
+   */
+  useEffect(() => {
+    if (!streamReady || isBuffering || mkvProbeDoneRef.current) return;
+    if (!hash || !videoIndexRef.current) return;
+    mkvProbeDoneRef.current = true;
+    const probeUrl = streamUrl.includes('.m3u8')
+      ? '' // gst-режим: файл пробируем отдельно (ниже)
+      : streamUrl;
+    (async () => {
+      try {
+        let url = probeUrl;
+        if (!url) {
+          url = await torrServerService.getStreamUrl(hash, videoIndexRef.current!, false).catch(() => '');
+        }
+        if (!url) return;
+        const tracks = await probeAudioTracks(url);
+        if (tracks.length > 1) {
+          setMkvTracks(tracks);
+          // gst по умолчанию транскодит первую дорожку (audio=0) — она активна
+          setActiveAudioTrack(0);
+          console.log(`[Player] MKV: найдено аудио-дорожек: ${tracks.length}`, tracks.map((t) => mkvTrackLabel(t)));
+        }
+      } catch {
+        /* проба не удалась — оставляем Chromium-дорожки */
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamReady, isBuffering, streamUrl, hash]);
 
   // Клавиатурное управление
   useEffect(() => {
@@ -533,6 +610,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     const v = (videoCodec || '').toUpperCase();
     const a = (audioCodec || '').toUpperCase();
     const ext = (containerExt || '').toLowerCase();
+    // DTS / DTS-HD / TrueHD / E-AC3 / AC3 / Atmos / MLP — Chromium не декодирует
     const riskyAudio = /AC.?3|EAC.?3|EC.?3|DTS|TRUEHD|ATMOS|MLP/.test(a);
     const riskyVideo = v.includes('HEVC') || v.includes('H.265') || v.includes('X265') || v.includes('H265');
     const mkv = ext === 'mkv' || ext === 'mka';
@@ -540,8 +618,17 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     return { risky, riskyAudio, audio: a || '—', video: v || '—', ext: ext || '—' };
   }, [videoCodec, audioCodec, containerExt]);
 
+  /** Нужен ли HLS-транскод TorrServer (gst → AAC/PCM): рискованное аудио
+   *  (DTS/DTS-HD/TrueHD/E-AC3/AC3) или HEVC-в-MKV. Для безопасных раздач
+   *  (AAC/MP4/H.264) играем нативный /stream — без накладных расходов ремукса. */
+  const needTranscode = transcodeAudioToAac && codecRisk.risky;
+
+  /** Защита от ping-pong native↔gst: одна попытка ретранскода на поток. */
+  const gstTriedRef = useRef(false);
+
   // Init torrent: предзагрузка + проверка HTTP 200 потока перед монтированием <video>
   useEffect(() => {
+    gstTriedRef.current = false; // новая сессия — снова можно пробовать gst-ретраскод
     let statsInterval: NodeJS.Timeout | null = null;
     let probeInterval: NodeJS.Timeout | null = null;
     let cancelled = false;
@@ -585,7 +672,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       if (r.ok) {
         // index указывает на .srt/текст вместо видео → пробуем видео-файл
         if ((r.contentType || '').startsWith('text/') && videoIndex && torrentHash) {
-          const vidUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, transcodeAudioToAac);
+          const vidUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, needTranscode);
           if (vidUrl && vidUrl !== url) {
             currentUrl = vidUrl;
             if (!cancelled) setStreamUrl(vidUrl);
@@ -597,7 +684,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         return true;
       }
       // GST HLS недоступен (обычный бинарник без -gst) → откат на обычный /stream
-      if (transcodeAudioToAac && url.includes('/gst/') && torrentHash) {
+      if (url.includes('/gst/') && torrentHash) {
         const plainUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, false);
         if (plainUrl && plainUrl !== url) {
           currentUrl = plainUrl;
@@ -699,7 +786,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
           await new Promise((r) => setTimeout(r, 1000));
         }
 
-        currentUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, transcodeAudioToAac);
+        currentUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, needTranscode);
         if (!cancelled) setStreamUrl(currentUrl);
 
         // ── Предзагрузка ВСЕГДА по обычному /stream (Range 0-250MB) ──
@@ -731,7 +818,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                   videoIndexRef.current = idx;
                   if (idx !== 1 && torrentHash) {
                     videoIndex = idx;
-                    torrServerService.getStreamUrl(torrentHash, idx, transcodeAudioToAac).then((u) => {
+                    torrServerService.getStreamUrl(torrentHash, idx, needTranscode).then((u) => {
                       if (u && !cancelled && u !== currentUrl) {
                         currentUrl = u;
                         setStreamUrl(u);
@@ -883,13 +970,18 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
    * Возвращает true, если фоновый ретранскод запущен.
    */
   const tryAutoRetranscode = async (force: boolean = false): Promise<boolean> => {
-    if (transcodeAudioToAac) return false;                       // уже в транскоде
-    if (!codecRisk.risky && !force) return false;                // кодек безопасный (force — для onError)
+    // Плановый режим: если транскод уже выбран по метаданным (needTranscode) —
+    // переключать нечего. При force (реальная ошибка декодирования) пробуем gst
+    // даже при включённой настройке — метаданные могли не совпасть с фактическим
+    // потоком (раздача заявлена как AAC, а внутри DTS/TrueHD).
+    if (!force && (transcodeAudioToAac || !codecRisk.risky)) return false;
     if (!hash || !videoIndexRef.current) return false;           // нет индекса файла
-    if (streamUrl && streamUrl.includes('/gst/')) return false;  // уже пробовали GST
+    if (streamUrl && streamUrl.includes('/gst/')) return false;  // уже в транскоде
+    if (gstTriedRef.current) return false;                       // защита от ping-pong native↔gst
+    gstTriedRef.current = true;
     const gstUrl = await torrServerService.getStreamUrl(hash, videoIndexRef.current, true).catch(() => null);
     if (!gstUrl || gstUrl === streamUrl) return false;
-    console.warn('[Player] AC3/DTS — фоновая перекодировка в AAC (GST HLS), повторная попытка…');
+    console.warn('[Player] AC3/DTS/HEVC — фоновая перекодировка в AAC (GST HLS), повторная попытка…');
     setStreamUrl(gstUrl);
     restartPreload(gstUrl);
     return true;
@@ -897,9 +989,16 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
   /** onError на <video>: кодек/контейнер не поддерживается Chromium. */
   const handleVideoError = async () => {
-    console.error('[Player] Video element error:', videoRef.current?.error || 'unknown');
-    // Любая ошибка нативного воспроизведения → пробуем HLS-транскодинг (gst),
-    // даже если кодек не помечен рискованным в названии (force=true).
+    const err = videoRef.current?.error;
+    const code = err?.code ?? -1;
+    // MEDIA_ERR_DECODE (3) / MEDIA_ERR_SRC_NOT_SUPPORTED (4) — кодек/контейнер:
+    // сначала автоматически переключаемся на транскодированный поток (gst → AAC),
+    // оверлей VLC/IINA показываем ТОЛЬКО если ретранскод не помог (никакого
+    // чёрного экрана — всегда либо новый источник, либо понятное уведомление).
+    if (code === 3) setMediaErrorDetail('MEDIA_ERR_DECODE — кодек/контейнер не поддерживается');
+    else if (code === 4) setMediaErrorDetail('MEDIA_ERR_SRC_NOT_SUPPORTED — поток не поддерживается');
+    else setMediaErrorDetail(`Код ошибки ${code}`);
+    console.error('[Player] Video element error:', err || 'unknown', `code=${code}`);
     if (await tryAutoRetranscode(true)) return;
     setCodecError(true);
   };
@@ -989,17 +1088,19 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         console.warn('[Player] Hls fatal error:', data.type, data.details);
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           // Сетевая ошибка (gst недоступен/404 на обычном бинарнике) — до 3 авто-retry,
-          // затем отдаём управление оверлею VLC (handleVideoError-путь).
+          // затем авто-откат на нативный /stream, и только потом оверлей VLC.
           if (netRetries < 3) {
             netRetries++;
             setTimeout(() => hls.startLoad(), 1200);
             return;
           }
+          if (fallbackToNativeStream()) return;
           setCodecError(true);
           return;
         }
-        // MEDIA_ERROR и прочие фатальные: кодек не поддерживается даже через MSE →
-        // оверлей «Открыть через VLC / IINA» (ТОЛЬКО после фатала hls.js + gst).
+        // MEDIA_ERROR и прочие фатальные: MSE не декодирует даже транскод →
+        // пробуем нативный поток, затем оверлей «Открыть через VLC / IINA».
+        if (fallbackToNativeStream()) return;
         setCodecError(true);
       });
     } else if (streamUrl) {
@@ -1012,16 +1113,41 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
   /** Открыть поток во внешнем плеере (VLC → IINA → браузер). */
   const openExternalPlayer = async () => {
-    if (!streamUrl) return;
+    let url = streamUrl;
+    // Для внешнего плеера отдаём НАИВНЫЙ /stream от TorrServer — VLC/IINA
+    // декодируют MKV/HEVC/DTS/TrueHD нативно, транскод gst не нужен.
+    if (url.includes('/gst/') && hash && videoIndexRef.current) {
+      const plain = await torrServerService.getStreamUrl(hash, videoIndexRef.current, false).catch(() => null);
+      if (plain) url = plain;
+    }
+    if (!url) return;
     if (window.electronAPI?.openInExternalPlayer) {
-      const res = await window.electronAPI.openInExternalPlayer(streamUrl);
+      const res = await window.electronAPI.openInExternalPlayer(url);
       if (!res.success) {
         toastBus.push('Не удалось открыть внешний плеер', 'error');
       }
       return;
     }
-    window.open(streamUrl, '_blank');
+    window.open(url, '_blank');
   };
+
+  /** Авто-откат с транскодированного HLS (gst) на нативный /stream:
+   *  срабатывает, когда gst-манифест недоступен/падает, а сам файл Chromium
+   *  может декодировать — поток не теряется, оверлей не выскакивает. */
+  const fallbackToNativeStream = useCallback(() => {
+    if (!hash || !videoIndexRef.current) return false;
+    if (!streamUrl || !streamUrl.includes('/gst/')) return false;
+    torrServerService
+      .getStreamUrl(hash, videoIndexRef.current, false)
+      .then((plainUrl) => {
+        if (plainUrl && plainUrl !== streamUrl && hlsRef.current) {
+          console.warn('[Player] gst HLS недоступен — авто-откат на нативный /stream');
+          setStreamUrl(plainUrl);
+        }
+      })
+      .catch(() => {});
+    return true;
+  }, [hash, streamUrl]);
 
   /** Если видео не начало воспроизводиться за 5 секунд — оверлей «Откройте через VLC».
    *  Ложные срабатывания исключены: оверлей показывается ТОЛЬКО если видео
@@ -1046,7 +1172,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       // Если readyState >= 3 или currentTime > 0 — видео УЖЕ играет, оверлей не нужен.
       if (!video.error && video.readyState < 2 && video.currentTime === 0) {
         // AC3/DTS: сначала фоновая перекодировка в AAC — оверлей только если не помогло
-        if (await tryAutoRetranscode()) { clearTimer(); return; }
+        if (await tryAutoRetranscode(true)) { clearTimer(); return; }
         console.warn('[Player] Stream did not start within 5s — showing codec fallback');
         setCodecError(true);
       }
@@ -1101,10 +1227,19 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       console.log('[Player] Auto-selected compatible audio track:', chosen);
     }
     collectAudioTracks();
-    // Возобновление просмотра с сохранённого таймкода
-    if (startPosition && startPosition > 5 && videoRef.current.duration && startPosition < videoRef.current.duration - 10) {
-      videoRef.current.currentTime = startPosition;
-      console.log(`[Player] Resumed from ${startPosition}s`);
+    // Возобновление просмотра: сначала явный seek после переключения аудиодорожки
+    // (позиция не сбрасывается), затем стартовый таймкод из истории.
+    const video = videoRef.current;
+    let resumeTo: number | null = null;
+    if (seekOnLoadRef.current != null && seekOnLoadRef.current > 0) {
+      resumeTo = seekOnLoadRef.current;
+      seekOnLoadRef.current = null;
+    } else if (startPosition && startPosition > 5 && video.duration && startPosition < video.duration - 10) {
+      resumeTo = startPosition;
+    }
+    if (resumeTo != null && video.duration && resumeTo < video.duration - 1) {
+      video.currentTime = resumeTo;
+      console.log(`[Player] Resume to ${Math.round(resumeTo)}s`);
     }
   };
 
@@ -1657,6 +1792,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                 </h3>
                 <p style={{ fontSize: '0.85rem', color: 'rgba(240,242,248,0.6)', lineHeight: 1.6, marginBottom: '0.9rem' }}>
                   Встроенный плеер не смог воспроизвести этот поток.
+                  {mediaErrorDetail && (
+                    <span style={{ color: 'rgba(255,184,0,0.85)', fontWeight: 700 }}> {mediaErrorDetail}. </span>
+                  )}
                   {codecRisk.risky && (
                     <> Поток: {codecRisk.ext.toUpperCase()} · {codecRisk.video} · {codecRisk.audio}. </>
                   )}
@@ -1892,6 +2030,20 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                   <PictureInPicture2 size={15} style={{ color: isPip ? 'var(--cyan)' : undefined }} />
                 </button>
 
+
+                {/* Открыть во внешнем плеере (IINA / VLC) — прямой /stream TorrServer */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    videoRef.current?.pause();
+                    openExternalPlayer();
+                  }}
+                  className="btn-icon"
+                  title="Открыть в IINA / VLC (внешний плеер macOS)"
+                  style={{ width: '36px', height: '36px', borderRadius: '10px' }}
+                >
+                  <ExternalLink size={15} />
+                </button>
 
                 {/* Fullscreen */}
                 <button
@@ -2154,37 +2306,49 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Аудио-дорожки (мульти-аудио hls/mkv) */}
-                  {audioTracks.length > 1 && (
+                  {/* ── Аудиодорожка: языки и студии озвучки из контейнера ── */}
+                  {displayAudioTracks.length > 0 && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
                         <AudioLines size={13} style={{ color: 'var(--text-muted)' }} />
-                        <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Аудио / Озвучка</span>
+                        <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Аудиодорожка</span>
                       </div>
                       <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
-                        {audioTracks.map((t) => (
-                          <button
-                            key={t.index}
-                            onClick={() => selectAudioTrack(t.index)}
-                            style={{
-                              padding: '0.32rem 0.6rem',
-                              borderRadius: '8px',
-                              border: `1px solid ${activeAudioTrack === t.index ? 'rgba(138,43,226,0.5)' : 'rgba(255,255,255,0.08)'}`,
-                              background: activeAudioTrack === t.index ? 'rgba(138,43,226,0.15)' : 'rgba(255,255,255,0.03)',
-                              color: activeAudioTrack === t.index ? '#B57BFF' : 'var(--text-muted)',
-                              fontSize: '0.68rem',
-                              fontWeight: 700,
-                              fontFamily: 'inherit',
-                              cursor: 'pointer',
-                              maxWidth: '130px',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            {t.label}
-                          </button>
-                        ))}
+                        {displayAudioTracks.map((t) => {
+                          const isActive = activeAudioTrack === t.index;
+                          return (
+                            <button
+                              key={t.index}
+                              onClick={() => selectAudioTrack(t.index)}
+                              title={
+                                mkvTracks.length > 1 && mkvTracks[t.index]
+                                  ? `${t.label} · кодек ${mkvTracks[t.index].codec}`
+                                  : t.label
+                              }
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.3rem',
+                                padding: '0.32rem 0.6rem',
+                                borderRadius: '8px',
+                                border: `1px solid ${isActive ? 'rgba(138,43,226,0.5)' : 'rgba(255,255,255,0.08)'}`,
+                                background: isActive ? 'rgba(138,43,226,0.15)' : 'rgba(255,255,255,0.03)',
+                                color: isActive ? '#B57BFF' : 'var(--text-muted)',
+                                fontSize: '0.68rem',
+                                fontWeight: 700,
+                                fontFamily: 'inherit',
+                                cursor: 'pointer',
+                                maxWidth: '170px',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {isActive && <Check size={11} style={{ flexShrink: 0 }} />}
+                              {t.label}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   )}

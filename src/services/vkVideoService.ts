@@ -46,6 +46,17 @@ const RESULT_LIMIT = 6;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const searchCache = new Map<string, { at: number; items: VkVideoItem[] }>();
 
+// ── VK User Access Token / session cookie (из настроек UI) ──
+// Без токена поиск идёт по публичным страницам (VK их закрывает анонимам);
+// с токеном — через официальное api.vk.com/method/video.search.
+let vkToken = '';
+export function setVkToken(token: string) {
+  vkToken = (token || '').trim();
+}
+export function hasVkToken(): boolean {
+  return !!vkToken;
+}
+
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
@@ -195,6 +206,52 @@ async function searchCandidates(query: string): Promise<Candidate[]> {
   return [...map.values()];
 }
 
+/**
+ * Поиск через официальное API api.vk.com/method/video.search (VK User Access Token).
+ * Возвращает null при ошибке API (невалидный токен, лимиты) — тогда вызывающий
+ * откатывается на поиск по публичным страницам.
+ */
+async function searchViaApi(query: string): Promise<Candidate[] | null> {
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      sort: '2',       // по длительности
+      hd: '1',
+      adult: '0',
+      count: '12',
+      v: '5.199',
+      access_token: vkToken,
+    });
+    const res = await fetchWithTimeout(`https://api.vk.com/method/video.search?${params.toString()}`, 8000);
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    if (!data || data.error) {
+      console.warn('[VK] video.search API error:', data?.error?.error_msg || data?.error || 'unknown');
+      return null;
+    }
+    const items = Array.isArray(data.response?.items) ? data.response.items : [];
+    const candidates: Candidate[] = [];
+    for (const it of items) {
+      if (!it || it.owner_id == null || it.id == null) continue;
+      const duration = Number(it.duration) || 0;
+      if (duration > 0 && duration < MIN_DURATION_S) continue; // трейлеры/клипы
+      const cand: Candidate = {
+        ownerId: String(it.owner_id),
+        videoId: String(it.id),
+        title: it.title ? String(it.title) : undefined,
+      };
+      // hash из player-ссылки (video_ext.php?oid=..&id=..&hash=..), если API отдал
+      const hashMatch = String(it.player || '').match(/hash=([a-zA-Z0-9]+)/);
+      if (hashMatch) cand.hash = hashMatch[1];
+      candidates.push(cand);
+    }
+    return candidates;
+  } catch (err: any) {
+    console.warn('[VK] video.search request failed:', err?.message || err);
+    return null;
+  }
+}
+
 /** Загрузить страницу плеера и извлечь готовый VkVideoItem (HLS/MP4). */
 async function resolveVideo(cand: Candidate): Promise<VkVideoItem | null> {
   const extUrl =
@@ -255,7 +312,15 @@ export async function searchVkVideo(query: string): Promise<VkVideoItem[]> {
   const cached = searchCache.get(q);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.items;
 
-  const candidates = await searchCandidates(q);
+  // Токен задан → официальный API; при ошибке API откатываемся на страницы
+  let candidates: Candidate[] = [];
+  if (vkToken) {
+    const apiCandidates = await searchViaApi(q);
+    if (apiCandidates) candidates = apiCandidates;
+  }
+  if (candidates.length === 0) {
+    candidates = await searchCandidates(q);
+  }
   if (candidates.length === 0) {
     searchCache.set(q, { at: Date.now(), items: [] });
     return [];

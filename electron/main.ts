@@ -374,8 +374,8 @@ function setupIPC() {
     }
   });
 
-  ipcMain.handle('torrserver:streamUrl', (_, { hash, fileIndex, transcodeAudio }) => {
-    return torrServer.getStreamUrl(hash, fileIndex, !!transcodeAudio);
+  ipcMain.handle('torrserver:streamUrl', (_, { hash, fileIndex, transcodeAudio, audioIndex }) => {
+    return torrServer.getStreamUrl(hash, fileIndex, !!transcodeAudio, audioIndex);
   });
 
   // ── Scraper IPC ──

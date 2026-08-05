@@ -12,6 +12,11 @@ export interface LibraryItem {
   /** Прогресс просмотра (сек) */
   position?: number;
   duration?: number;
+  /** Сезон/серия (для сериалов) — ключ истории по эпизодам */
+  season?: number;
+  episode?: number;
+  /** Прогресс в процентах (0-100) — для диалога «Продолжить/Следующая серия» */
+  progressPercentage?: number;
   updatedAt: number;
 }
 
@@ -22,6 +27,11 @@ const KEYS = {
 } as const;
 
 const HISTORY_LIMIT = 50;
+
+/** Композитный ключ записи истории: id + сезон/серия (у фильмов s/e пустые). */
+function historyKey(item: Pick<LibraryItem, 'id' | 'season' | 'episode'>): string {
+  return `${item.id}|s${item.season ?? ''}e${item.episode ?? ''}`;
+}
 
 function read(key: string): LibraryItem[] {
   try {
@@ -47,20 +57,41 @@ export const library = {
     return read(KEYS.history).sort((a, b) => b.updatedAt - a.updatedAt);
   },
 
-  /** Сохранить/обновить прогресс просмотра. position<=0 или >=duration — не пишем. */
+  /** Сохранить/обновить прогресс просмотра. position<=0 или >=duration — не пишем.
+   *  Для сериалов item.season/episode создают отдельную запись на каждую серию. */
   saveProgress(item: Omit<LibraryItem, 'updatedAt'>, position: number, duration: number) {
     if (!item.id || position < 0 || duration <= 0) return;
-    const list = read(KEYS.history).filter((i) => i.id !== item.id);
-    list.unshift({ ...item, position, duration, updatedAt: Date.now() });
+    const key = historyKey(item);
+    const list = read(KEYS.history).filter((i) => historyKey(i) !== key);
+    const pct = duration > 0 ? Math.min(100, Math.round((position / duration) * 100)) : 0;
+    list.unshift({
+      ...item,
+      position,
+      duration,
+      progressPercentage: pct,
+      updatedAt: Date.now(),
+    });
     write(KEYS.history, list.slice(0, HISTORY_LIMIT));
   },
 
-  getProgress(id: string): { position: number; duration: number } | null {
-    const item = read(KEYS.history).find((i) => i.id === id);
+  /** Прогресс по id (и сезону/серии для сериалов). */
+  getProgress(
+    id: string,
+    season?: number,
+    episode?: number
+  ): { position: number; duration: number; season?: number; episode?: number; progressPercentage?: number } | null {
+    const key = `${id}|s${season ?? ''}e${episode ?? ''}`;
+    const item = read(KEYS.history).find((i) => historyKey(i) === key);
     if (!item || !item.duration || !item.position) return null;
     // Прогресс важен, только если не досмотрено до конца
     if (item.position > 5 && item.position < item.duration - 10) {
-      return { position: item.position, duration: item.duration };
+      return {
+        position: item.position,
+        duration: item.duration,
+        season: item.season,
+        episode: item.episode,
+        progressPercentage: item.progressPercentage,
+      };
     }
     return null;
   },

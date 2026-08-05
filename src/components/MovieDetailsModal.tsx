@@ -1,17 +1,21 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Video, Heart, Bookmark } from 'lucide-react';
+import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Video, Heart, Bookmark, Tv, Settings as SettingsIcon } from 'lucide-react';
 import { library, LibraryItem, formatClock } from '../services/library';
 import { extractYear } from '../utils/year';
+import { parseTorrentMeta } from '../utils/torrentMeta';
 import { Movie, TorrentRelease } from '../types';
 import { tmdbService } from '../services/tmdb';
 import { torrServerService } from '../services/torrserver';
 import { toastBus } from '../services/toast';
-import { searchVkVideo, VkVideoItem } from '../services/vkVideoService';
+import { searchVkVideo, hasVkToken, VkVideoItem } from '../services/vkVideoService';
 import { TorrentSelector } from './TorrentSelector';
+import { EpisodeResumeDialog } from './EpisodeResumeDialog';
 
 interface MovieDetailsModalProps {
   movie: Movie;
   onClose: () => void;
+  /** Открыть модалку настроек (кнопка «Настроить VK» при отсутствии токена). */
+  onOpenSettings?: () => void;
   onPlayTorrent: (torrent: {
     magnet: string;
     title: string;
@@ -21,12 +25,18 @@ interface MovieDetailsModalProps {
     /** Прямой HLS/MP4 поток (VK Video) — плеер играет без TorrServer. */
     directUrl?: string;
     directQuality?: string;
+    /** Сезон/серия (для сериалов) — история ведётся по эпизодам. */
+    season?: number;
+    episode?: number;
+    /** Явный таймкод возобновления (из умного меню серий). */
+    startPosition?: number;
   }) => void;
 }
 
 export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   movie,
   onClose,
+  onOpenSettings,
   onPlayTorrent,
 }) => {
   const [details, setDetails] = useState<Movie | null>(null);
@@ -48,6 +58,16 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   const [isScraping, setIsScraping] = useState(true);
   const [isSearchingVk, setIsSearchingVk] = useState(true);
   const [searchError, setSearchError] = useState<string | null>(null);
+  /** Все JacRed-зеркала не ответили — источники RuTracker временно недоступны. */
+  const [jacredUnreachable, setJacredUnreachable] = useState(false);
+  /** История просмотра (сериалы: сезон/серия + процент) — для умного меню запуска. */
+  const [histItems, setHistItems] = useState<LibraryItem[]>([]);
+  /** Умное меню запуска серии (диалог продолжения / пикер серий). */
+  const [episodeUi, setEpisodeUi] = useState<{
+    release: TorrentRelease;
+    historyItem?: LibraryItem;
+    initialView: 'dialog' | 'picker';
+  } | null>(null);
 
   // TMDB-First: прямые постеры с CDN
   const backdropUrl = tmdbService.getImageUrl(movie.backdrop_path, 'w1280');
@@ -63,6 +83,8 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     setIsScraping(true);
     setIsSearchingVk(true);
     setSearchError(null);
+    setHistItems(library.getHistory()); // история (сезон/серия, прогресс) для умного меню
+    setEpisodeUi(null);
 
     // Lampa-style dual-language search:
     // 1. Primary: Russian title + year → finds more RU-dubbed releases on Rutor/JacRed
@@ -104,10 +126,11 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     // ── 2) Торренты через TorrServer / JacRed (on-demand) ──
     torrServerService
       .searchTorrents(primaryQuery, year, undefined, undefined, undefined, fallbackQuery)
-      .then(({ releases, error }) => {
+      .then(({ releases, error, jacredUnreachable: jacredDown }) => {
         if (cancelled) return;
         setReleases(releases);
         setSearchError(error || null);
+        setJacredUnreachable(!!jacredDown);
         setIsScraping(false);
         if (error) {
           toastBus.push(error, 'error');
@@ -126,9 +149,11 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     return () => { cancelled = true; };
   }, [movie]);
 
-  // useCallback: стабильная ссылка для React.memo(TorrentSelector) — без
-  // перерендера селектора на каждый ре-рендер деталей фильма
-  const handlePlayRelease = useCallback((release: TorrentRelease) => {
+  /** Воспроизвести раздачу (с опциональным сезоном/серией/таймкодом). */
+  const playRelease = useCallback((
+    release: TorrentRelease,
+    opts?: { season?: number; episode?: number; startPosition?: number }
+  ) => {
     onPlayTorrent({
       magnet: release.magnet,
       title: `${movie.title} (${release.quality})`,
@@ -136,8 +161,38 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
       // Кодеки раздачи — плеер решает: играть или предложить VLC/IINA
       videoCodec: release.videoCodec,
       audioCodec: release.audioCodec,
+      season: opts?.season,
+      episode: opts?.episode,
+      startPosition: opts?.startPosition,
     });
   }, [movie, onPlayTorrent, posterUrl]);
+
+  /**
+   * Клик по раздаче СЕРИАЛА: если в истории есть прогресс эпизодов — показываем
+   * умное меню запуска (Продолжить / Следующая серия / Выбрать серию) вместо
+   * немедленного воспроизведения. Фильмы играются сразу.
+   */
+  const handlePlayRelease = useCallback((
+    release: TorrentRelease,
+    opts?: { season?: number; episode?: number; startPosition?: number }
+  ) => {
+    if (movie.media_type === 'tv' && !opts) {
+      const meta = parseTorrentMeta(release.title);
+      const latest = histItems.find(
+        (h) => h.id === String(movie.id) && h.season != null && h.episode != null
+      );
+      if (latest) {
+        setEpisodeUi({ release, historyItem: latest, initialView: 'dialog' });
+        return;
+      }
+      // История без эпизодов, но раздачи с S/E — сразу открываем пикер серий
+      if (meta.seasons != null || meta.episodes != null) {
+        setEpisodeUi({ release, historyItem: undefined, initialView: 'picker' });
+        return;
+      }
+    }
+    playRelease(release, opts);
+  }, [movie, histItems, playRelease]);
 
   /** Воспроизвести VK-поток в нативном плеере Luminary (Hls.js, без TorrServer). */
   const handlePlayVk = (item: VkVideoItem) => {
@@ -485,9 +540,23 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                     ))}
                   </div>
                 ) : vkItems.length === 0 ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                    <Video size={14} />
-                    VK-потоки не найдены — используйте торренты ниже
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                      <Video size={14} />
+                      {hasVkToken()
+                        ? 'VK-потоки не найдены — используйте торренты ниже'
+                        : 'VK закрыл анонимный поиск — без VK-токена потоки могут не находиться.'}
+                    </div>
+                    {!hasVkToken() && onOpenSettings && (
+                      <button
+                        onClick={onOpenSettings}
+                        className="btn-secondary"
+                        style={{ alignSelf: 'flex-start', padding: '0.4rem 0.9rem', fontSize: '0.75rem', borderRadius: '10px' }}
+                      >
+                        <SettingsIcon size={13} style={{ marginRight: '0.35rem' }} />
+                        Настроить VK
+                      </button>
+                    )}
                   </div>
                 ) : (
                   vkItems.map((item) => (
@@ -589,6 +658,43 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                 <span>{searchError}</span>
               </div>
             )}
+            {/* JacRed / RuTracker недоступны — все зеркала не ответили */}
+            {jacredUnreachable && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.6rem',
+                  padding: '0.75rem 1rem',
+                  borderRadius: '14px',
+                  marginBottom: '1rem',
+                  background: 'rgba(255,184,0,0.08)',
+                  border: '1px solid rgba(255,184,0,0.35)',
+                  fontSize: '0.82rem',
+                  fontWeight: 600,
+                  color: 'rgba(255,210,120,0.95)',
+                }}
+              >
+                <AlertTriangle size={16} color="#FFB800" style={{ flexShrink: 0 }} />
+                <span>
+                  Источники RuTracker (JacRed) временно недоступны — раздачи этого трекера могут
+                  отсутствовать. Укажите свой JacRed-инстанс в настройках.
+                </span>
+              </div>
+            )}
+            {/* Серии: умный выбор эпизода (для сериалов) */}
+            {movie.media_type === 'tv' && releases.length > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.75rem' }}>
+                <button
+                  onClick={() => setEpisodeUi({ release: releases[0], historyItem: undefined, initialView: 'picker' })}
+                  className="btn-secondary"
+                  style={{ borderRadius: '10px', padding: '0.45rem 1rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+                >
+                  <Tv size={13} style={{ color: 'var(--cyan)' }} />
+                  Выбрать серию
+                </button>
+              </div>
+            )}
             <TorrentSelector
               releases={releases}
               isLoading={isScraping}
@@ -597,6 +703,19 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
           </div>
         </div>
       </div>
+      {episodeUi && (
+        <EpisodeResumeDialog
+          movie={movie}
+          release={episodeUi.release}
+          historyItem={episodeUi.historyItem}
+          releases={releases}
+          onPlay={(rel, opts) => {
+            setEpisodeUi(null);
+            playRelease(rel, opts);
+          }}
+          onClose={() => setEpisodeUi(null)}
+        />
+      )}
     </div>
   );
 };

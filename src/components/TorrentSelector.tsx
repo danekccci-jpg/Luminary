@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { TorrentRelease, DubbingType } from '../types';
 import { parseTorrentMeta, russianPriority } from '../utils/torrentMeta';
+import { sanitizeTrackerName } from '../utils/trackerName';
 
 interface TorrentSelectorProps {
   releases: TorrentRelease[];
@@ -447,8 +448,11 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
                         <Zap size={11} style={{ color: 'rgba(255,184,0,0.6)' }} />
                         ~{release.requiredMbps} Mbps
                       </span>
-                      <span style={{ color: 'rgba(240,242,248,0.25)', fontSize: '0.67rem' }}>
-                        {release.source}
+                      <span
+                        title={release.source}
+                        style={{ color: 'rgba(240,242,248,0.25)', fontSize: '0.67rem' }}
+                      >
+                        {sanitizeTrackerName(release.source)}
                       </span>
                     </div>
 

@@ -1,5 +1,5 @@
 import { TorrServerStatusInfo, TorrentRelease, TorrServerStats } from '../types';
-import { searchJacRed, mergeReleasesByHash } from './scrapers/jacred';
+import { searchJacRed, mergeReleasesByHash, getJacredStatus } from './scrapers/jacred';
 
 export class TorrServerService {
   public async getStatus(): Promise<TorrServerStatusInfo> {
@@ -91,10 +91,11 @@ export class TorrServerService {
   public async getStreamUrl(
     hash: string,
     fileIndex?: number,
-    transcodeAudio?: boolean
+    transcodeAudio?: boolean,
+    audioIndex?: number
   ): Promise<string> {
     if (window.electronAPI?.getStreamUrl) {
-      return await window.electronAPI.getStreamUrl(hash, fileIndex, transcodeAudio);
+      return await window.electronAPI.getStreamUrl(hash, fileIndex, transcodeAudio, audioIndex);
     }
     return 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4';
   }
@@ -139,7 +140,7 @@ export class TorrServerService {
     jackettApiKey?: string,
     imdbId?: string,
     fallbackQuery?: string
-  ): Promise<{ releases: TorrentRelease[]; error?: string }> {
+  ): Promise<{ releases: TorrentRelease[]; error?: string; jacredUnreachable?: boolean }> {
     // Два независимых источника, запрашиваются ПАРАЛЛЕЛЬНО:
     // 1) Electron-скрапер (Torrentio + Rutor + Jackett при настройке);
     // 2) JacRed API (RuTracker / NNM-Club / Rutor) — отказоустойчивый клиент
@@ -168,15 +169,17 @@ export class TorrServerService {
 
     // Мёрдж: дедуп по BTIH-хэшу magnet + приоритет 4K/2160p → 1080p (по сидам)
     const merged = mergeReleasesByHash(ipcReleases, jacredReleases);
+    // Все JacRed-зеркала мертвы — UI покажет плашку «RuTracker временно недоступен»
+    const jacredUnreachable = getJacredStatus() === 'unreachable';
     if (merged.length > 0) {
-      return { releases: merged };
+      return { releases: merged, jacredUnreachable };
     }
 
     // Browser demo mode — нет Electron-моста: показываем демо-раздачи
     if (!window.electronAPI?.searchTorrents) {
       return { releases: this.demoReleases(query, year) };
     }
-    return { releases: [], error: ipcErrorMsg || 'Не удалось найти торренты' };
+    return { releases: [], error: ipcErrorMsg || 'Не удалось найти торренты', jacredUnreachable };
   }
 
   private demoReleases(query: string, year?: string): TorrentRelease[] {

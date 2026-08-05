@@ -14,7 +14,7 @@ export interface ElectronAPI {
   dropTorrServerCache: (hash: string) => Promise<any>;
   reconnectTorrServer: (hash: string, magnet: string) => Promise<{ success: boolean; error?: string }>;
   getTorrServerLogs: (lines?: number) => Promise<{ success: boolean; logs: string[]; error?: string }>;
-  getStreamUrl: (hash: string, fileIndex?: number, transcodeAudio?: boolean) => Promise<string>;
+  getStreamUrl: (hash: string, fileIndex?: number, transcodeAudio?: boolean, audioIndex?: number) => Promise<string>;
   searchTorrents: (
     query: string,
     year?: string,
@@ -61,8 +61,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dropTorrServerCache: (hash: string) => ipcRenderer.invoke('torrserver:dropCache', { hash }),
   reconnectTorrServer: (hash: string, magnet: string) => ipcRenderer.invoke('torrserver:reconnect', { hash, magnet }),
   getTorrServerLogs: (lines?: number) => ipcRenderer.invoke('torrserver:get-logs', lines),
-  getStreamUrl: (hash: string, fileIndex?: number, transcodeAudio?: boolean) =>
-    ipcRenderer.invoke('torrserver:streamUrl', { hash, fileIndex, transcodeAudio }),
+  getStreamUrl: (hash: string, fileIndex?: number, transcodeAudio?: boolean, audioIndex?: number) =>
+    ipcRenderer.invoke('torrserver:streamUrl', { hash, fileIndex, transcodeAudio, audioIndex }),
 
   // ── Scraper ──
   searchTorrents: (

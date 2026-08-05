@@ -39,17 +39,38 @@ export const JACRED_TRACKERS = ['RuTracker.org', 'NNM-Club', 'Rutor'] as const;
 /** Переопределение пула пользователем: JSON-массив base-URL в localStorage. */
 const OVERRIDE_KEY = 'luminary_jacred_instances';
 
+/** Пользовательский инстанс из настроек UI (приоритетнее пула/localStorage). */
+let customInstance = '';
+export function setCustomJacredUrl(url: string) {
+  customInstance = (url || '').trim().replace(/\/+$/, '');
+}
+
 function getInstancePool(): string[] {
+  const pool: string[] = [];
+  if (customInstance) pool.push(customInstance);
   try {
     const raw = localStorage.getItem(OVERRIDE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map((s) => String(s).replace(/\/+$/, '')).filter((s) => /^https?:\/\//i.test(s));
+        pool.push(
+          ...parsed
+            .map((s) => String(s).replace(/\/+$/, ''))
+            .filter((s) => /^https?:\/\//i.test(s))
+        );
       }
     }
   } catch { /* ignore */ }
-  return JACRED_INSTANCES;
+  // Дефолтный пул — в хвост, как резерв
+  pool.push(...JACRED_INSTANCES.filter((b) => !pool.includes(b)));
+  return pool;
+}
+
+/** Статус последнего поиска JacRed: ok — хотя бы один инстанс ответил;
+ *  unreachable — все зеркала недоступны (для плашки «RuTracker офлайн»). */
+let lastStatus: 'ok' | 'unreachable' = 'ok';
+export function getJacredStatus(): 'ok' | 'unreachable' {
+  return lastStatus;
 }
 
 /** Инстансы на карантине (ошибка/таймаут) — пропускаем до истечения cooldown. */
@@ -252,6 +273,7 @@ export async function searchJacRed(
   const deadline = Date.now() + OVERALL_DEADLINE_MS;
   let lastError: unknown = null;
   let lastBase = '';
+  let anyResponded = false; // хотя бы один инстанс ответил рабочим JSON
 
   for (const base of pool) {
     if (Date.now() > deadline) break;
@@ -282,6 +304,7 @@ export async function searchJacRed(
         lastBase = base;
         continue;
       }
+      anyResponded = true;
       const items = parseItems(payload, q);
       if (items.length === 0) {
         // Живой инстанс без результатов — пробуем следующий (конфиг трекеров разный)
@@ -289,6 +312,7 @@ export async function searchJacRed(
         continue;
       }
       markAlive(base);
+      lastStatus = 'ok';
       return items;
     } catch (err: any) {
       markDead(base);
@@ -298,6 +322,7 @@ export async function searchJacRed(
     }
   }
 
+  lastStatus = anyResponded ? 'ok' : 'unreachable';
   if (lastError && lastBase) {
     console.warn(`[JacRed] all instances failed (last: ${lastBase})`);
   }

@@ -128,6 +128,10 @@ export interface UserSettings {
   preBufferMB: number;
   jackettUrl: string;
   jackettApiKey: string;
+  /** VK User Access Token / session cookie для api.vk.com/method/video.search */
+  vkToken: string;
+  /** Пользовательский JacRed-инстанс (base URL) — RuTracker/NNM/Rutor через JacRed */
+  jacredUrl: string;
   autoStartTorrServer: boolean;
   autoCleanCacheOnClose: boolean;
   transcodeAudioToAac: boolean;
@@ -149,7 +153,7 @@ declare global {
       dropTorrServerCache: (hash: string) => Promise<{ success: boolean }>;
       reconnectTorrServer: (hash: string, magnet: string) => Promise<{ success: boolean; error?: string }>;
       getTorrServerLogs: (lines?: number) => Promise<{ success: boolean; logs: string[]; error?: string }>;
-      getStreamUrl: (hash: string, fileIndex?: number, transcodeAudio?: boolean) => Promise<string>;
+      getStreamUrl: (hash: string, fileIndex?: number, transcodeAudio?: boolean, audioIndex?: number) => Promise<string>;
       searchTorrents: (
         query: string,
         year?: string,

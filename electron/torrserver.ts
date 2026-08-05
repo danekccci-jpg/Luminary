@@ -971,14 +971,21 @@ export class TorrServerManager {
    * - Default: direct /stream (Chromium picks AAC/MP3 track via audioTracks when available).
    * - transcodeAudio: prefer GStreamer HLS (Stereo AAC) when -gst binary is present,
    *   else append m3u hint for clients that remux; still works as progressive fallback.
+   * - audioIndex: 0-based индекс аудиодорожки из MKV-контейнера — для gst HLS
+   *   транскодируется именно выбранная дорожка (параметр `audio=N`).
    */
-  public getStreamUrl(hash: string, fileIndex?: number, transcodeAudio: boolean = false): string {
+  public getStreamUrl(
+    hash: string,
+    fileIndex?: number,
+    transcodeAudio: boolean = false,
+    audioIndex?: number
+  ): string {
     const safeHash = encodeURIComponent(hash);
     const idx = fileIndex !== undefined ? fileIndex : 1;
 
     if (transcodeAudio) {
       // TorrServer MatriX.gst HLS master — audio remuxed to AAC stereo
-      return `http://${this.host}:${this.port}/gst/${safeHash}/master.m3u8?index=${idx}&audio=0`;
+      return `http://${this.host}:${this.port}/gst/${safeHash}/master.m3u8?index=${idx}&audio=${audioIndex ?? 0}`;
     }
 
     return `http://${this.host}:${this.port}/stream/fname?link=${safeHash}&index=${idx}&play`;
