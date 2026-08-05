@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Video, Heart, Bookmark, Tv, Settings as SettingsIcon } from 'lucide-react';
+import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Video, Heart, Bookmark, Tv } from 'lucide-react';
 import { library, LibraryItem, formatClock } from '../services/library';
 import { extractYear } from '../utils/year';
 import { parseTorrentMeta } from '../utils/torrentMeta';
@@ -7,15 +7,13 @@ import { Movie, TorrentRelease } from '../types';
 import { tmdbService } from '../services/tmdb';
 import { torrServerService } from '../services/torrserver';
 import { toastBus } from '../services/toast';
-import { searchVkVideo, hasVkToken, VkVideoItem } from '../services/vkVideoService';
+import { searchVkVideo, VkVideoItem } from '../services/vkVideoService';
 import { TorrentSelector } from './TorrentSelector';
 import { EpisodeResumeDialog } from './EpisodeResumeDialog';
 
 interface MovieDetailsModalProps {
   movie: Movie;
   onClose: () => void;
-  /** Открыть модалку настроек (кнопка «Настроить VK» при отсутствии токена). */
-  onOpenSettings?: () => void;
   onPlayTorrent: (torrent: {
     magnet: string;
     title: string;
@@ -36,7 +34,6 @@ interface MovieDetailsModalProps {
 export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   movie,
   onClose,
-  onOpenSettings,
   onPlayTorrent,
 }) => {
   const [details, setDetails] = useState<Movie | null>(null);
@@ -58,8 +55,6 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   const [isScraping, setIsScraping] = useState(true);
   const [isSearchingVk, setIsSearchingVk] = useState(true);
   const [searchError, setSearchError] = useState<string | null>(null);
-  /** Все JacRed-зеркала не ответили — источники RuTracker временно недоступны. */
-  const [jacredUnreachable, setJacredUnreachable] = useState(false);
   /** История просмотра (сериалы: сезон/серия + процент) — для умного меню запуска. */
   const [histItems, setHistItems] = useState<LibraryItem[]>([]);
   /** Умное меню запуска серии (диалог продолжения / пикер серий). */
@@ -126,11 +121,10 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     // ── 2) Торренты через TorrServer / JacRed (on-demand) ──
     torrServerService
       .searchTorrents(primaryQuery, year, undefined, undefined, undefined, fallbackQuery)
-      .then(({ releases, error, jacredUnreachable: jacredDown }) => {
+      .then(({ releases, error }) => {
         if (cancelled) return;
         setReleases(releases);
         setSearchError(error || null);
-        setJacredUnreachable(!!jacredDown);
         setIsScraping(false);
         if (error) {
           toastBus.push(error, 'error');
@@ -540,23 +534,9 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                     ))}
                   </div>
                 ) : vkItems.length === 0 ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                      <Video size={14} />
-                      {hasVkToken()
-                        ? 'VK-потоки не найдены — используйте торренты ниже'
-                        : 'VK закрыл анонимный поиск — без VK-токена потоки могут не находиться.'}
-                    </div>
-                    {!hasVkToken() && onOpenSettings && (
-                      <button
-                        onClick={onOpenSettings}
-                        className="btn-secondary"
-                        style={{ alignSelf: 'flex-start', padding: '0.4rem 0.9rem', fontSize: '0.75rem', borderRadius: '10px' }}
-                      >
-                        <SettingsIcon size={13} style={{ marginRight: '0.35rem' }} />
-                        Настроить VK
-                      </button>
-                    )}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                    <Video size={14} />
+                    VK-потоки не найдены — используйте торренты ниже
                   </div>
                 ) : (
                   vkItems.map((item) => (
@@ -658,30 +638,8 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                 <span>{searchError}</span>
               </div>
             )}
-            {/* JacRed / RuTracker недоступны — все зеркала не ответили */}
-            {jacredUnreachable && (
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.6rem',
-                  padding: '0.75rem 1rem',
-                  borderRadius: '14px',
-                  marginBottom: '1rem',
-                  background: 'rgba(255,184,0,0.08)',
-                  border: '1px solid rgba(255,184,0,0.35)',
-                  fontSize: '0.82rem',
-                  fontWeight: 600,
-                  color: 'rgba(255,210,120,0.95)',
-                }}
-              >
-                <AlertTriangle size={16} color="#FFB800" style={{ flexShrink: 0 }} />
-                <span>
-                  Источники RuTracker (JacRed) временно недоступны — раздачи этого трекера могут
-                  отсутствовать. Укажите свой JacRed-инстанс в настройках.
-                </span>
-              </div>
-            )}
+            {/* JacRed-источники восстанавливаются в фоне автоматически
+                (динамический пул + racing probe) — плашка не требуется. */}
             {/* Серии: умный выбор эпизода (для сериалов) */}
             {movie.media_type === 'tv' && releases.length > 0 && (
               <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.75rem' }}>

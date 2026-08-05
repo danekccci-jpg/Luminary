@@ -40,6 +40,13 @@ export interface ElectronAPI {
   ) => Promise<{ success: boolean; streams: any[]; error?: string }>;
   // Открыть поток во внешнем плеере (VLC / IINA)
   openInExternalPlayer: (url: string) => Promise<{ success: boolean; app?: string }>;
+  // ── Silent VK Auth (main-процесс: гостевая сессия, поиск без CORS) ──
+  vkAcquireSession: () => Promise<{ success: boolean; error?: string }>;
+  vkSearchVideo: (query: string) => Promise<{
+    success: boolean;
+    items: Array<{ ownerId: string; videoId: string; hash?: string; title?: string }>;
+    error?: string;
+  }>;
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -86,6 +93,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── External player ──
   openInExternalPlayer: (url: string) => ipcRenderer.invoke('player:openExternal', url),
+
+  // ── Silent VK Auth ──
+  vkAcquireSession: () => ipcRenderer.invoke('vk:acquire-session'),
+  vkSearchVideo: (query: string) => ipcRenderer.invoke('vk:search', { query }),
 
   // ── Shell / Platform ──
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),

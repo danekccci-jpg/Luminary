@@ -4,6 +4,7 @@ import { exec } from 'child_process';
 import { TorrServerManager, normalizeTorrentLink } from './torrserver.js';
 import { TorrentScraper } from './scraper.js';
 import { catalogProxy } from './catalog-proxy.js';
+import { VkSessionManager } from './vksession.js';
 
 // ═══════════════════════════════════════════════════════════
 //  Global error guards — NEVER let the main process die
@@ -35,6 +36,8 @@ if (process.platform === 'darwin') {
 let mainWindow: BrowserWindow | null = null;
 const torrServer = new TorrServerManager(8090);
 const scraper = new TorrentScraper();
+/** Silent VK Auth: гостевая сессия (скрытое окно → cookies) с кэшем и авто-обновлением. */
+const vkSession = new VkSessionManager();
 let isQuitting = false;
 
 // ── Single-instance lock ──
@@ -392,6 +395,25 @@ function setupIPC() {
       return { success: true, releases: results };
     } catch (err: any) {
       return { success: false, releases: [], error: err.message };
+    }
+  });
+
+  // ── Silent VK Auth: гостевая сессия + поиск видео из main (без CORS) ──
+  ipcMain.handle('vk:acquire-session', async () => {
+    try {
+      const s = await vkSession.getSession();
+      return { success: !!s };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('vk:search', async (_e, { query, token }: { query?: string; token?: string }) => {
+    try {
+      const items = await vkSession.searchVideos(String(query || ''), token || '');
+      return { success: true, items: items || [] };
+    } catch (err: any) {
+      return { success: false, items: [], error: err.message };
     }
   });
 

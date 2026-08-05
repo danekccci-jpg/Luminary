@@ -179,6 +179,13 @@ declare global {
       ) => Promise<{ success: boolean; streams: OnlineStream[]; error?: string }>;
       // Открыть поток во внешнем плеере (VLC / IINA)
       openInExternalPlayer: (url: string) => Promise<{ success: boolean; app?: string }>;
+      // Silent VK Auth: гостевая сессия (main) + поиск видео без CORS
+      vkAcquireSession: () => Promise<{ success: boolean; error?: string }>;
+      vkSearchVideo: (query: string) => Promise<{
+        success: boolean;
+        items: Array<{ ownerId: string; videoId: string; hash?: string; title?: string }>;
+        error?: string;
+      }>;
     };
   }
 }

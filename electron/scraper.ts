@@ -88,10 +88,11 @@ export class TorrentScraper {
     const results: TorrentRelease[] = [];
     const sources: Array<{ name: string; run: () => Promise<TorrentRelease[]> }> = [
       // JacRed (RuTracker / NNM-Club / Rutor) вынесен в renderer:
-      // src/services/scrapers/jacred.ts — пул инстансов + авто-фолбэк, мёрдж
+      // src/services/scrapers/jacred.ts — динамический пул + racing-опрос, мёрдж
       // с этой выдачей происходит в src/services/torrserver.ts (по BTIH-хэшу).
       { name: 'Torrentio', run: () => this.queryTorrentio(safeQuery, safeYear, imdbId) },
       { name: 'Rutor', run: () => this.scrapeRutor(safeQuery, safeYear) },
+      { name: 'BitSearch', run: () => this.scrapeBitSearch(safeQuery, safeYear) },
       // RuTracker.org — НЕ скрейпим HTML напрямую (фрагментно, капча): трекер
       // отдаётся через JacRed-инстансы (tracker=RuTracker.org).
       // VK Video НЕ источник торрентов: раньше генерировал фейковые magnet
@@ -321,6 +322,74 @@ export class TorrentScraper {
           parseInt(seedText, 10) || 0,
           parseInt(leechText, 10) || 0,
           'Rutor Tracker'
+        )
+      );
+    });
+
+    return releases;
+  }
+
+  // ═══════════════════════════════════════════════════════
+  //  BitSearch.to — magnet прямо в списке результатов (без капчи)
+  // ═══════════════════════════════════════════════════════
+  private async scrapeBitSearch(query: string, year?: string): Promise<TorrentRelease[]> {
+    const searchStr = year ? `${query} ${year}` : query;
+    const url = `https://bitsearch.to/search?q=${encodeURIComponent(searchStr)}`;
+
+    let html = '';
+    try {
+      const res = await axios.get(url, {
+        timeout: 7000,
+        validateStatus: (s) => s >= 200 && s < 300,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+          'Accept-Language': 'ru-RU,ru;q=0.9',
+        },
+      });
+      html = res.data;
+    } catch {
+      return []; // BitSearch недоступен — молча пропускаем
+    }
+
+    const $ = cheerio.load(html);
+    const releases: TorrentRelease[] = [];
+    const seenMagnet = new Set<string>();
+
+    // Карточка результата: div.flex.items-start.justify-between (по одной на раздачу)
+    $('.flex.items-start.justify-between').each((i, el) => {
+      if (releases.length >= 8) return false;
+
+      // magnet:?xt=urn:btih:...&dn=... (в HTML сущности &#x3D;/&amp;)
+      let magnet = $(el).find('a[href^="magnet:"]').first().attr('href') || '';
+      magnet = magnet.replace(/&#x3D;/g, '=').replace(/&amp;/g, '&').trim();
+      if (!magnet.startsWith('magnet:?xt=urn:btih:')) return;
+      if (seenMagnet.has(magnet)) return;
+      seenMagnet.add(magnet);
+
+      // Название: блок line-clamp-2 / ссылка-заголовок
+      const titleText =
+        $(el).find('div[class*="line-clamp-2"]').first().text().trim() ||
+        $(el).find('a[class*="hover:text-primary"]').first().text().trim() ||
+        $(el).find('a[href*="/torrents/"]').first().text().trim();
+      if (!titleText) return;
+
+      // Сиды (зелёные) / личи (красные)
+      const seedText = $(el).find('span[class*="text-green-600"]').first().text().trim() || '0';
+      const leechText = $(el).find('span[class*="text-red-600"]').first().text().trim() || '0';
+
+      // Размер: «3.75 GB» в мета-блоке карточки
+      const sizeText = ($(el).find('div[class*="gap-4"]').first().text().match(/([\d.]+\s*(?:GB|MB|TB))/i) || [])[1] || '1 GB';
+
+      releases.push(
+        this.normalizeRelease(
+          `bitsearch-${i}-${Date.now()}`,
+          titleText,
+          magnet,
+          this.parseSizeBytes(sizeText),
+          parseInt(seedText.replace(/\D/g, ''), 10) || 0,
+          parseInt(leechText.replace(/\D/g, ''), 10) || 0,
+          'BitSearch'
         )
       );
     });

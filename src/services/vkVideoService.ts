@@ -312,11 +312,30 @@ export async function searchVkVideo(query: string): Promise<VkVideoItem[]> {
   const cached = searchCache.get(q);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.items;
 
-  // Токен задан → официальный API; при ошибке API откатываемся на страницы
+  // Каскад источников (Zero-Config, без обязательного токена):
+  // 1) Официальный API (токен из настроек, если задан);
+  // 2) Silent VK Auth — гостевая сессия main-процесса (без CORS);
+  // 3) Страничный поиск (последний рубеж).
   let candidates: Candidate[] = [];
   if (vkToken) {
     const apiCandidates = await searchViaApi(q);
     if (apiCandidates) candidates = apiCandidates;
+  }
+  if (candidates.length === 0 && window.electronAPI?.vkSearchVideo) {
+    try {
+      const res = await window.electronAPI.vkSearchVideo(q);
+      if (res.success && Array.isArray(res.items) && res.items.length > 0) {
+        candidates = res.items.map((it) => ({
+          ownerId: it.ownerId,
+          videoId: it.videoId,
+          hash: it.hash,
+          title: it.title,
+        }));
+        console.log(`[VK] Silent auth: ${candidates.length} кандидатов через main-сессию`);
+      }
+    } catch (err: any) {
+      console.warn('[VK] Main-session search failed:', err?.message || err);
+    }
   }
   if (candidates.length === 0) {
     candidates = await searchCandidates(q);

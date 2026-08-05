@@ -19,8 +19,8 @@ import { TorrentRelease, DubbingType } from '../../types';
 
 /** Таймаут одного инстанса (мс). */
 const INSTANCE_TIMEOUT_MS = 6000;
-/** Общий лимит на весь цикл фолбэков (мс) — чтобы UI не висел при мёртвом пуле. */
-const OVERALL_DEADLINE_MS = 20000;
+/** Общий лимит на поиск по всем зеркалам (мс) — UI не должен виснуть. */
+const OVERALL_DEADLINE_MS = 12000;
 /** Сколько секунд не трогать инстанс после ошибки. */
 const FAIL_COOLDOWN_MS = 60 * 1000;
 
@@ -32,6 +32,71 @@ export const JACRED_INSTANCES: string[] = [
   'https://j2.jacred.app',
   'https://jacred.net',
 ];
+
+/**
+ * Удалённые источники актуального списка зеркал (JacRed Dynamic Router).
+ * Загружаются на старте приложения; при 404/таймауте — молча используется
+ * дефолтный пул + пользовательские инстансы. Поддерживаемые форматы:
+ * JSON-массив строк, JSON-объект { instances: [...] }, plain-text по строкам.
+ */
+export const REMOTE_POOL_SOURCES: string[] = [
+  // Собственный список проекта (файл jacred-instances.txt в корне репозитория):
+  // https://raw.githubusercontent.com/<owner>/Luminary/master/jacred-instances.txt
+  'https://raw.githubusercontent.com/danekccci-jpg/Luminary/master/jacred-instances.txt',
+  // Запасные общественные списки (появляются/исчезают вместе с зеркалами):
+  'https://raw.githubusercontent.com/SuNNjek/JacRed/master/instances.txt',
+  'https://raw.githubusercontent.com/SuNNjek/JacRed/master/instances.json',
+];
+
+/** Динамически загруженный пул (remote CDN/Gist) — приоритетнее дефолтов. */
+let remotePool: string[] = [];
+let remotePoolLoadedAt = 0;
+const REMOTE_POOL_TTL_MS = 6 * 60 * 60 * 1000; // обновляем список раз в 6 часов
+
+/** Распарсить ответ источника списка (JSON-массив | { instances } | plain text). */
+export function parseInstanceList(text: string): string[] {
+  if (!text || !text.trim()) return [];
+  const norm = (s: string) => String(s).trim().replace(/\/+$/, '');
+  const valid = (s: string) => /^https?:\/\//i.test(s);
+  // 1) JSON
+  try {
+    const j = JSON.parse(text);
+    const arr = Array.isArray(j) ? j : Array.isArray(j?.instances) ? j.instances : [];
+    const urls = arr.map((x: any) => (typeof x === 'string' ? norm(x) : x?.url ? norm(x.url) : '')).filter(valid);
+    if (urls.length) return urls;
+  } catch { /* не JSON — пробуем plain text */ }
+  // 2) Plain text: по одной ссылке на строку (комментарии # и пустые строки пропускаем)
+  return text
+    .split('\n')
+    .map((s) => norm(s.split(/[#\s]/)[0]))
+    .filter(valid);
+}
+
+/** Авто-загрузка актуального списка зеркал из удалённого источника. */
+export async function refreshRemoteInstancePool(): Promise<string[]> {
+  if (remotePool.length && Date.now() - remotePoolLoadedAt < REMOTE_POOL_TTL_MS) return remotePool;
+  for (const src of REMOTE_POOL_SOURCES) {
+    try {
+      const res = await fetchWithTimeout(src, 6000);
+      if (!res.ok) continue;
+      const urls = parseInstanceList(await res.text());
+      if (urls.length > 0) {
+        remotePool = urls;
+        remotePoolLoadedAt = Date.now();
+        console.log(`[JacRed] Динамический пул загружен (${urls.length} зеркал) из ${src}`);
+        return urls;
+      }
+    } catch { /* источник недоступен — пробуем следующий */ }
+  }
+  console.warn('[JacRed] Удалённый список зеркал недоступен — использую дефолтный пул');
+  return getInstancePool();
+}
+
+/** Принудительно очистить динамический пул (например, при смене настроек). */
+export function resetRemoteInstancePool() {
+  remotePool = [];
+  remotePoolLoadedAt = 0;
+}
 
 /** Трекеры, по которым фильтруем выдачу (имена модулей JacRed). */
 export const JACRED_TRACKERS = ['RuTracker.org', 'NNM-Club', 'Rutor'] as const;
@@ -61,7 +126,8 @@ function getInstancePool(): string[] {
       }
     }
   } catch { /* ignore */ }
-  // Дефолтный пул — в хвост, как резерв
+  // Динамический пул (remote CDN/Gist), затем дефолтный — в хвост, как резерв
+  pool.push(...remotePool.filter((b) => !pool.includes(b)));
   pool.push(...JACRED_INSTANCES.filter((b) => !pool.includes(b)));
   return pool;
 }
@@ -254,8 +320,46 @@ function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
 }
 
 /**
- * Поиск раздач через JacRed с авто-фолбэком по пулу инстансов.
- * Возвращает раздачи первого отвечающего инстанса (приоритет свежести пула).
+ * Запрос к одному инстансу. Возвращает раздачи, [] — инстанс жив, но пусто,
+ * null — инстанс упал (ошибка/таймаут/невалидный ответ) → карантин.
+ */
+async function queryInstance(base: string, params: URLSearchParams, query: string): Promise<TorrentRelease[] | null> {
+  const url = `${base}/api/v1/search?${params.toString()}`;
+  try {
+    const res = await fetchWithTimeout(url, INSTANCE_TIMEOUT_MS);
+    if (!res.ok) {
+      markDead(base);
+      console.warn(`[JacRed] ${base} → HTTP ${res.status}`);
+      return null;
+    }
+    let payload: any;
+    try {
+      payload = await res.json();
+    } catch {
+      markDead(base);
+      console.warn(`[JacRed] ${base} → invalid JSON`);
+      return null;
+    }
+    // success:false — инстанс отвечает, но поиск/трекеры недоступны → карантин
+    if (payload && payload.success === false) {
+      markDead(base);
+      console.warn(`[JacRed] ${base} → ${String(payload.error || 'search failed')}`);
+      return null;
+    }
+    markAlive(base);
+    return parseItems(payload, query);
+  } catch (err: any) {
+    markDead(base);
+    console.warn(`[JacRed] ${base} failed: ${err?.message || err}`);
+    return null;
+  }
+}
+
+/**
+ * Поиск раздач через JacRed: ПАРАЛЛЕЛЬНЫЙ опрос всех живых зеркал (racing
+ * query / fast-failover) — ни один мёртвый инстанс не блокирует выдачу.
+ * Результаты всех ответивших объединяются с дедупом по BTIH и сортировкой
+ * 4K/2160p → 1080p. Упавшие зеркала автоматически уходят в карантин.
  */
 export async function searchJacRed(
   query: string,
@@ -265,68 +369,47 @@ export async function searchJacRed(
   const q = String(query || '').trim().slice(0, 200);
   if (!q) return [];
 
-  const pool = getInstancePool();
+  const pool = getInstancePool().filter((b) => !isDead(b));
+  if (pool.length === 0) {
+    lastStatus = 'unreachable';
+    return [];
+  }
+
   const params = new URLSearchParams({ query: q });
   if (year) params.set('year', String(year).slice(0, 4));
   if (trackers.length > 0) params.set('trackers', trackers.join(','));
 
-  const deadline = Date.now() + OVERALL_DEADLINE_MS;
-  let lastError: unknown = null;
-  let lastBase = '';
-  let anyResponded = false; // хотя бы один инстанс ответил рабочим JSON
+  // Параллельный опрос всего пула; общий дедлайн ограничивает ожидание
+  const results = await Promise.allSettled(
+    pool.map((base) => queryInstance(base, params, q))
+  );
 
-  for (const base of pool) {
-    if (Date.now() > deadline) break;
-    if (isDead(base)) continue;
+  const merged = mergeReleasesByHash(
+    pool
+      .map((base, i) => {
+        const r = results[i];
+        return r.status === 'fulfilled' && r.value ? r.value : [];
+      })
+      .flat()
+  );
 
-    const url = `${base}/api/v1/search?${params.toString()}`;
-    try {
-      const res = await fetchWithTimeout(url, INSTANCE_TIMEOUT_MS);
-      if (!res.ok) {
-        markDead(base);
-        lastError = new Error(`HTTP ${res.status}`);
-        lastBase = base;
-        continue;
-      }
-      let payload: any;
-      try {
-        payload = await res.json();
-      } catch {
-        markDead(base);
-        lastError = new Error('Invalid JSON');
-        lastBase = base;
-        continue;
-      }
-      // success:false — инстанс отвечает, но поиск/трекеры недоступны → fallback
-      if (payload && payload.success === false) {
-        markDead(base);
-        lastError = new Error(String(payload.error || 'JacRed search failed'));
-        lastBase = base;
-        continue;
-      }
-      anyResponded = true;
-      const items = parseItems(payload, q);
-      if (items.length === 0) {
-        // Живой инстанс без результатов — пробуем следующий (конфиг трекеров разный)
-        markAlive(base);
-        continue;
-      }
-      markAlive(base);
-      lastStatus = 'ok';
-      return items;
-    } catch (err: any) {
-      markDead(base);
-      lastError = err;
-      lastBase = base;
-      console.warn(`[JacRed] instance failed: ${base} — ${err?.message || err}`);
-    }
-  }
+  lastStatus = results.some((r) => r.status === 'fulfilled' && r.value !== null) ? 'ok' : 'unreachable';
+  return merged;
+}
 
-  lastStatus = anyResponded ? 'ok' : 'unreachable';
-  if (lastError && lastBase) {
-    console.warn(`[JacRed] all instances failed (last: ${lastBase})`);
-  }
-  return [];
+/**
+ * Racing probe: параллельный ping всех зеркал (поиск 'test') для быстрого
+ * определения живых/мёртвых на старте приложения — первый поиск не ждёт
+ * таймауты мёртвых инстансов (они сразу уходят в карантин).
+ */
+export async function probeJacredPool(): Promise<{ alive: number; dead: number }> {
+  const pool = getInstancePool();
+  const params = new URLSearchParams({ query: 'test', limit: '1' });
+  const results = await Promise.allSettled(pool.map((base) => queryInstance(base, params, 'test')));
+  const alive = results.filter((r) => r.status === 'fulfilled' && r.value !== null).length;
+  const dead = pool.length - alive;
+  console.log(`[JacRed] Racing probe: ${alive} alive, ${dead} dead (из ${pool.length})`);
+  return { alive, dead };
 }
 
 // ── Мёрдж и приоритизация ──

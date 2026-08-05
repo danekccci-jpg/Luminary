@@ -15,9 +15,23 @@ import { torrServerService } from './services/torrserver';
 import { toastBus } from './services/toast';
 import { library, formatClock, LibraryItem } from './services/library';
 import { setVkToken } from './services/vkVideoService';
-import { setCustomJacredUrl } from './services/scrapers/jacred';
+import { setCustomJacredUrl, refreshRemoteInstancePool, probeJacredPool } from './services/scrapers/jacred';
 import { Heart, Bookmark, History, Play } from 'lucide-react';
 import { Flame, TrendingUp, Award, Search as SearchIcon, Tv, Zap, Film } from 'lucide-react';
+
+/** Zero-Config: фоновая авто-настройка источников на старте приложения. */
+async function initZeroConfigSources() {
+  try {
+    // 1) Динамический пул JacRed-зеркал (remote CDN/Gist) + racing probe:
+    //    мёртвые зеркала сразу уходят в карантин — первый поиск не ждёт таймаутов.
+    await refreshRemoteInstancePool();
+    await probeJacredPool();
+  } catch { /* не критично — поиск сам пробует пул */ }
+  // 2) Silent VK Auth: гостевая сессия в фоне (кэш 12 ч, авто-обновление)
+  try {
+    await window.electronAPI?.vkAcquireSession?.();
+  } catch { /* VK может быть недоступен — поиск тихо деградирует */ }
+}
 
 // ── Настройки: персистентность в localStorage + применение к сервисам ──
 const SETTINGS_STORAGE_KEY = 'luminary_settings';
@@ -172,6 +186,8 @@ export const App: React.FC = () => {
     clearMetaCache();
     // Применяем сохранённые настройки к сервисам (VK-токен, JacRed-инстанс, TMDB-ключ)
     applySettingsToServices(settings);
+    // Zero-Config: динамический пул JacRed + гостевая VK-сессия (фоном)
+    initZeroConfigSources();
     fetchCatalog();
     checkTorrServerStatus();
     // Push-подписка на изменения статуса TorrServer из Main Process —
@@ -538,11 +554,6 @@ export const App: React.FC = () => {
         <MovieDetailsModal
           movie={selectedMovie}
           onClose={() => setSelectedMovie(null)}
-          onOpenSettings={() => {
-            // «Настроить VK» из блока онлайн-плееров: закрываем детали → открываем настройки
-            setSelectedMovie(null);
-            setIsSettingsOpen(true);
-          }}
           onPlayTorrent={(torrent) => {
             // Прогресс по конкретному эпизоду сериала (или фильму)
             const prog = selectedMovie
