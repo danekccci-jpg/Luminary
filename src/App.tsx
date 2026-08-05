@@ -498,7 +498,9 @@ export const App: React.FC = () => {
           onClose={() => setSelectedMovie(null)}
           onPlayTorrent={(torrent) => {
             const prog = selectedMovie ? library.getProgress(String(selectedMovie.id)) : null;
-            setSelectedMovie(null);
+            // ⚠️ ZONE-навигация: НЕ сбрасываем selectedMovie — детали фильма
+            // (выбор торрента/серии) остаются под плеером. X / Escape в плеере
+            // возвращают сюда, а не на главный экран.
             setActiveStream({
               ...torrent,
               mediaId: selectedMovie ? String(selectedMovie.id) : undefined,

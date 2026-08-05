@@ -4,6 +4,7 @@ import {
   AlertTriangle, Zap, Volume2,
 } from 'lucide-react';
 import { TorrentRelease, DubbingType } from '../types';
+import { parseTorrentMeta, russianPriority } from '../utils/torrentMeta';
 
 interface TorrentSelectorProps {
   releases: TorrentRelease[];
@@ -104,18 +105,15 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
 }) => {
   const [qualityFilter, setQualityFilter]   = useState('ALL');
   const [dubbingFilter, setDubbingFilter]   = useState('ALL');
-  const [codecFilter, setCodecFilter]       = useState('ALL');
-  const [sortBy, setSortBy]                 = useState<'seeders' | 'size' | 'stability'>('seeders');
+  const [sortBy, setSortBy]                 = useState<'russian' | 'seeders' | 'size' | 'stability'>('russian');
   const [keyword, setKeyword]               = useState('');
 
   const dubbingOptions = ['ALL', 'Дубляж', 'HDRezka', 'LostFilm', 'Оригинал + Субтитры', 'RHS'];
   const qualityOptions = ['ALL', '4K', '1080p', '720p'];
-  const codecOptions   = ['ALL', 'H.264', 'HEVC', 'AV1'];
 
   const filtered = releases.filter((r) => {
     if (qualityFilter !== 'ALL' && r.quality !== qualityFilter) return false;
     if (dubbingFilter !== 'ALL' && r.dubbing !== dubbingFilter) return false;
-    if (codecFilter   !== 'ALL' && r.videoCodec !== codecFilter)  return false;
     if (keyword.trim()) {
       const kw = keyword.toLowerCase();
       if (!r.title.toLowerCase().includes(kw) && !r.tags.some(t => t.toLowerCase().includes(kw))) return false;
@@ -123,7 +121,15 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
     return true;
   });
 
+  // RU-first: приоритет русской озвучки и флагманских студий (Lampa-style),
+  // внутри группы — по количеству сидов.
   const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === 'russian') {
+      const pa = russianPriority(a);
+      const pb = russianPriority(b);
+      if (pb !== pa) return pb - pa;
+      return b.seeders - a.seeders;
+    }
     if (sortBy === 'seeders')   return b.seeders - a.seeders;
     if (sortBy === 'size')      return b.sizeBytes - a.sizeBytes;
     if (sortBy === 'stability') return b.stabilityScore - a.stabilityScore;
@@ -271,41 +277,24 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
           </div>
         </div>
 
-        {/* Codec + Sort */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.45rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', minWidth: '68px' }}>Кодек</span>
-            <div style={{ display: 'flex', gap: '0.35rem' }}>
-              {codecOptions.map(c => (
-                <button
-                  key={c}
-                  onClick={() => setCodecFilter(c)}
-                  className={`filter-chip ${codecFilter === c ? 'active-cyan' : ''}`}
-                >
-                  {c === 'ALL' ? 'Все' : c}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Sort Selector */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600 }}>Сортировать:</span>
-            {[
-              { id: 'seeders',   label: 'По сидам' },
-              { id: 'stability', label: 'Smart Choice' },
-              { id: 'size',      label: 'Размер' },
-            ].map(opt => (
-              <button
-                key={opt.id}
-                onClick={() => setSortBy(opt.id as any)}
-                className={`filter-chip ${sortBy === opt.id ? 'active-cyan' : ''}`}
-                style={{ fontSize: '0.7rem' }}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
+        {/* Sort Selector (RU-first по умолчанию) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600 }}>Сортировать:</span>
+          {[
+            { id: 'russian',   label: 'RU + Сиды' },
+            { id: 'seeders',   label: 'По сидам' },
+            { id: 'stability', label: 'Smart Choice' },
+            { id: 'size',      label: 'Размер' },
+          ].map(opt => (
+            <button
+              key={opt.id}
+              onClick={() => setSortBy(opt.id as any)}
+              className={`filter-chip ${sortBy === opt.id ? 'active-cyan' : ''}`}
+              style={{ fontSize: '0.7rem' }}
+            >
+              {opt.label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -446,6 +435,79 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = ({
                         {release.source}
                       </span>
                     </div>
+
+                    {/* ── Метаданные из названия: озвучки, серии/сезоны, аудио ── */}
+                    {(parseTorrentMeta(release.title).dubbings.length > 0 ||
+                      parseTorrentMeta(release.title).seasons ||
+                      parseTorrentMeta(release.title).episodes ||
+                      parseTorrentMeta(release.title).audioTracks.length > 0) && (
+                      <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.45rem', alignItems: 'center' }}>
+                        {parseTorrentMeta(release.title).dubbings.slice(0, 4).map((d) => (
+                          <span
+                            key={d}
+                            style={{
+                              padding: '1px 7px',
+                              borderRadius: '999px',
+                              background: 'rgba(138,43,226,0.12)',
+                              border: '1px solid rgba(138,43,226,0.35)',
+                              color: '#B57BFF',
+                              fontSize: '0.62rem',
+                              fontWeight: 700,
+                            }}
+                          >
+                            {d}
+                          </span>
+                        ))}
+                        {parseTorrentMeta(release.title).seasons != null && (
+                          <span
+                            style={{
+                              padding: '1px 7px',
+                              borderRadius: '999px',
+                              background: 'rgba(16,245,172,0.1)',
+                              border: '1px solid rgba(16,245,172,0.3)',
+                              color: '#10F5AC',
+                              fontSize: '0.62rem',
+                              fontWeight: 700,
+                            }}
+                          >
+                            S{parseTorrentMeta(release.title).seasons}
+                            {parseTorrentMeta(release.title).episodes != null ? `E${parseTorrentMeta(release.title).episodes}` : ''}
+                          </span>
+                        )}
+                        {parseTorrentMeta(release.title).episodes != null && parseTorrentMeta(release.title).seasons == null && (
+                          <span
+                            style={{
+                              padding: '1px 7px',
+                              borderRadius: '999px',
+                              background: 'rgba(16,245,172,0.1)',
+                              border: '1px solid rgba(16,245,172,0.3)',
+                              color: '#10F5AC',
+                              fontSize: '0.62rem',
+                              fontWeight: 700,
+                            }}
+                          >
+                            {parseTorrentMeta(release.title).episodes} серий
+                          </span>
+                        )}
+                        {parseTorrentMeta(release.title).audioTracks.slice(0, 3).map((a) => (
+                          <span
+                            key={a}
+                            title="Аудиодорожка"
+                            style={{
+                              padding: '1px 6px',
+                              borderRadius: '6px',
+                              background: 'rgba(255,184,0,0.1)',
+                              border: '1px solid rgba(255,184,0,0.3)',
+                              color: '#FFB800',
+                              fontSize: '0.6rem',
+                              fontWeight: 700,
+                            }}
+                          >
+                            {a}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* Stream Action */}

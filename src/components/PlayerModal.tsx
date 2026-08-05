@@ -310,6 +310,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const [isPip, setIsPip]           = useState(false);
   const [isEnded, setIsEnded]       = useState(false);
   const [scrubHover, setScrubHover] = useState<{ x: number; time: number } | null>(null);
+  // Актуальный видео-индекс (для фонового ретранскода AC3/DTS → AAC при сбое кодека)
+  const videoIndexRef = useRef<number | undefined>(undefined);
   // Настройки субтитров (применяются к <track>, если поток их содержит)
   const [subs, setSubs] = useState({
     enabled: true,
@@ -422,6 +424,13 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   // Клавиатурное управление
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Escape работает всегда (даже при буферизации/ошибке) и возвращает
+      // в MovieDetailsModal (выбор торрента/серии), а не на главный экран.
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleClose();
+        return;
+      }
       if (isBuffering || errorMsg || codecError) return;
       const target = e.target as HTMLElement;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
@@ -639,6 +648,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             const files = early.success && Array.isArray(earlyStats) ? earlyStats : [];
             if (files.length > 0) {
               videoIndex = pickVideoIndex(files);
+              videoIndexRef.current = videoIndex;
               const m = (files[0].path || '').match(/\.([a-z0-9]{2,4})$/i);
               if (m) { detectedExt = m[1].toLowerCase(); setContainerExt(detectedExt); }
               break;
@@ -671,6 +681,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                 // Метаданные пришли поздно — выбираем видео-файл и пересобираем URL
                 if (!videoIndex && st.file_stats.length > 0) {
                   const idx = pickVideoIndex(st.file_stats);
+                  videoIndexRef.current = idx;
                   if (idx !== 1 && torrentHash) {
                     videoIndex = idx;
                     torrServerService.getStreamUrl(torrentHash, idx, transcodeAudioToAac).then((u) => {
@@ -817,9 +828,31 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isBuffering, errorMsg]);
 
+  /**
+   * Авто-фоновый ретранскод AC3/DTS/E-AC3 → AAC через GST HLS TorrServer.
+   * Вызывается при onError или 5-сек простое: если аудио-кодек рискованный и
+   * поток ещё не в транскоде — пересобираем URL и перезапускаем поток БЕЗ
+   * оверлея (видео не замораживается, даём ещё один START_TIMEOUT).
+   * Возвращает true, если фоновый ретранскод запущен.
+   */
+  const tryAutoRetranscode = async (): Promise<boolean> => {
+    if (transcodeAudioToAac) return false;                       // уже в транскоде
+    if (!codecRisk.risky) return false;                          // кодек безопасный
+    if (!hash || !videoIndexRef.current) return false;           // нет индекса файла
+    if (streamUrl && streamUrl.includes('/gst/')) return false;  // уже пробовали GST
+    const gstUrl = await torrServerService.getStreamUrl(hash, videoIndexRef.current, true).catch(() => null);
+    if (!gstUrl || gstUrl === streamUrl) return false;
+    console.warn('[Player] AC3/DTS — фоновая перекодировка в AAC (GST HLS), повторная попытка…');
+    setStreamUrl(gstUrl);
+    restartPreload(gstUrl);
+    return true;
+  };
+
   /** onError на <video>: кодек/контейнер не поддерживается Chromium. */
-  const handleVideoError = () => {
+  const handleVideoError = async () => {
     console.error('[Player] Video element error:', videoRef.current?.error || 'unknown');
+    // AC3/DTS: одна фоновая попытка перекодировки в AAC до показа оверлея
+    if (await tryAutoRetranscode()) return;
     setCodecError(true);
   };
 
@@ -847,9 +880,11 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     const onPlaying = () => clearTimer();
 
     video.addEventListener('playing', onPlaying);
-    timer = setTimeout(() => {
+    timer = setTimeout(async () => {
       // Данные не подгрузились (readyState < 2) — поток не воспроизводится
       if (!video.error && video.readyState < 2) {
+        // AC3/DTS: сначала фоновая перекодировка в AAC — оверлей только если не помогло
+        if (await tryAutoRetranscode()) { clearTimer(); return; }
         console.warn('[Player] Stream did not start within 5s — showing codec fallback');
         setCodecError(true);
       }
@@ -1735,6 +1770,25 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                   }}
                 >
                   <PictureInPicture2 size={15} style={{ color: isPip ? 'var(--cyan)' : undefined }} />
+                </button>
+
+                {/* Quick VLC / IINA switcher: пауза БЕЗ размонтирования видео,
+                    поток остаётся в кэше TorrServer — переключение без зависания */}
+                <button
+                  onClick={() => { videoRef.current?.pause(); openExternalPlayer(); }}
+                  className="btn-icon"
+                  title={codecRisk.risky
+                    ? 'Проблемы с кодеком (AC3/DTS/HEVC)? Открыть поток в VLC / IINA'
+                    : 'Открыть поток во внешнем плеере (VLC / IINA)'}
+                  style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '10px',
+                    background: codecRisk.risky ? 'rgba(255,184,0,0.12)' : undefined,
+                    border: codecRisk.risky ? '1px solid rgba(255,184,0,0.35)' : undefined,
+                  }}
+                >
+                  <ExternalLink size={15} style={{ color: codecRisk.risky ? '#FFB800' : undefined }} />
                 </button>
 
                 {/* Fullscreen */}
