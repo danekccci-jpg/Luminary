@@ -107,6 +107,8 @@ export class TorrServerManager {
 
   // ── Автовосстановление по логам ──
   private startingFlag = false;
+  /** In-flight start (single-flight: whenReady + heartbeat не гоняют двойной старт). */
+  private startPromise: Promise<TorrServerStatus> | null = null;
   private restartCount = 0;
   private lastRestartAt = 0;
   private appliedNetworkFix = false;
@@ -537,7 +539,25 @@ export class TorrServerManager {
     });
   }
 
-  public async startServer(): Promise<TorrServerStatus> {
+  /**
+   * Single-flight запуск: whenReady и первый тик heartbeat вызывают startServer
+   * почти одновременно; два параллельных потока очисток/lsof гоняли друг друга
+   * (второй поток убивал первого через lsof + xargs kill -9 — см. ниже).
+   * Теперь параллельный вызов просто дожидается уже идущего старта.
+   */
+  public startServer(): Promise<TorrServerStatus> {
+    if (this.startingFlag && this.startPromise) {
+      console.log('[TorrServer] startServer already in progress — reusing in-flight start');
+      return this.startPromise;
+    }
+    this.startingFlag = true;
+    this.startPromise = this.startServerImpl();
+    return this.startPromise.finally(() => {
+      this.startPromise = null;
+    });
+  }
+
+  private async startServerImpl(): Promise<TorrServerStatus> {
     // Стабильная проверка: сервер считается «уже работающим» только если /echo
     // отвечает 200 несколько раз подряд. Это исключает гонку stop→start,
     // когда умирающий процесс ещё отвечает, но вскоре пропадёт.
@@ -582,9 +602,12 @@ export class TorrServerManager {
         console.warn('[TorrServer] killall cleanup warning (non-fatal):', err?.message);
       }
       try {
-        // `lsof -ti tcp:<port>` — безопасная форма (как в killProcessOnPort);
-        // в stdout приходят только PID на порту, kill валидных из них.
-        this.safeExecKill(`lsof -ti tcp:${this.port} | xargs kill -9 || true`, `Port ${this.port} cleared (lsof kill)`);
+        // ⚠️ НЕ `lsof -ti tcp:<port> | xargs kill -9`: lsof выводит и СОБСТВЕННЫЕ
+        // клиентские соединения приложения к порту (checkHealth/heartbeat →
+        // TIME_WAIT) — xargs убил бы главный процесс (SIGKILL 137, приложение
+        // падало на старте). safeExecKill убивает через JS-цикл, исключая
+        // process.pid — дохнут только чужие PID (зависшие инстансы на порту).
+        this.safeExecKill(`lsof -ti tcp:${this.port} || true`, `Port ${this.port} cleared (lsof kill)`);
         console.log(`[TorrServer] Port ${this.port} cleanup finished`);
       } catch (err: any) {
         console.warn(`[TorrServer] Port ${this.port} cleanup warning (non-fatal):`, err?.message);
@@ -876,6 +899,24 @@ export class TorrServerManager {
     } catch {
       /* ignore */
     }
+  }
+
+  /**
+   * Добавить раздачу из .torrent-файла (base64) — надёжнее магнета: метаданные
+   * локально, без обмена метаданными через пиров. Файл пишем в userData/torrents
+   * и добавляем по file:// (магнеты в этой сборке часто застревают на метаданных).
+   */
+  public async addTorrentFile(base64: string, title?: string): Promise<any> {
+    const dir = path.join(app.getPath('userData'), 'torrents');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `torrent-${Date.now()}.torrent`);
+    fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
+    console.log(`[TorrServer] Добавление .torrent-файла (${base64.length} b base64)`);
+    return await this.apiRequest('add', {
+      link: `file://${filePath}`,
+      title: title || 'Movie Stream',
+      save_to_db: false,
+    });
   }
 
   public async apiRequest(action: string, payload: any = {}): Promise<any> {

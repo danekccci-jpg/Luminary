@@ -31,6 +31,8 @@ export interface TorrentRelease {
   stabilityScore: number;
   stabilityLabel: 'Отличная' | 'Хорошая' | 'Умеренная' | 'Низкий битрэйт';
   requiredMbps: number;
+  /** .torrent-файл (base64) — надёжнее магнета для TorrServer (метаданные локально). */
+  torrentFile?: string;
 }
 
 export class TorrentScraper {
@@ -93,8 +95,11 @@ export class TorrentScraper {
       { name: 'Torrentio', run: () => this.queryTorrentio(safeQuery, safeYear, imdbId) },
       { name: 'Rutor', run: () => this.scrapeRutor(safeQuery, safeYear) },
       { name: 'BitSearch', run: () => this.scrapeBitSearch(safeQuery, safeYear) },
-      // RuTracker.org — НЕ скрейпим HTML напрямую (фрагментно, капча): трекер
-      // отдаётся через JacRed-инстансы (tracker=RuTracker.org).
+      // RuTracker — открытые зеркала (Zero-Config Fallback): перебор пула
+      // зеркал/RSS в обход login-wall; защищённые (DDos-Guard/JS) молча
+      // пропускаются. Глубокий поиск RuTracker — через локальный JacRed
+      // с кредами (renderer + динамический разгон в jacredserver.ts).
+      { name: 'RuTrackerMirror', run: () => this.scrapeRuTrackerMirrors(safeQuery, safeYear) },
       // VK Video НЕ источник торрентов: раньше генерировал фейковые magnet
       // (btih из нулей) → битые «раздачи» в UI. Реальный VK-поиск (HLS-потоки)
       // вынесен в renderer — src/services/vkVideoService.ts (блок «Онлайн / VK»).
@@ -434,16 +439,135 @@ export class TorrentScraper {
   }
 
   // ═══════════════════════════════════════════════════════
-  //  RuTracker.org — НЕ скрейпим HTML напрямую (гостевой magnet недоступен,
-  //  капча/фрагмент): трекер отдаётся через JacRed-инстансы (renderer-клиент
-  //  src/services/scrapers/jacred.ts, tracker=RuTracker.org, авторизация инстансов).
+  //  RuTracker — открытые зеркала (Zero-Config Fallback).
+  //  rutracker.org/.net/.nl закрыты DDos-Guard/JS-челленджами для гостей —
+  //  перебираем ПУЛ зеркал (tracker.php + rss.php) и молча пропускаем
+  //  защищённые. Когда зеркало открыто — отдаём title/BTIH/size/seeders
+  //  в общий dedupeAndSort. Строки без magnet (гостевой режим) отбрасываем:
+  //  без infoHash раздачу не воспроизвести.
+  //  Глубокий поиск RuTracker с учётом озвучки/серий — локальный JacRed
+  //  с кредами (см. jacredserver.ts: динамический разгон при наличии логина).
   // ═══════════════════════════════════════════════════════
+  private async scrapeRuTrackerMirrors(query: string, year?: string): Promise<TorrentRelease[]> {
+    const searchStr = year ? `${query} ${year}` : query;
+    const q = encodeURIComponent(searchStr);
+    const mirrorUrls = [
+      `https://rutracker.net/forum/tracker.php?nm=${q}`,
+      `https://rutracker.org/forum/tracker.php?nm=${q}`,
+      `https://rutracker.nl/forum/tracker.php?nm=${q}`,
+    ];
+    const rssUrls = [
+      'https://rutracker.net/forum/rss.php',
+      'https://rutracker.org/forum/rss.php',
+    ];
+    const headers = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+      'Accept-Language': 'ru-RU,ru;q=0.9',
+    };
+
+    // 1) Поисковые страницы зеркал (tracker.php?nm=...) — ПАРАЛЛЕЛЬНО,
+    //    общий кап ~6 с: зависшее зеркало не должно тормозить выдачу.
+    const mirrorFetches = await Promise.allSettled(
+      mirrorUrls.map((url) =>
+        axios
+          .get(url, { timeout: 5500, validateStatus: (st) => st >= 200 && st < 300, headers })
+          .then((res) => ({ url, html: res.data }))
+      )
+    );
+    for (const outcome of mirrorFetches) {
+      if (outcome.status !== 'fulfilled') continue;
+      const { url, html } = outcome.value;
+      if (!html || typeof html !== 'string' || html.length < 500) continue;
+      const $ = cheerio.load(html);
+      const releases: TorrentRelease[] = [];
+      $('tr.tCenter.hl-tr, tr.tCenter').each((i, el) => {
+        if (releases.length >= 10) return false;
+        const titleText = $(el).find('a.tLink, a.med.tLink').first().text().trim();
+        if (!titleText) return;
+        const magnet = $(el).find('a[href^="magnet:"]').first().attr('href') || '';
+        // Гость не видит magnet-иконку — строка без BTIH бесполезна для плеера
+        if (!/^magnet:\?xt=urn:btih:/i.test(magnet)) return;
+        const sizeText =
+          $(el).find('a.tor-size, td.tor-size').first().text().trim() ||
+          $(el).find('td').eq(5).text().trim();
+        const seedText = $(el).find('b.seedmed, span.seedmed').first().text().trim() || '0';
+        const leechText = $(el).find('b.leechmed, span.leechmed').first().text().trim() || '0';
+        releases.push(
+          this.normalizeRelease(
+            `rutracker-${i}-${Date.now()}`,
+            titleText,
+            magnet,
+            this.parseSizeBytes(sizeText),
+            parseInt(seedText, 10) || 0,
+            parseInt(leechText, 10) || 0,
+            'RuTracker Mirror'
+          )
+        );
+      });
+      if (releases.length > 0) {
+        console.log(`[Scraper] RuTrackerMirror: ${url} → ${releases.length} results`);
+        return releases;
+      }
+    }
+
+    // 2) RSS-фиды зеркал: парсим только записи с magnet (гостевой RSS rutracker
+    //    магнетов не отдаёт — фид тихо пропускается, но код живёт на случай,
+    //    если зеркало откроет magnet в фиде).
+    for (const url of rssUrls) {
+      try {
+        const res = await axios.get(url, {
+          timeout: 6000,
+          validateStatus: (s) => s >= 200 && s < 300,
+          headers,
+        });
+        const $ = cheerio.load(res.data, { xmlMode: true });
+        const releases: TorrentRelease[] = [];
+        $('item').each((i, el) => {
+          if (releases.length >= 10) return false;
+          const titleText = $(el).find('title').first().text().trim();
+          const html = $(el).html() || '';
+          const magnet = (html.match(/magnet:\?xt=urn:btih:[a-fA-F0-9]{40}/i) || [])[0] || '';
+          if (!titleText || !magnet) return;
+          releases.push(
+            this.normalizeRelease(
+              `rutracker-rss-${i}-${Date.now()}`,
+              titleText,
+              magnet,
+              4 * 1024 * 1024 * 1024,
+              0,
+              0,
+              'RuTracker Mirror'
+            )
+          );
+        });
+        if (releases.length > 0) return releases;
+      } catch {
+        /* фид недоступен — пропускаем */
+      }
+    }
+
+    return [];
+  }
 
   // ═══════════════════════════════════════════════════════
   //  VK Video — перенесён в renderer (src/services/vkVideoService.ts):
   //  реальный поиск по VK + извлечение HLS-манифеста из playerParams.
   //  Здесь больше не создаём фейковые magnet-раздачи (btih из нулей).
   // ═══════════════════════════════════════════════════════
+
+  /** Публичная обёртка нормализации (переиспользуется rutrackerSession.ts). */
+  public normalize(
+    title: string,
+    magnet: string,
+    sizeBytes: number,
+    seeders: number,
+    leechers: number,
+    source: string
+  ): TorrentRelease {
+    const id = `ext-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return this.normalizeRelease(id, title, magnet, sizeBytes, seeders, leechers, source);
+  }
 
   private normalizeRelease(
     id: string,

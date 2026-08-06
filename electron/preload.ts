@@ -9,6 +9,7 @@ export interface ElectronAPI {
   /** Push-подписка на изменения статуса TorrServer из Main Process. Возвращает unsubscribe. */
   onTorrServerStatusChanged: (callback: (status: any) => void) => () => void;
   addMagnetToTorrServer: (magnet: string, title?: string, poster?: string) => Promise<any>;
+  addTorrentFileToTorrServer: (base64: string, title?: string) => Promise<any>;
   getTorrServerTorrent: (hash: string) => Promise<any>;
   removeTorrServerTorrent: (hash: string) => Promise<any>;
   dropTorrServerCache: (hash: string) => Promise<any>;
@@ -47,6 +48,24 @@ export interface ElectronAPI {
     items: Array<{ ownerId: string; videoId: string; hash?: string; title?: string }>;
     error?: string;
   }>;
+  // ── Локальный JacRed (Zero-Config: бинарник + spawn на 127.0.0.1:9117) ──
+  getJacredStatus: () => Promise<{ running: boolean; starting?: boolean; port: number; error?: string }>;
+  startJacredServer: () => Promise<{ running: boolean; port: number; error?: string; starting?: boolean }>;
+  stopJacredServer: () => Promise<{ running: boolean; port: number }>;
+  openJacredUi: () => Promise<{ success: boolean }>;
+  /** Авторизация приватных трекеров в локальном JacRed (для плашки в настройках). */
+  getJacredAuthStatus: () => Promise<{ rutracker: boolean; nnmClub: boolean }>;
+  /** Сохранить креды приватного трекера в конфиг JacRed + разгон парсера. */
+  jacredLogin: (
+    tracker: 'rutracker' | 'nnmclub',
+    creds: { username?: string; password?: string; cookie?: string }
+  ) => Promise<{ success: boolean; auth?: { rutracker: boolean; nnmClub: boolean }; error?: string }>;
+  // ── RuTracker: браузерный сеанс (Cloudflare bypass, вход в окне приложения) ──
+  rutrackerGetStatus: () => Promise<{ loggedIn: boolean; loginWindowOpen: boolean; error?: string }>;
+  rutrackerOpenLogin: () => Promise<{ loggedIn: boolean; loginWindowOpen: boolean; error?: string }>;
+  rutrackerHideLogin: () => Promise<{ ok: boolean }>;
+  rutrackerSearch: (query: string, year?: string) => Promise<{ success: boolean; releases: any[]; error?: string }>;
+  onRutrackerStatusChanged: (callback: (st: { loggedIn: boolean }) => void) => () => void;
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -63,6 +82,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   configureTorrServer: (ramCacheMB: number) => ipcRenderer.invoke('torrserver:configure', ramCacheMB),
   addMagnetToTorrServer: (magnet: string, title?: string, poster?: string) =>
     ipcRenderer.invoke('torrserver:add', { magnet, title, poster }),
+  addTorrentFileToTorrServer: (base64: string, title?: string) =>
+    ipcRenderer.invoke('torrserver:add-torrent-file', { base64, title }),
   getTorrServerTorrent: (hash: string) => ipcRenderer.invoke('torrserver:get', { hash }),
   removeTorrServerTorrent: (hash: string) => ipcRenderer.invoke('torrserver:remove', { hash }),
   dropTorrServerCache: (hash: string) => ipcRenderer.invoke('torrserver:dropCache', { hash }),
@@ -97,6 +118,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Silent VK Auth ──
   vkAcquireSession: () => ipcRenderer.invoke('vk:acquire-session'),
   vkSearchVideo: (query: string) => ipcRenderer.invoke('vk:search', { query }),
+
+  // ── Локальный JacRed (Zero-Config) ──
+  getJacredStatus: () => ipcRenderer.invoke('jacred:status'),
+  startJacredServer: () => ipcRenderer.invoke('jacred:start'),
+  stopJacredServer: () => ipcRenderer.invoke('jacred:stop'),
+  openJacredUi: () => ipcRenderer.invoke('jacred:open-ui'),
+  getJacredAuthStatus: () => ipcRenderer.invoke('jacred:auth'),
+  jacredLogin: (tracker: string, creds: any) => ipcRenderer.invoke('jacred:login', { tracker, ...creds }),
+  rutrackerGetStatus: () => ipcRenderer.invoke('rutracker:status'),
+  rutrackerOpenLogin: () => ipcRenderer.invoke('rutracker:open-login'),
+  rutrackerHideLogin: () => ipcRenderer.invoke('rutracker:hide-login'),
+  rutrackerSearch: (query: string, year?: string) => ipcRenderer.invoke('rutracker:search', { query, year }),
+  onRutrackerStatusChanged: (callback: (st: { loggedIn: boolean }) => void) => {
+    const listener = (_event: unknown, st: { loggedIn: boolean }) => callback(st);
+    ipcRenderer.on('rutracker-status-changed', listener);
+    return () => ipcRenderer.removeListener('rutracker-status-changed', listener);
+  },
 
   // ── Shell / Platform ──
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),

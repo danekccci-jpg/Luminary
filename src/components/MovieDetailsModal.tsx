@@ -23,6 +23,8 @@ interface MovieDetailsModalProps {
     /** Прямой HLS/MP4 поток (VK Video) — плеер играет без TorrServer. */
     directUrl?: string;
     directQuality?: string;
+    /** .torrent-файл (base64, rutracker) — в TorrServer вместо магнета. */
+    torrentFile?: string;
     /** Сезон/серия (для сериалов) — история ведётся по эпизодам. */
     season?: number;
     episode?: number;
@@ -152,6 +154,8 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
       magnet: release.magnet,
       title: `${movie.title} (${release.quality})`,
       poster: posterUrl,
+      // .torrent-файл (rutracker) — надёжнее магнета для TorrServer
+      torrentFile: release.torrentFile,
       // Кодеки раздачи — плеер решает: играть или предложить VLC/IINA
       videoCodec: release.videoCodec,
       audioCodec: release.audioCodec,

@@ -89,6 +89,8 @@ export interface TorrentRelease {
   stabilityScore: number;
   stabilityLabel: 'Отличная' | 'Хорошая' | 'Умеренная' | 'Низкий битрэйт';
   requiredMbps: number;
+  /** .torrent-файл (base64) — надёжнее магнета для TorrServer (метаданные локально). */
+  torrentFile?: string;
 }
 
 export interface TorrServerStatusInfo {
@@ -148,6 +150,7 @@ declare global {
       /** Push-подписка на изменения статуса TorrServer из Main Process. Возвращает unsubscribe. */
       onTorrServerStatusChanged: (callback: (status: TorrServerStatusInfo) => void) => () => void;
       addMagnetToTorrServer: (magnet: string, title?: string, poster?: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+      addTorrentFileToTorrServer: (base64: string, title?: string) => Promise<{ success: boolean; data?: any; error?: string }>;
       getTorrServerTorrent: (hash: string) => Promise<{ success: boolean; data?: any; error?: string }>;
       removeTorrServerTorrent: (hash: string) => Promise<{ success: boolean; data?: any; error?: string }>;
       dropTorrServerCache: (hash: string) => Promise<{ success: boolean }>;
@@ -186,6 +189,34 @@ declare global {
         items: Array<{ ownerId: string; videoId: string; hash?: string; title?: string }>;
         error?: string;
       }>;
+      // Локальный JacRed (Zero-Config: бинарник + spawn на 127.0.0.1:9117)
+      getJacredStatus: () => Promise<{
+        running: boolean;
+        starting?: boolean;
+        port: number;
+        error?: string;
+      }>;
+      startJacredServer: () => Promise<{
+        running: boolean;
+        starting?: boolean;
+        port: number;
+        error?: string;
+      }>;
+      stopJacredServer: () => Promise<{ running: boolean; port: number }>;
+      openJacredUi: () => Promise<{ success: boolean }>;
+      /** Авторизация приватных трекеров в локальном JacRed (для плашки в настройках). */
+      getJacredAuthStatus: () => Promise<{ rutracker: boolean; nnmClub: boolean }>;
+      /** Сохранить креды приватного трекера в конфиг JacRed + разгон парсера. */
+      jacredLogin: (
+        tracker: 'rutracker' | 'nnmclub',
+        creds: { username?: string; password?: string; cookie?: string }
+      ) => Promise<{ success: boolean; auth?: { rutracker: boolean; nnmClub: boolean }; error?: string }>;
+      // RuTracker: браузерный сеанс (вход в окне приложения + поиск через window.fetch)
+      rutrackerGetStatus: () => Promise<{ loggedIn: boolean; loginWindowOpen: boolean; error?: string }>;
+      rutrackerOpenLogin: () => Promise<{ loggedIn: boolean; loginWindowOpen: boolean; error?: string }>;
+      rutrackerHideLogin: () => Promise<{ ok: boolean }>;
+      rutrackerSearch: (query: string, year?: string) => Promise<{ success: boolean; releases: TorrentRelease[]; error?: string }>;
+      onRutrackerStatusChanged: (callback: (st: { loggedIn: boolean }) => void) => () => void;
     };
   }
 }

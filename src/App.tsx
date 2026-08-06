@@ -16,18 +16,26 @@ import { toastBus } from './services/toast';
 import { library, formatClock, LibraryItem } from './services/library';
 import { setVkToken } from './services/vkVideoService';
 import { setCustomJacredUrl, refreshRemoteInstancePool, probeJacredPool } from './services/scrapers/jacred';
+import { initLocalJacred, getJacredServerStatus, JacredServerStatus } from './services/jacredServer';
 import { Heart, Bookmark, History, Play } from 'lucide-react';
 import { Flame, TrendingUp, Award, Search as SearchIcon, Tv, Zap, Film } from 'lucide-react';
 
 /** Zero-Config: фоновая авто-настройка источников на старте приложения. */
 async function initZeroConfigSources() {
+  // 1) Локальный встроенный JacRed (Zero-Config): Main Process скачивает бинарник
+  //    и spawn'ит сервер на 127.0.0.1:9117; здесь ждём его и подключаем к пулу
+  //    первым (retry покрывает первое скачивание ~46 МБ). Фон, не блокирует UI.
+  const localReady = await initLocalJacred();
+  // 2) Динамический пул JacRed-зеркал (remote CDN/Gist) + racing probe:
+  //    мёртвые зеркала сразу уходят в карантин — первый поиск не ждёт таймаутов.
   try {
-    // 1) Динамический пул JacRed-зеркал (remote CDN/Gist) + racing probe:
-    //    мёртвые зеркала сразу уходят в карантин — первый поиск не ждёт таймаутов.
     await refreshRemoteInstancePool();
-    await probeJacredPool();
+    if (localReady) {
+      // Локальный инстанс жив — public-зеркала опрашиваем как резерв в хвосте
+      await probeJacredPool();
+    }
   } catch { /* не критично — поиск сам пробует пул */ }
-  // 2) Silent VK Auth: гостевая сессия в фоне (кэш 12 ч, авто-обновление)
+  // 3) Silent VK Auth: гостевая сессия в фоне (кэш 12 ч, авто-обновление)
   try {
     await window.electronAPI?.vkAcquireSession?.();
   } catch { /* VK может быть недоступен — поиск тихо деградирует */ }
@@ -149,6 +157,8 @@ export const App: React.FC = () => {
     /** Прямой HLS/MP4 поток (VK Video) — плеер играет без TorrServer. */
     directUrl?: string;
     directQuality?: string;
+    /** .torrent-файл (base64, rutracker) — добавляем в TorrServer вместо магнета. */
+    torrentFile?: string;
     /** Сезон/серия (для сериалов) — история ведётся по эпизодам. */
     season?: number;
     episode?: number;
@@ -175,6 +185,7 @@ export const App: React.FC = () => {
   const [isMagnetModalOpen, setIsMagnetModalOpen] = useState(false);
 
   const [torrServerStatus, setTorrServerStatus] = useState<TorrServerStatusInfo>({ running: false, port: 8090 });
+  const [jacredStatus, setJacredStatus] = useState<JacredServerStatus>({ running: false, starting: false, port: 9117 });
 
   const [ambientColor, setAmbientColor] = useState('rgba(0,242,254,0.05)');
 
@@ -274,6 +285,15 @@ export const App: React.FC = () => {
     } catch (e) {
       console.warn('[App] TorrServer status check failed:', e);
       setTorrServerStatus({ running: false, port: 8090 });
+    }
+  };
+
+  const checkJacredStatus = async () => {
+    try {
+      setJacredStatus(await getJacredServerStatus());
+    } catch (e) {
+      console.warn('[App] JacRed status check failed:', e);
+      setJacredStatus({ running: false, starting: false, port: 9117 });
     }
   };
 
@@ -583,6 +603,7 @@ export const App: React.FC = () => {
           videoCodec={activeStream.videoCodec}
           audioCodec={activeStream.audioCodec}
           directUrl={activeStream.directUrl}
+          torrentFile={activeStream.torrentFile}
           startPosition={activeStream.startPosition}
           transcodeAudioToAac={settings.transcodeAudioToAac}
           onProgressSave={(cur, dur) => {
@@ -613,6 +634,8 @@ export const App: React.FC = () => {
           onClose={() => setIsSettingsOpen(false)}
           torrServerStatus={torrServerStatus}
           onRefreshStatus={checkTorrServerStatus}
+          jacredServerStatus={jacredStatus}
+          onRefreshJacredStatus={checkJacredStatus}
         />
       )}
 

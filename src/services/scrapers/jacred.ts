@@ -110,8 +110,21 @@ export function setCustomJacredUrl(url: string) {
   customInstance = (url || '').trim().replace(/\/+$/, '');
 }
 
+/**
+ * Локальный встроенный JacRed (Zero-Config: бинарник, spawn в Main Process).
+ * Приоритет №1 — всегда опрашивается первым (самый быстрый и надёжный).
+ * Передайте '' — инстанс остановлен, исключается из пула.
+ */
+let localInstance = '';
+export function setLocalJacredUrl(url: string) {
+  localInstance = (url || '').trim().replace(/\/+$/, '');
+}
+
 function getInstancePool(): string[] {
   const pool: string[] = [];
+  // 1) Локальный встроенный JacRed — первым (быстрее и надёжнее публичных)
+  if (localInstance) pool.push(localInstance);
+  // 2) Пользовательский инстанс из настроек UI
   if (customInstance) pool.push(customInstance);
   try {
     const raw = localStorage.getItem(OVERRIDE_KEY);
@@ -213,6 +226,9 @@ function normalizeTracker(tracker: string): string {
   if (/rutracker/i.test(t)) return 'RuTracker';
   if (/nnm/i.test(t)) return 'NNM';
   if (/^rutor$/i.test(t)) return 'Rutor';
+  if (/^bitru$/i.test(t)) return 'Bitru';
+  if (/torrentby|torrent\.by/i.test(t)) return 'TorrentBy';
+  if (/kinozal/i.test(t)) return 'Kinozal';
   return t || 'JacRed';
 }
 
@@ -320,11 +336,38 @@ function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
 }
 
 /**
+ * Построить URL поиска для инстанса.
+ *
+ * Локальный встроенный JacRed — это форк jacred-fdb (v3.4.x): у него
+ * классический /api/v1/search является Prowlarr-фидом (пустым без настроек),
+ * а Lampa-совместимый поиск живёт на Jackett-эндпоинте
+ * /api/v2.0/indexers/all/results (Response: { Results: [...] } с MagnetUri).
+ * Именно его использует Lampa с этим форком — поэтому локальный инстанс
+ * опрашиваем тем же путём. Публичные классические инстансы — /api/v1/search.
+ */
+function buildSearchUrl(base: string, query: string, year?: string): string {
+  const isLocal = base === localInstance;
+  const p = new URLSearchParams(
+    isLocal ? { Query: query.slice(0, 200) } : { query: query.slice(0, 200) }
+  );
+  if (year) p.set('year', String(year).slice(0, 4));
+  if (isLocal) {
+    // Локальная БД наполняется всеми модулями (rutor/bitru/torrentby/kinozal),
+    // фильтр по трекерам не применяем — трекер виден в поле Tracker раздачи.
+    p.set('limit', '200');
+    return `${base}/api/v2.0/indexers/all/results?${p.toString()}`;
+  }
+  // Классические инстансы: поиск по трекерам RuTracker/NNM-Club/Rutor
+  p.set('trackers', JACRED_TRACKERS.join(','));
+  return `${base}/api/v1/search?${p.toString()}`;
+}
+
+/**
  * Запрос к одному инстансу. Возвращает раздачи, [] — инстанс жив, но пусто,
  * null — инстанс упал (ошибка/таймаут/невалидный ответ) → карантин.
  */
-async function queryInstance(base: string, params: URLSearchParams, query: string): Promise<TorrentRelease[] | null> {
-  const url = `${base}/api/v1/search?${params.toString()}`;
+async function queryInstance(base: string, query: string, year?: string): Promise<TorrentRelease[] | null> {
+  const url = buildSearchUrl(base, query, year);
   try {
     const res = await fetchWithTimeout(url, INSTANCE_TIMEOUT_MS);
     if (!res.ok) {
@@ -363,8 +406,7 @@ async function queryInstance(base: string, params: URLSearchParams, query: strin
  */
 export async function searchJacRed(
   query: string,
-  year?: string,
-  trackers: readonly string[] = JACRED_TRACKERS
+  year?: string
 ): Promise<TorrentRelease[]> {
   const q = String(query || '').trim().slice(0, 200);
   if (!q) return [];
@@ -375,13 +417,9 @@ export async function searchJacRed(
     return [];
   }
 
-  const params = new URLSearchParams({ query: q });
-  if (year) params.set('year', String(year).slice(0, 4));
-  if (trackers.length > 0) params.set('trackers', trackers.join(','));
-
   // Параллельный опрос всего пула; общий дедлайн ограничивает ожидание
   const results = await Promise.allSettled(
-    pool.map((base) => queryInstance(base, params, q))
+    pool.map((base) => queryInstance(base, q, year))
   );
 
   const merged = mergeReleasesByHash(
@@ -404,8 +442,7 @@ export async function searchJacRed(
  */
 export async function probeJacredPool(): Promise<{ alive: number; dead: number }> {
   const pool = getInstancePool();
-  const params = new URLSearchParams({ query: 'test', limit: '1' });
-  const results = await Promise.allSettled(pool.map((base) => queryInstance(base, params, 'test')));
+  const results = await Promise.allSettled(pool.map((base) => queryInstance(base, 'test')));
   const alive = results.filter((r) => r.status === 'fulfilled' && r.value !== null).length;
   const dead = pool.length - alive;
   console.log(`[JacRed] Racing probe: ${alive} alive, ${dead} dead (из ${pool.length})`);

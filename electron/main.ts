@@ -5,6 +5,8 @@ import { TorrServerManager, normalizeTorrentLink } from './torrserver.js';
 import { TorrentScraper } from './scraper.js';
 import { catalogProxy } from './catalog-proxy.js';
 import { VkSessionManager } from './vksession.js';
+import { JacredManager } from './jacredserver.js';
+import { RutrackerSessionManager } from './rutrackerSession.js';
 
 // ═══════════════════════════════════════════════════════════
 //  Global error guards — NEVER let the main process die
@@ -38,6 +40,10 @@ const torrServer = new TorrServerManager(8090);
 const scraper = new TorrentScraper();
 /** Silent VK Auth: гостевая сессия (скрытое окно → cookies) с кэшем и авто-обновлением. */
 const vkSession = new VkSessionManager();
+/** Локальный JacRed-инстанс (Zero-Config): бинарник + spawn на 127.0.0.1:9117. */
+const jacredServer = new JacredManager();
+/** Браузерный сеанс RuTracker (Cloudflare bypass + вход в окне приложения). */
+const rutrackerSession = new RutrackerSessionManager();
 let isQuitting = false;
 
 // ── Single-instance lock ──
@@ -208,6 +214,29 @@ function startTorrServerAsync(attempt: number = 1) {
     });
 }
 
+/** Локальный JacRed в фоне: первый запуск качает бинарник (~46 MB) — не блокирует UI. */
+function startJacredAsync(attempt: number = 1) {
+  console.log(`[Main] JacRed starting in BACKGROUND (non-blocking) — attempt ${attempt}/${MAX_AUTOSTART_ATTEMPTS}...`);
+  jacredServer
+    .startServer()
+    .then((status) => {
+      if (status.running) {
+        console.log('[Main] Локальный JacRed готов на порту', status.port);
+      } else if (attempt < MAX_AUTOSTART_ATTEMPTS) {
+        console.warn(`[Main] JacRed not ready (${status.error}) — retrying in ${AUTOSTART_RETRY_DELAY_MS / 1000}s...`);
+        setTimeout(() => startJacredAsync(attempt + 1), AUTOSTART_RETRY_DELAY_MS);
+      } else {
+        console.warn('[Main] JacRed failed to start after', MAX_AUTOSTART_ATTEMPTS, 'attempts:', status.error);
+      }
+    })
+    .catch((err: any) => {
+      console.warn('[Main] JacRed background start warning:', err.message);
+      if (attempt < MAX_AUTOSTART_ATTEMPTS) {
+        setTimeout(() => startJacredAsync(attempt + 1), AUTOSTART_RETRY_DELAY_MS);
+      }
+    });
+}
+
 // ═══════════════════════════════════════════════════════════
 //  Keep-Alive Service: heartbeat /echo + авто-восстановление
 // ═══════════════════════════════════════════════════════════
@@ -252,6 +281,87 @@ function startHeartbeat() {
 }
 
 function setupIPC() {
+  // ── Локальный JacRed (Zero-Config) ──
+  ipcMain.handle('jacred:status', async () => {
+    try {
+      const running = await jacredServer.checkHealth();
+      // Если креды приватных трекеров появились после старта (введены в веб-UI) —
+      // подхватываем их и разгоняем rutracker/nnmclub (throttle 10 мин внутри).
+      if (running) jacredServer.syncPrivateCrawls().catch(() => {});
+      return {
+        running,
+        starting: !running && jacredServer.isStarting(),
+        port: 9117,
+        error: jacredServer.getLastError(),
+      };
+    } catch (err: any) {
+      return { running: false, starting: false, port: 9117, error: err.message };
+    }
+  });
+
+  ipcMain.handle('jacred:auth', async () => {
+    try {
+      return await jacredServer.getAuthStatus();
+    } catch {
+      return { rutracker: false, nnmClub: false };
+    }
+  });
+
+  ipcMain.handle('jacred:login', async (_e, { tracker, username, password, cookie }) => {
+    try {
+      const auth = await jacredServer.setTrackerCredentials(tracker, { username, password, cookie });
+      return { success: true, auth };
+    } catch (err: any) {
+      return { success: false, error: err?.message || String(err) };
+    }
+  });
+
+  // ── RuTracker — браузерный сеанс (вход в окне приложения + поиск) ──
+  ipcMain.handle('rutracker:status', async () => {
+    try {
+      return await rutrackerSession.getStatus();
+    } catch {
+      return { loggedIn: false, loginWindowOpen: false };
+    }
+  });
+
+  ipcMain.handle('rutracker:open-login', async () => {
+    try {
+      return await rutrackerSession.openLoginWindow();
+    } catch (err: any) {
+      return { loggedIn: false, loginWindowOpen: false, error: err?.message || String(err) };
+    }
+  });
+
+  ipcMain.handle('rutracker:hide-login', async () => {
+    await rutrackerSession.hideLoginWindow();
+    return { ok: true };
+  });
+
+  ipcMain.handle('rutracker:search', async (_e, { query, year }) => {
+    try {
+      const releases = await rutrackerSession.search(String(query || ''), year);
+      return { success: true, releases };
+    } catch (err: any) {
+      return { success: false, releases: [], error: err?.message || String(err) };
+    }
+  });
+
+  ipcMain.handle('jacred:start', async () => {
+    const st = await jacredServer.startServer();
+    return st;
+  });
+
+  ipcMain.handle('jacred:stop', async () => {
+    await jacredServer.stopServer();
+    return { running: false, port: 9117 };
+  });
+
+  ipcMain.handle('jacred:open-ui', async () => {
+    await shell.openExternal('http://127.0.0.1:9117/settings');
+    return { success: true };
+  });
+
   // ── TorrServer IPC ──
   ipcMain.handle('torrserver:status', async () => {
     try {
@@ -342,6 +452,18 @@ function setupIPC() {
         ? 'Ошибка добавления торрента: неверный формат раздачи или битый magnet-link'
         : err.message;
       return { success: false, error: msg };
+    }
+  });
+
+  ipcMain.handle('torrserver:add-torrent-file', async (_, { base64, title }) => {
+    try {
+      if (!base64 || typeof base64 !== 'string' || base64.length < 200) {
+        return { success: false, error: 'Некорректный .torrent-файл' };
+      }
+      const res = await torrServer.addTorrentFile(base64, title);
+      return { success: true, data: res };
+    } catch (err: any) {
+      return { success: false, error: err?.message || String(err) };
     }
   });
 
@@ -542,6 +664,15 @@ app.whenReady().then(async () => {
 
     // 2. Start TorrServer in background — never blocks the UI
     startTorrServerAsync();
+    // 3. Локальный JacRed в фоне (Zero-Config) — первый запуск качает бинарник
+    startJacredAsync();
+    // 3b. RuTracker-сеанс: скрытое окно проходит Cloudflare-челлендж
+    rutrackerSession.ensureSession().catch(() => {});
+    rutrackerSession.setLoginListener((loggedIn) => {
+      for (const w of BrowserWindow.getAllWindows()) {
+        w.webContents.send('rutracker-status-changed', { loggedIn });
+      }
+    });
 
     // 3. Keep-Alive: фоновый heartbeat /echo → push статуса + авто-восстановление
     startHeartbeat();
@@ -581,6 +712,12 @@ async function shutdownTorrServer() {
   } catch (err: any) {
     console.warn('[Main] stopServer warning:', err.message);
   }
+  try {
+    await jacredServer.stopServer();
+  } catch (err: any) {
+    console.warn('[Main] jacred stopServer warning:', err.message);
+  }
+  rutrackerSession.destroy();
 }
 
 app.on('window-all-closed', async () => {

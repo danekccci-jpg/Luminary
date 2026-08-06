@@ -26,6 +26,8 @@ interface PlayerModalProps {
   /** Прямой HLS/MP4 поток (VK Video) — играем без TorrServer и GStreamer:
    *  .m3u8 уходит в Hls.js, mp4 — в нативный <video>. */
   directUrl?: string;
+  /** .torrent-файл (base64) — добавляем в TorrServer вместо магнета (rutracker). */
+  torrentFile?: string;
   /** Сохранение прогресса просмотра (история) при закрытии/завершении. */
   onProgressSave?: (current: number, duration: number) => void;
   /** Возобновить просмотр с этого таймкода (из истории). */
@@ -275,7 +277,7 @@ const NeonRingSpinner: React.FC<{ percent: number }> = ({ percent: raw }) => {
 };
 
 export const PlayerModal: React.FC<PlayerModalProps> = ({
-  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, directUrl, onProgressSave, startPosition, onClose,
+  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, directUrl, torrentFile, onProgressSave, startPosition, onClose,
 }) => {
   const videoRef     = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -739,7 +741,10 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         //    add возвращает 500 «BT client not connected» — повторяем с паузой.
         const addWithRetry = async (attempts: number, retryDelayMs: number): Promise<any> => {
           for (let attempt = 0; attempt < attempts; attempt++) {
-            const res = await torrServerService.addMagnet(magnet, title, poster);
+            // rutracker: .torrent-файл надёжнее магнета (метаданные локально)
+            const res = torrentFile
+              ? await torrServerService.addTorrentFile(torrentFile, title)
+              : await torrServerService.addMagnet(magnet, title, poster);
             if (res.success || res.data) return res;
             const errText = String(res.error || '');
             const isBtNotReady = /BT client not connected|500|TorrServer API returned/i.test(errText);
@@ -906,7 +911,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       if (probeInterval) clearInterval(probeInterval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [magnet, title, poster, transcodeAudioToAac, directUrl]);
+  }, [magnet, title, poster, transcodeAudioToAac, directUrl, torrentFile]);
 
   /** «Пропустить буферизацию»: НЕ монтируем пустой <video> мгновенно —
    *  продолжаем ждать валидный HTTP 200 от потока, но без ожидания порога предзагрузки. */

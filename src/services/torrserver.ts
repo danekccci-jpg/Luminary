@@ -1,5 +1,6 @@
 import { TorrServerStatusInfo, TorrentRelease, TorrServerStats } from '../types';
 import { searchJacRed, mergeReleasesByHash, getJacredStatus } from './scrapers/jacred';
+import { getRutrackerStatus } from './rutrackerService';
 
 export class TorrServerService {
   public async getStatus(): Promise<TorrServerStatusInfo> {
@@ -58,6 +59,14 @@ export class TorrServerService {
       if (res.success) return res.logs;
     }
     return [];
+  }
+
+  /** Добавить раздачу из .torrent-файла (base64) — приоритетно для rutracker. */
+  public async addTorrentFile(base64: string, title?: string) {
+    if (window.electronAPI?.addTorrentFileToTorrServer) {
+      return await window.electronAPI.addTorrentFileToTorrServer(base64, title);
+    }
+    return { success: false, error: 'addTorrentFile IPC недоступен' };
   }
 
   public async addMagnet(magnet: string, title?: string, poster?: string) {
@@ -147,17 +156,20 @@ export class TorrServerService {
     //    с пулом инстансов и авто-фолбэком (src/services/scrapers/jacred.ts).
     let ipcErrorMsg: string | undefined;
     const ipcPromise: Promise<TorrentRelease[]> = window.electronAPI?.searchTorrents
-      ? window.electronAPI
-          .searchTorrents(query, year, jackettUrl, jackettApiKey, imdbId, fallbackQuery)
-          .then((res) => {
-            if (!res.success) ipcErrorMsg = res.error || 'Не удалось найти торренты';
-            return res.success && Array.isArray(res.releases) ? res.releases : [];
-          })
-          .catch((err: any) => {
-            ipcErrorMsg = 'Не удалось выполнить поиск торрентов';
-            console.error('[TorrServerService] searchTorrents error:', err);
-            return [];
-          })
+      ? Promise.race<TorrentRelease[]>([
+          window.electronAPI
+            .searchTorrents(query, year, jackettUrl, jackettApiKey, imdbId, fallbackQuery)
+            .then((res) => {
+              if (!res.success) ipcErrorMsg = res.error || 'Не удалось найти торренты';
+              return res.success && Array.isArray(res.releases) ? res.releases : [];
+            })
+            .catch((err: any) => {
+              ipcErrorMsg = 'Не удалось выполнить поиск торрентов';
+              console.error('[TorrServerService] searchTorrents error:', err);
+              return [];
+            }),
+          new Promise<TorrentRelease[]>((resolve) => setTimeout(() => resolve([]), 15000)),
+        ])
       : Promise.resolve([]);
 
     const jacredPromise = searchJacRed(query, year).catch((err: any) => {
@@ -165,10 +177,34 @@ export class TorrServerService {
       return [];
     });
 
-    const [ipcReleases, jacredReleases] = await Promise.all([ipcPromise, jacredPromise]);
+    // 3) RuTracker — браузерный сеанс: магнеты появляются ТОЛЬКО с bb_session.
+    //    Без входа поиск пропускаем сразу (Cloudflare-челленджи не гоняем).
+    //    Поиск через навигацию окна — ~8с на разогрев челленджа + темы; таймаут 25с.
+    let rutrackerPromise: Promise<TorrentRelease[]> = Promise.resolve([]);
+    if (window.electronAPI?.rutrackerSearch) {
+      const rtStatus = await getRutrackerStatus().catch(() => null);
+      if (rtStatus?.loggedIn) {
+        rutrackerPromise = Promise.race<TorrentRelease[]>([
+          window.electronAPI
+            .rutrackerSearch(query, year)
+            .then((res) => (res.success && Array.isArray(res.releases) ? res.releases : []))
+            .catch((err: any) => {
+              console.warn('[TorrServerService] RuTracker search failed:', err?.message || err);
+              return [];
+            }),
+          new Promise<TorrentRelease[]>((resolve) => setTimeout(() => resolve([]), 25000)),
+        ]);
+      }
+    }
+
+    const [ipcReleases, jacredReleases, rutrackerReleases] = await Promise.all([
+      ipcPromise,
+      jacredPromise,
+      rutrackerPromise,
+    ]);
 
     // Мёрдж: дедуп по BTIH-хэшу magnet + приоритет 4K/2160p → 1080p (по сидам)
-    const merged = mergeReleasesByHash(ipcReleases, jacredReleases);
+    const merged = mergeReleasesByHash(ipcReleases, jacredReleases, rutrackerReleases);
     // Все JacRed-зеркала мертвы — UI покажет плашку «RuTracker временно недоступен»
     const jacredUnreachable = getJacredStatus() === 'unreachable';
     if (merged.length > 0) {
