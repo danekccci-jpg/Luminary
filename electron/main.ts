@@ -1,12 +1,14 @@
-import { app, BrowserWindow, ipcMain, shell, protocol, net, powerMonitor } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, protocol, net, powerMonitor, nativeTheme, session } from 'electron';
 import path from 'path';
 import { exec } from 'child_process';
 import { TorrServerManager, normalizeTorrentLink } from './torrserver.js';
 import { TorrentScraper } from './scraper.js';
 import { catalogProxy } from './catalog-proxy.js';
 import { VkSessionManager } from './vksession.js';
+import { VkScraper } from './vkScraper.js';
 import { JacredManager } from './jacredserver.js';
 import { RutrackerSessionManager } from './rutrackerSession.js';
+import { OnlineBalancers } from './onlineBalancers.js';
 
 // ═══════════════════════════════════════════════════════════
 //  Global error guards — NEVER let the main process die
@@ -35,16 +37,53 @@ if (process.platform === 'darwin') {
   app.commandLine.appendSwitch('enable-zero-copy');
 }
 
+// Тёмный titlebar (и светофоры) независимо от системной темы macOS —
+// без этого на light-теме белая строка заголовка контрастирует с шапкой
+nativeTheme.themeSource = 'dark';
+
+// vkstream:// — прокси VK-потоков: нужны привилегии standard/stream/fetch,
+// чтобы hls.js (MSE) и <video> могли обращаться к схеме из renderer.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'vkstream',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  },
+]);
+
 let mainWindow: BrowserWindow | null = null;
 const torrServer = new TorrServerManager(8090);
 const scraper = new TorrentScraper();
 /** Silent VK Auth: гостевая сессия (скрытое окно → cookies) с кэшем и авто-обновлением. */
 const vkSession = new VkSessionManager();
+const vkScraper = new VkScraper();
 /** Локальный JacRed-инстанс (Zero-Config): бинарник + spawn на 127.0.0.1:9117. */
 const jacredServer = new JacredManager();
 /** Браузерный сеанс RuTracker (Cloudflare bypass + вход в окне приложения). */
 const rutrackerSession = new RutrackerSessionManager();
+/** Бесплатные онлайн-потоки: KinoBox + Kodik (без TorrServer, прямой .m3u8). */
+const onlineBalancers = new OnlineBalancers();
 let isQuitting = false;
+
+// ── Сетевой перехватчик Referer для онлайн-потоков ──
+// Некоторые CDN балансеров (kinobox/alloha/videocdn) отдают 403 без правильного
+// Referer. Hls.js сам ставит Referer через xhrSetup, а нативный <video>/mp4 не
+// умеет слать заголовки — здесь мы инжектим Referer на уровне сессии Electron
+// для хостов активных онлайн-потоков (см. IPC online:set-referer).
+const activeStreamReferers = new Map<string, string>(); // hostname → referer
+function setupStreamRefererInterceptor() {
+  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+    try {
+      const referer = activeStreamReferers.get(new URL(details.url).hostname);
+      if (referer) {
+        callback({ requestHeaders: { ...details.requestHeaders, Referer: referer } });
+        return;
+      }
+    } catch {
+      /* некорректный URL — пропускаем */
+    }
+    callback({ requestHeaders: details.requestHeaders });
+  });
+}
 
 // ── Single-instance lock ──
 // Prevents two copies from fighting over TorrServer port 8090 (double-click,
@@ -63,8 +102,7 @@ app.on('second-instance', () => {
 
 // ── Register luminary-img:// protocol for image proxying ──
 function registerImageProtocol() {
-  protocol.handle('luminary-img', async (request) => {
-    try {
+  protocol.handle('luminary-img', async (request) => {    try {
       // URL format: luminary-img://<base64-encoded-original-url>
       const host = request.url.replace('luminary-img://', '');
       const originalUrl = Buffer.from(host, 'base64').toString('utf-8');
@@ -97,6 +135,82 @@ function registerImageProtocol() {
   });
 }
 
+// ═══════════════════════════════════════════════════════
+//  vkstream:// — прокси VK Video HLS/MP4 через main-процесс.
+//  VK CDN (vkuser.net/okcdn.ru) отдаёт 400 «10» на запросы из renderer
+//  (Origin браузера), но 200 из main (без Origin, правильный UA/Referer).
+//  Манифесты .m3u8 переписываются: относительные URL сегментов/вариантов
+//  становятся vkstream://… — весь поток идёт через прокси.
+// ═══════════════════════════════════════════════════════
+const VK_STREAM_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+const VK_PROXY_HEADERS = {
+  'User-Agent': VK_STREAM_UA,
+  'Referer': 'https://vk.com/',
+  'Accept-Language': 'ru-RU,ru;q=0.9',
+};
+
+function registerVkStreamProtocol() {
+  protocol.handle('vkstream', async (request) => {
+    try {
+      // URL format: vkstream://proxy?u=<encodeURIComponent(абс. URL)>
+      const parsed = new URL(request.url);
+      const target = decodeURIComponent(parsed.searchParams.get('u') || '');
+      if (!target || !/^https?:\/\//i.test(target)) {
+        return new Response('Invalid URL', { status: 400 });
+      }
+      const res = await net.fetch(target, { headers: VK_PROXY_HEADERS });
+      if (!res.ok) return new Response(`Upstream ${res.status}`, { status: res.status });
+
+      const contentType = res.headers.get('content-type') || '';
+      const looksLikeManifest =
+        contentType.toLowerCase().includes('mpegurl') ||
+        contentType.toLowerCase().includes('m3u8') ||
+        /\.m3u8(\?|$)/i.test(target);
+      if (!looksLikeManifest) {
+        // Сегменты/MP4: отдаём как есть (потоком)
+        return new Response(res.body, {
+          headers: {
+            'Content-Type': contentType || 'application/octet-stream',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
+      // Манифест: переписываем ссылки (сегменты MEDIUM00000.ts, варианты /expires/…).
+      // Вариант-URL не содержит .m3u8 — распознаём по сигнатуре #EXTM3U.
+      const text = await res.text().catch(() => '');
+      if (!text.trimStart().startsWith('#EXTM3U')) {
+        return new Response(text, {
+          headers: { 'Content-Type': contentType || 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*' },
+        });
+      }
+      const base = new URL(target);
+      const rewritten = text
+        .split('\n')
+        .map((line) => {
+          const l = line.trim();
+          if (!l || l.startsWith('#')) return line;
+          let abs: string;
+          if (/^https?:\/\//i.test(l)) abs = l;
+          else {
+            try {
+              abs = new URL(l, base).href;
+            } catch {
+              return line;
+            }
+          }
+          return `vkstream://proxy?u=${encodeURIComponent(abs)}`;
+        })
+        .join('\n');
+      return new Response(rewritten, {
+        headers: { 'Content-Type': contentType || 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*' },
+      });
+    } catch {
+      return new Response('Proxy error', { status: 502 });
+    }
+  });
+}
+
 /**
  * Show the window immediately — even before any content is ready —
  * so the user sees a splash instead of a black screen.
@@ -108,7 +222,11 @@ async function createWindow() {
     minWidth: 1024,
     minHeight: 680,
     title: 'Luminary - Torrent Cinema',
-    backgroundColor: '#0a0a0d',
+    // macOS: скрытый заголовок — светофоры остаются слева, контент шапки
+    // идёт под них (шапка приложения перетаскивает окно через drag-регион)
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const } : {}),
+    // Фон окна = фон приложения (--bg-void #0A0B0E): бесшовное слияние с шапкой
+    backgroundColor: '#0A0B0E',
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -338,9 +456,9 @@ function setupIPC() {
     return { ok: true };
   });
 
-  ipcMain.handle('rutracker:search', async (_e, { query, year }) => {
+  ipcMain.handle('rutracker:search', async (_e, { query, year, fallbackQuery }) => {
     try {
-      const releases = await rutrackerSession.search(String(query || ''), year);
+      const releases = await rutrackerSession.search(String(query || ''), year, String(fallbackQuery || '') || undefined);
       return { success: true, releases };
     } catch (err: any) {
       return { success: false, releases: [], error: err?.message || String(err) };
@@ -530,10 +648,12 @@ function setupIPC() {
     }
   });
 
-  ipcMain.handle('vk:search', async (_e, { query, token }: { query?: string; token?: string }) => {
+  // VK Video БЕЗ токена: публичный агрегатор (Яндекс.Видео) → vk.com/video-XX_YY
+  // → прямой HLS из video_ext.php. Никакой авторизации (см. vkScraper.ts).
+  ipcMain.handle('vk:scrape', async (_e, { query }: { query?: string }) => {
     try {
-      const items = await vkSession.searchVideos(String(query || ''), token || '');
-      return { success: true, items: items || [] };
+      const items = await vkScraper.search(String(query || ''));
+      return { success: true, items };
     } catch (err: any) {
       return { success: false, items: [], error: err.message };
     }
@@ -588,6 +708,36 @@ function setupIPC() {
     } catch (err: any) {
       return { success: false, streams: [], error: err.message };
     }
+  });
+
+  // ── Онлайн-потоки: KinoBox (по Кинопоиск-ID) + Kodik (опционально) ──
+  // Прямые .m3u8-манифесты играются в Hls.js без TorrServer. Торренты
+  // остаются главным источником — этот список грузится параллельно.
+  ipcMain.handle(
+    'online:get-streams',
+    async (
+      _,
+      args: { kinopoiskId?: number | string; tmdbId?: number | string; title?: string; year?: string; kodikToken?: string }
+    ) => {
+      return await onlineBalancers.searchOnlineStreams({
+        kinopoiskId: args?.kinopoiskId,
+        tmdbId: args?.tmdbId,
+        title: args?.title || '',
+        year: args?.year || '',
+        kodikToken: args?.kodikToken || '',
+      });
+    }
+  );
+
+  // Регистрация/снятие Referer для CDN активного онлайн-потока (сетевой перехватчик).
+  ipcMain.handle('online:set-referer', (_e, { host, referer }: { host: string; referer: string }) => {
+    if (host) activeStreamReferers.set(host, referer || 'https://kinobox.tv/');
+    return { ok: true };
+  });
+
+  ipcMain.handle('online:clear-referer', (_e, host: string) => {
+    if (host) activeStreamReferers.delete(host);
+    return { ok: true };
   });
 
   // ── Image proxy IPC — bypasses Referer / User-Agent blocks on posters ──
@@ -655,7 +805,10 @@ app.whenReady().then(async () => {
   try {
     // Register image proxy protocol BEFORE anything else
     registerImageProtocol();
+    registerVkStreamProtocol();
     setupIPC();
+    // Сетевой перехватчик Referer для онлайн-потоков (сессия готова после ready)
+    setupStreamRefererInterceptor();
 
     // 1. Create & show the window IMMEDIATELY (non-blocking)
     console.log('[Main] Creating window (immediate)...');

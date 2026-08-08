@@ -48,6 +48,19 @@ export interface ElectronAPI {
     items: Array<{ ownerId: string; videoId: string; hash?: string; title?: string }>;
     error?: string;
   }>;
+  // VK Video БЕЗ токена: публичный агрегатор → HLS (electron/vkScraper.ts)
+  vkScrapeVideo: (query: string) => Promise<{
+    success: boolean;
+    items: Array<{
+      ownerId: string;
+      videoId: string;
+      title?: string;
+      duration?: number;
+      hlsUrl?: string;
+      mp4Url?: string;
+    }>;
+    error?: string;
+  }>;
   // ── Локальный JacRed (Zero-Config: бинарник + spawn на 127.0.0.1:9117) ──
   getJacredStatus: () => Promise<{ running: boolean; starting?: boolean; port: number; error?: string }>;
   startJacredServer: () => Promise<{ running: boolean; port: number; error?: string; starting?: boolean }>;
@@ -64,8 +77,31 @@ export interface ElectronAPI {
   rutrackerGetStatus: () => Promise<{ loggedIn: boolean; loginWindowOpen: boolean; error?: string }>;
   rutrackerOpenLogin: () => Promise<{ loggedIn: boolean; loginWindowOpen: boolean; error?: string }>;
   rutrackerHideLogin: () => Promise<{ ok: boolean }>;
-  rutrackerSearch: (query: string, year?: string) => Promise<{ success: boolean; releases: any[]; error?: string }>;
+  rutrackerSearch: (query: string, year?: string, fallbackQuery?: string) => Promise<{ success: boolean; releases: any[]; error?: string }>;
   onRutrackerStatusChanged: (callback: (st: { loggedIn: boolean }) => void) => () => void;
+  // ── Онлайн-потоки (KinoBox + Kodik): прямой .m3u8 без TorrServer ──
+  searchOnlineStreams: (
+    kinopoiskId?: number | string,
+    tmdbId?: number | string,
+    title?: string,
+    year?: string,
+    kodikToken?: string
+  ) => Promise<{
+    success: boolean;
+    streams: Array<{
+      id: string;
+      source: string;
+      quality: string;
+      translation: string;
+      m3u8Url?: string;
+      iframeUrl?: string;
+      referer?: string;
+    }>;
+    error?: string;
+  }>;
+  /** Referer для CDN активного онлайн-потока (сетевой перехватчик Electron). */
+  setOnlineStreamReferer: (host: string, referer: string) => Promise<{ ok: boolean }>;
+  clearOnlineStreamReferer: (host: string) => Promise<{ ok: boolean }>;
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -118,6 +154,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Silent VK Auth ──
   vkAcquireSession: () => ipcRenderer.invoke('vk:acquire-session'),
   vkSearchVideo: (query: string) => ipcRenderer.invoke('vk:search', { query }),
+  vkScrapeVideo: (query: string) => ipcRenderer.invoke('vk:scrape', { query }),
 
   // ── Локальный JacRed (Zero-Config) ──
   getJacredStatus: () => ipcRenderer.invoke('jacred:status'),
@@ -129,12 +166,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   rutrackerGetStatus: () => ipcRenderer.invoke('rutracker:status'),
   rutrackerOpenLogin: () => ipcRenderer.invoke('rutracker:open-login'),
   rutrackerHideLogin: () => ipcRenderer.invoke('rutracker:hide-login'),
-  rutrackerSearch: (query: string, year?: string) => ipcRenderer.invoke('rutracker:search', { query, year }),
+  rutrackerSearch: (query: string, year?: string, fallbackQuery?: string) => ipcRenderer.invoke('rutracker:search', { query, year, fallbackQuery }),
   onRutrackerStatusChanged: (callback: (st: { loggedIn: boolean }) => void) => {
     const listener = (_event: unknown, st: { loggedIn: boolean }) => callback(st);
     ipcRenderer.on('rutracker-status-changed', listener);
     return () => ipcRenderer.removeListener('rutracker-status-changed', listener);
   },
+
+  // ── Онлайн-потоки (KinoBox + Kodik) ──
+  searchOnlineStreams: (kinopoiskId?: number | string, tmdbId?: number | string, title?: string, year?: string, kodikToken?: string) =>
+    ipcRenderer.invoke('online:get-streams', { kinopoiskId, tmdbId, title, year, kodikToken }),
+  setOnlineStreamReferer: (host: string, referer: string) =>
+    ipcRenderer.invoke('online:set-referer', { host, referer }),
+  clearOnlineStreamReferer: (host: string) =>
+    ipcRenderer.invoke('online:clear-referer', host),
 
   // ── Shell / Platform ──
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),

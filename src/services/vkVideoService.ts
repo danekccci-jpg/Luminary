@@ -1,16 +1,14 @@
 /**
- * vkVideoService.ts — VK Video HLS Stream Extractor (Lampa-style).
+ * vkVideoService.ts — VK Video HLS Stream Extractor (Lampa-style, БЕЗ токена).
  *
- * Ищет фильм в публичных видеозаписях VK по названию + году, получает страницу
- * плеера `https://vk.com/video_ext.php?oid=..&id=..&hash=..` и вытаскивает из
- * JSON-контекста плеера (`playerParams`) прямые ссылки на потоки:
- *   - `params.hls` / `params.manifest_url`  → HLS-манифест (.m3u8) для Hls.js
- *   - `params.url2160 / url1080 / url720 …` → прогрессивные MP4 (fallback)
- *
- * Работает в renderer'е: Electron-окно запущено с `webSecurity: false`,
- * поэтому кросс-доменные запросы к vk.com / m.vk.com не блокируются CORS.
- * При недоступности (капча, лимиты, отсутствие результатов) молча возвращает [],
- * не мешая основному потоку с торрентами.
+ * Поиск выполняется в main-процессе (electron/vkScraper.ts):
+ *  1) публичный видео-агрегатор (Яндекс.Видео) по названию →
+ *     ссылки vk.com/video-<owner>_<id> (без авторизации);
+ *  2) прямой HLS из vk.com/video_ext.php — открытые видео отдают плеер
+ *     без логина (json "hls"/"hls_fmp4").
+ * Renderer только отображает готовые потоки. Все запросы в main с жёсткими
+ * таймаутами (4с) — при блокировке/ошибках возвращается пустой список,
+ * никаких ошибок авторизации в UI.
  */
 
 export interface VkVideoItem {
@@ -30,281 +28,31 @@ export interface VkVideoItem {
   videoId?: string;
 }
 
-interface Candidate {
-  ownerId: string;
-  videoId: string;
-  hash?: string;
-  title?: string;
-}
-
 /** Отбрасывать ролики короче 10 минут — трейлеры/клипы не нужны. */
 const MIN_DURATION_S = 600;
-/** Сколько видео резолвить (страницами плеера) и сколько вернуть. */
-const RESOLVE_LIMIT = 8;
+/** Сколько потоков отдаём в UI. */
 const RESULT_LIMIT = 6;
-/** Кэш запросов, чтобы повторное открытие фильма не дёргало VK. */
+/** Кэш запросов — повторное открытие фильма не дёргает агрегатор/VK. */
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const searchCache = new Map<string, { at: number; items: VkVideoItem[] }>();
 
-// ── VK User Access Token / session cookie (из настроек UI) ──
-// Без токена поиск идёт по публичным страницам (VK их закрывает анонимам);
-// с токеном — через официальное api.vk.com/method/video.search.
-let vkToken = '';
-export function setVkToken(token: string) {
-  vkToken = (token || '').trim();
-}
-export function hasVkToken(): boolean {
-  return !!vkToken;
-}
-
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
-
-function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, {
-    signal: controller.signal,
-    headers: {
-      'User-Agent': UA,
-      'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.5',
-      'Referer': 'https://vk.com/',
-    },
-  }).finally(() => clearTimeout(timer));
-}
-
-/**
- * Извлечь JSON-объект `playerParams` из HTML страницы плеера VK.
- * Балансирует фигурные скобки (внутри могут быть вложенные объекты и строки),
- * поэтому простой regex-матч до `};` здесь не годится.
- */
-function extractPlayerParamsJson(html: string): any | null {
-  const markerIdx = html.indexOf('playerParams');
-  if (markerIdx < 0) return null;
-  const start = html.indexOf('{', markerIdx);
-  if (start < 0) return null;
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < html.length; i++) {
-    const c = html[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') inStr = true;
-    else if (c === '{') depth++;
-    else if (c === '}') {
-      depth--;
-      if (depth === 0) {
-        try {
-          return JSON.parse(html.slice(start, i + 1));
-        } catch {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
-}
-
-interface Playable {
-  url: string;
-  width: number;
-  isHls: boolean;
-}
-
-/** Собрать все воспроизводимые URL из playerParams (hls / manifest_url / urlNNN / videos). */
-function collectPlayables(params: any): Playable[] {
-  const out: Playable[] = [];
-  const push = (url: unknown, width: unknown) => {
-    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
-      const w = typeof width === 'number' && Number.isFinite(width) ? width : 0;
-      out.push({ url, width: w, isHls: /\.m3u8/i.test(url) });
-    }
-  };
-
-  // 1) params.hls — массив [{url, width}], объект {url, width} или строка
-  const hls = params?.hls;
-  if (Array.isArray(hls)) hls.forEach((e) => push(e?.url, e?.width));
-  else if (hls && typeof hls === 'object') push(hls.url, hls.width);
-  else push(hls, 0);
-
-  // 2) params.manifest_url — legacy HLS-манифест
-  push(params?.manifest_url, 0);
-
-  // 3) Прогрессивные MP4: url240 … url2160 (у VK есть и 1440p/2160p)
-  const progressive: Record<string, number> = {
-    url2160: 3840, url1440: 2560, url1080: 1920, url720: 1280,
-    url480: 854, url360: 640, url240: 426,
-  };
-  for (const [key, w] of Object.entries(progressive)) {
-    push(params?.[key], w);
-  }
-
-  // 4) params.videos — массив [{url, width}]
-  const videos = params?.videos;
-  if (Array.isArray(videos)) videos.forEach((e) => push(e?.url, e?.width));
-
-  return out.filter((p) => !!p.url && p.url.length > 8);
-}
-
-/** Человекочитаемая пометка качества по ширине/URL. */
-function qualityLabel(width: number, url: string): string {
-  if (width >= 3840 || /2160/i.test(url)) return '4K';
-  if (width >= 1920 || /1080/i.test(url)) return '1080p';
-  if (width >= 1280 || /720/i.test(url)) return '720p';
-  if (width >= 854 || /480/i.test(url)) return '480p';
+/** Качество из названия раздачи (если агрегатор его дал). */
+function qualityOf(title?: string): string {
+  const t = (title || '').toLowerCase();
+  if (/2160p|4k|uhd/.test(t)) return '4K';
+  if (/1080p|fhd|full ?hd/.test(t)) return '1080p';
+  if (/720p/.test(t)) return '720p';
+  if (/480p|sd/.test(t)) return '480p';
   return 'SD';
 }
 
-/** Пройтись regex'ами по HTML поисковой выдачи и собрать кандидатов. */
-function parseVideoReferences(html: string, map: Map<string, Candidate>) {
-  const add = (ownerId: string, videoId: string, hash?: string, title?: string) => {
-    const key = `${ownerId}_${videoId}`;
-    const cur = map.get(key) || { ownerId, videoId };
-    if (hash && !cur.hash) cur.hash = hash;
-    if (title && !cur.title) cur.title = title;
-    map.set(key, cur);
-  };
-
-  // Ссылки вида /video-123_456 или /video123_456 (с опциональным hash=)
-  const linkRe = /\/video(-?\d+)_(\d+)(?:[^"'\s<>]*?hash=([a-zA-Z0-9]{8,}))?/g;
-  let m: RegExpExecArray | null;
-  while ((m = linkRe.exec(html))) add(m[1], m[2], m[3]);
-
-  // Мобильная разметка: data-id="owner_video"
-  const dataIdRe = /(?:data-id|data-video-id|data-vid)="(-?\d+)_(\d+)"/g;
-  while ((m = dataIdRe.exec(html))) add(m[1], m[2]);
-
-  // JSON-разметка (витрина/поиск): "video_id":123,"owner_id":-456
-  const jsonRe = /"video_id"\s*:\s*(-?\d+)\s*,\s*"owner_id"\s*:\s*(-?\d+)/g;
-  while ((m = jsonRe.exec(html))) add(m[2], m[1]);
+/** VK CDN блокирует запросы из renderer (Origin) — потоки идут через
+ *  main-прокси vkstream:// (см. electron/main.ts registerVkStreamProtocol). */
+function proxyUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  return `vkstream://proxy?u=${encodeURIComponent(url)}`;
 }
 
-/** Поиск по публичным видеозаписям VK (сначала мобильная версия, затем desktop). */
-async function searchCandidates(query: string): Promise<Candidate[]> {
-  const q = encodeURIComponent(query);
-  const urls = [
-    `https://m.vk.com/video?q=${q}&section=search&al=0`,
-    `https://vk.com/video?q=${q}&section=search`,
-  ];
-  const map = new Map<string, Candidate>();
-  for (const url of urls) {
-    try {
-      const res = await fetchWithTimeout(url, 8000);
-      if (!res.ok) continue;
-      const html = await res.text();
-      parseVideoReferences(html, map);
-      if (map.size >= RESOLVE_LIMIT) break; // достаточно результатов
-    } catch {
-      /* пробуем следующий источник */
-    }
-  }
-  return [...map.values()];
-}
-
-/**
- * Поиск через официальное API api.vk.com/method/video.search (VK User Access Token).
- * Возвращает null при ошибке API (невалидный токен, лимиты) — тогда вызывающий
- * откатывается на поиск по публичным страницам.
- */
-async function searchViaApi(query: string): Promise<Candidate[] | null> {
-  try {
-    const params = new URLSearchParams({
-      q: query,
-      sort: '2',       // по длительности
-      hd: '1',
-      adult: '0',
-      count: '12',
-      v: '5.199',
-      access_token: vkToken,
-    });
-    const res = await fetchWithTimeout(`https://api.vk.com/method/video.search?${params.toString()}`, 8000);
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
-    if (!data || data.error) {
-      console.warn('[VK] video.search API error:', data?.error?.error_msg || data?.error || 'unknown');
-      return null;
-    }
-    const items = Array.isArray(data.response?.items) ? data.response.items : [];
-    const candidates: Candidate[] = [];
-    for (const it of items) {
-      if (!it || it.owner_id == null || it.id == null) continue;
-      const duration = Number(it.duration) || 0;
-      if (duration > 0 && duration < MIN_DURATION_S) continue; // трейлеры/клипы
-      const cand: Candidate = {
-        ownerId: String(it.owner_id),
-        videoId: String(it.id),
-        title: it.title ? String(it.title) : undefined,
-      };
-      // hash из player-ссылки (video_ext.php?oid=..&id=..&hash=..), если API отдал
-      const hashMatch = String(it.player || '').match(/hash=([a-zA-Z0-9]+)/);
-      if (hashMatch) cand.hash = hashMatch[1];
-      candidates.push(cand);
-    }
-    return candidates;
-  } catch (err: any) {
-    console.warn('[VK] video.search request failed:', err?.message || err);
-    return null;
-  }
-}
-
-/** Загрузить страницу плеера и извлечь готовый VkVideoItem (HLS/MP4). */
-async function resolveVideo(cand: Candidate): Promise<VkVideoItem | null> {
-  const extUrl =
-    `https://vk.com/video_ext.php?oid=${cand.ownerId}&id=${cand.videoId}` +
-    (cand.hash ? `&hash=${cand.hash}` : '');
-  try {
-    const res = await fetchWithTimeout(extUrl, 8000);
-    if (!res.ok) return null;
-    const html = await res.text();
-    const params = extractPlayerParamsJson(html);
-    if (!params) return null;
-
-    const playables = collectPlayables(params);
-    if (playables.length === 0) return null;
-
-    // Длительность — строгий фильтр трейлеров/клипов
-    const duration = typeof params.duration === 'number' && Number.isFinite(params.duration)
-      ? Math.round(params.duration)
-      : undefined;
-    if (duration && duration < MIN_DURATION_S) return null;
-
-    const hlsList = playables.filter((p) => p.isHls).sort((a, b) => b.width - a.width);
-    const mp4List = playables.filter((p) => !p.isHls).sort((a, b) => b.width - a.width);
-    const best = hlsList[0] || mp4List[0];
-    if (!best) return null;
-
-    const title =
-      typeof params.title === 'string' && params.title.trim()
-        ? params.title.trim()
-        : cand.title || `VK Video ${cand.ownerId}_${cand.videoId}`;
-
-    return {
-      id: `${cand.ownerId}_${cand.videoId}`,
-      title,
-      duration,
-      quality: qualityLabel(best.width, best.url),
-      hlsUrl: hlsList[0]?.url,
-      mp4Url: mp4List[0]?.url,
-      pageUrl: `https://vk.com/video${cand.ownerId}_${cand.videoId}`,
-      ownerId: cand.ownerId,
-      videoId: cand.videoId,
-    };
-  } catch {
-    return null;
-  }
-}
-
-const QUALITY_RANK: Record<string, number> = { '4K': 4, '1080p': 3, '720p': 2, '480p': 1, 'SD': 0 };
-
-/**
- * Главный вход: поиск «название + год» → список VkVideoItem с прямыми потоками.
- * Возвращает отсортированные по качеству/длительности результаты (max 6).
- */
 export async function searchVkVideo(query: string): Promise<VkVideoItem[]> {
   const q = query.trim();
   if (!q) return [];
@@ -312,53 +60,34 @@ export async function searchVkVideo(query: string): Promise<VkVideoItem[]> {
   const cached = searchCache.get(q);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.items;
 
-  // Каскад источников (Zero-Config, без обязательного токена):
-  // 1) Официальный API (токен из настроек, если задан);
-  // 2) Silent VK Auth — гостевая сессия main-процесса (без CORS);
-  // 3) Страничный поиск (последний рубеж).
-  let candidates: Candidate[] = [];
-  if (vkToken) {
-    const apiCandidates = await searchViaApi(q);
-    if (apiCandidates) candidates = apiCandidates;
-  }
-  if (candidates.length === 0 && window.electronAPI?.vkSearchVideo) {
+  let items: VkVideoItem[] = [];
+  if (window.electronAPI?.vkScrapeVideo) {
     try {
-      const res = await window.electronAPI.vkSearchVideo(q);
-      if (res.success && Array.isArray(res.items) && res.items.length > 0) {
-        candidates = res.items.map((it) => ({
-          ownerId: it.ownerId,
-          videoId: it.videoId,
-          hash: it.hash,
-          title: it.title,
-        }));
-        console.log(`[VK] Silent auth: ${candidates.length} кандидатов через main-сессию`);
+      const res = await window.electronAPI.vkScrapeVideo(q);
+      if (res.success && Array.isArray(res.items)) {
+        items = res.items
+          .filter((it: any) => it && (it.hlsUrl || it.mp4Url))
+          .map((it: any) => ({
+            id: `${it.ownerId}_${it.videoId}`,
+            title: it.title || q,
+            duration: it.duration,
+            quality: qualityOf(it.title),
+            hlsUrl: proxyUrl(it.hlsUrl),
+            mp4Url: proxyUrl(it.mp4Url),
+            pageUrl: `https://vk.com/video${it.ownerId}_${it.videoId}`,
+            ownerId: it.ownerId,
+            videoId: it.videoId,
+          }));
       }
     } catch (err: any) {
-      console.warn('[VK] Main-session search failed:', err?.message || err);
+      console.warn('[VK] Scrape failed:', err?.message || err);
     }
   }
-  if (candidates.length === 0) {
-    candidates = await searchCandidates(q);
-  }
-  if (candidates.length === 0) {
-    searchCache.set(q, { at: Date.now(), items: [] });
-    return [];
-  }
 
-  const settled = await Promise.allSettled(
-    candidates.slice(0, RESOLVE_LIMIT).map((c) => resolveVideo(c))
-  );
-  const items = settled
-    .filter((r): r is PromiseFulfilledResult<VkVideoItem | null> => r.status === 'fulfilled')
-    .map((r) => r.value)
-    .filter((v): v is VkVideoItem => !!v)
-    .sort(
-      (a, b) =>
-        (QUALITY_RANK[b.quality] - QUALITY_RANK[a.quality]) ||
-        ((b.duration || 0) - (a.duration || 0))
-    )
-    .slice(0, RESULT_LIMIT);
-
-  searchCache.set(q, { at: Date.now(), items });
-  return items;
+  // Длительность известна и меньше 10 минут — трейлер/клип, не показываем.
+  // Неизвестная длительность — показываем (агрегатор мог её не отдать).
+  const filtered = items.filter((it) => !it.duration || it.duration >= MIN_DURATION_S);
+  const result = filtered.slice(0, RESULT_LIMIT);
+  searchCache.set(q, { at: Date.now(), items: result });
+  return result;
 }

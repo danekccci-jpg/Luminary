@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import {
   Play, Download, Users, HardDrive, Search,
-  AlertTriangle, Zap, Volume2,
+  AlertTriangle, Zap, Volume2, Loader2,
 } from 'lucide-react';
 import { TorrentRelease, DubbingType } from '../types';
 import { parseTorrentMeta, russianPriority } from '../utils/torrentMeta';
@@ -11,6 +11,17 @@ interface TorrentSelectorProps {
   releases: TorrentRelease[];
   isLoading: boolean;
   onPlayRelease: (release: TorrentRelease) => void;
+  /** Повторный поиск раздач (после пустого результата/ошибки). */
+  onRetry?: () => void;
+  /** Текст ошибки поиска (если сервис вернул error). */
+  error?: string | null;
+  /** Фоновый поиск RuTracker ещё идёт — раздачи приедут позже. */
+  isRutrackerSearching?: boolean;
+  /** Сколько сезонов в сериале (0 = не сериал / неизвестно). */
+  tvSeasons?: number;
+  /** Выбранный сезон (0 = все). Управляется родителем (нужен для перепоиска). */
+  seasonFilter?: number;
+  onSeasonFilterChange?: (season: number) => void;
 }
 
 // ── Circular Health Indicator SVG ──────────────
@@ -103,6 +114,12 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
   releases,
   isLoading,
   onPlayRelease,
+  onRetry,
+  error,
+  isRutrackerSearching,
+  tvSeasons = 0,
+  seasonFilter = 0,
+  onSeasonFilterChange,
 }) => {
   const [qualityFilter, setQualityFilter]   = useState('ALL');
   const [dubbingFilter, setDubbingFilter]   = useState('ALL');
@@ -110,11 +127,33 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
   const [keyword, setKeyword]               = useState('');
 
   const dubbingOptions = ['ALL', 'Дубляж', 'HDRezka', 'LostFilm', 'Оригинал + Субтитры', 'RHS'];
+
+  /** Сезоны раздачи: {from, to} из названия (S01, S01-S03, «сезон 2»), null — без маркера. */
+  const seasonsOf = (title: string): { from: number; to: number } | null => {
+    const range = String(title).match(/s(\d{1,2})\s*[-–—]\s*(\d{1,2})/i);
+    if (range) {
+      const a = parseInt(range[1], 10);
+      const b = parseInt(range[2], 10);
+      return { from: Math.min(a, b), to: Math.max(a, b) };
+    }
+    const meta = parseTorrentMeta(title);
+    if (meta.seasons != null) return { from: meta.seasons, to: meta.seasons };
+    return null;
+  };
+
+  /** Подходит ли раздача выбранному сезону (без маркера — показываем: может быть весь сериал). */
+  const matchesSeason = (title: string): boolean => {
+    if (seasonFilter <= 0) return true;
+    const s = seasonsOf(title);
+    if (!s) return true;
+    return seasonFilter >= s.from && seasonFilter <= s.to;
+  };
   const qualityOptions = ['ALL', '4K', '1080p', '720p'];
 
   const filtered = releases.filter((r) => {
     if (qualityFilter !== 'ALL' && r.quality !== qualityFilter) return false;
     if (dubbingFilter !== 'ALL' && r.dubbing !== dubbingFilter) return false;
+    if (seasonFilter > 0 && !matchesSeason(r.title)) return false;
     if (keyword.trim()) {
       const kw = keyword.toLowerCase();
       if (!r.title.toLowerCase().includes(kw) && !r.tags.some(t => t.toLowerCase().includes(kw))) return false;
@@ -306,6 +345,60 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
         </div>
       </div>
 
+      {/* ── Сезоны (для сериалов): фильтрует раздачи по S01/S02… ── */}
+      {tvSeasons > 1 && onSeasonFilterChange && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap', padding: '0.2rem 0.8rem 0.4rem' }}>
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 700, marginRight: '0.2rem' }}>Сезон:</span>
+          {[0, ...Array.from({ length: tvSeasons }, (_, i) => i + 1)].map((s) => (
+            <button
+              key={s}
+              onClick={() => onSeasonFilterChange(s)}
+              style={{
+                padding: '0.28rem 0.65rem',
+                borderRadius: '8px',
+                fontSize: '0.72rem',
+                fontWeight: 700,
+                fontFamily: 'inherit',
+                border: 'none',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+                background:
+                  seasonFilter === s
+                    ? 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(138,43,226,0.15))'
+                    : 'rgba(255,255,255,0.04)',
+                color: seasonFilter === s ? '#00F2FE' : 'rgba(240,242,248,0.55)',
+                boxShadow:
+                  seasonFilter === s ? '0 0 8px rgba(0,242,254,0.2), inset 0 0 0 1px rgba(0,242,254,0.2)' : 'none',
+              }}
+            >
+              {s === 0 ? 'Все' : `S${String(s).padStart(2, '0')}`}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ── RuTracker ищет раздачи (фоновый поиск, догонят список) ── */}
+      {isRutrackerSearching && releases.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.45rem',
+            padding: '0.45rem 0.8rem',
+            margin: '0 0.8rem 0.4rem',
+            borderRadius: '10px',
+            background: 'rgba(0,242,254,0.05)',
+            border: '1px solid rgba(0,242,254,0.15)',
+            color: 'rgba(0,242,254,0.75)',
+            fontSize: '0.75rem',
+            fontWeight: 600,
+          }}
+        >
+          <Loader2 size={13} style={{ animation: 'spin 1.2s linear infinite', flexShrink: 0 }} />
+          RuTracker: ищем раздачи…
+        </div>
+      )}
+
       {/* ── Release List ── */}
       <div
         style={{
@@ -328,8 +421,50 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
             <div style={{ width: '48px', height: '48px', borderRadius: '50%', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 0.75rem' }}>
               <Download size={20} style={{ color: 'var(--text-muted)' }} />
             </div>
-            <p style={{ color: 'var(--text-secondary)', fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.25rem' }}>Раздачи не найдены</p>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>Попробуйте изменить или сбросить фильтры</p>
+            <p style={{ color: 'var(--text-secondary)', fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.25rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.45rem' }}>
+              {isRutrackerSearching ? (
+                <>
+                  <Loader2 size={14} style={{ animation: 'spin 1.2s linear infinite' }} />
+                  RuTracker: ищем раздачи…
+                </>
+              ) : (
+                'Раздачи не найдены или парсеры недоступны'
+              )}
+            </p>
+            {!isRutrackerSearching && (
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginBottom: '1rem' }}>
+                {error || 'Попробуйте повторить поиск — часть источников могла временно отвалиться'}
+              </p>
+            )}
+            {onRetry && (
+              <button
+                onClick={onRetry}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  padding: '0.5rem 1.2rem',
+                  borderRadius: '12px',
+                  border: '1px solid rgba(0,242,254,0.35)',
+                  background: 'rgba(0,242,254,0.08)',
+                  color: 'var(--cyan)',
+                  fontSize: '0.82rem',
+                  fontWeight: 700,
+                  fontFamily: 'inherit',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease',
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.background = 'rgba(0,242,254,0.16)';
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.background = 'rgba(0,242,254,0.08)';
+                }}
+              >
+                <Search size={14} />
+                Повторить поиск
+              </button>
+            )}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>

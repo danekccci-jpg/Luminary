@@ -2,6 +2,7 @@ import { spawn, ChildProcess, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import http from 'http';
+import os from 'os';
 import https from 'https';
 import { app } from 'electron';
 import treeKill from 'tree-kill';
@@ -98,6 +99,8 @@ export class TorrServerManager {
   private host: string = '127.0.0.1';
   private binaryPath: string = '';
   private dataDir: string = '';
+  /** Диск-кэш файлов раздач для gst-транскодера (путь БЕЗ пробелов). */
+  private diskCacheDir: string = '';
   /** true, если используется gst-сборка MatriX (HLS-транскодинг /gst/master.m3u8). */
   private usingGstBinary: boolean = false;
 
@@ -126,6 +129,14 @@ export class TorrServerManager {
     this.dataDir = path.join(app.getPath('userData'), 'torrserver_data');
     if (!fs.existsSync(this.dataDir)) {
       fs.mkdirSync(this.dataDir, { recursive: true });
+    }
+    // Кэш файлов раздач для gst-транскодера (/gst/master.m3u8). ОБЯЗАТЕЛЬНО
+    // путь БЕЗ пробелов: TorrServer-gst вызывает gst-discoverer-1.0 без кавычек,
+    // путь «.../Application Support/...» даёт «gst-discoverer returned no stream
+    // info» → 502 → звука нет на AC3/DTS/TrueHD-раздачах (проверено live).
+    this.diskCacheDir = path.join(os.tmpdir(), 'luminary_ts');
+    if (!fs.existsSync(this.diskCacheDir)) {
+      fs.mkdirSync(this.diskCacheDir, { recursive: true });
     }
     this.logPath = path.join(app.getPath('userData'), 'torrserver.log');
     this.appendLog('════════ Luminary TorrServer session started ════════');
@@ -423,8 +434,24 @@ export class TorrServerManager {
   }
 
   /** gst-сборка TorrServer требует системный `gst-discoverer-1.0` (GStreamer):
-   *  `/gst/master.m3u8` отвечает «gst-discoverer-1.0 not found» без него. */
+   *  `/gst/master.m3u8` отвечает «gst-discoverer-1.0 not found» без него.
+   *  GUI-процесс не наследует PATH из shell (нет /opt/homebrew/bin) —
+   *  поэтому проверяем известные пути + PATH через `which`. */
   private gstRuntimeAvailable(): boolean {
+    const candidates = [
+      '/opt/homebrew/bin/gst-discoverer-1.0',
+      '/usr/local/bin/gst-discoverer-1.0',
+      '/opt/local/bin/gst-discoverer-1.0',
+      '/usr/bin/gst-discoverer-1.0',
+      '/usr/local/share/gstreamer-1.0',
+    ];
+    for (const p of candidates) {
+      try {
+        if (fs.existsSync(p)) return true;
+      } catch {
+        /* ignore */
+      }
+    }
     try {
       const out = execSync('which gst-discoverer-1.0 || command -v gst-discoverer-1.0 || true', {
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -765,9 +792,14 @@ export class TorrServerManager {
         ReaderReadAHead: 95,                // упреждающее чтение
         PreloadCache: 50,
         PreloadBufferSize: 10485760,        // минимальный предзагрузочный буфер ~10 MB
-        UseDisk: false,                     // RAM-only: нет блокировок файловой системы macOS
-        TorrentsSavePath: '',
-        RemoveCacheOnDrop: false,
+        // UseDisk:true + TorrentsSavePath — gst-сборка TorrServer требует ФАЙЛ
+        // на диске для gst-discoverer-1.0: /gst/master.m3u8 (транскод
+        // AC3/DTS/TrueHD/EAC3 → AAC) отвечает «no stream info» в RAM-only
+        // режиме → Chromium не декодирует эти кодеки → ЗВУКА НЕТ. Диск — это
+        // временный кэш: RemoveCacheOnDrop чистит файлы при сбросе кэша.
+        UseDisk: true,
+        TorrentsSavePath: this.diskCacheDir,
+        RemoveCacheOnDrop: true,
         ConnectionsLimit: 120,
         ClientsStatLimit: 30,
         DownloadRateLimit: 0,               // без лимитов скорости

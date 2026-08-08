@@ -49,9 +49,32 @@ function write(key: string, items: LibraryItem[]) {
   } catch {
     /* переполнение localStorage — игнорируем */
   }
+  emitChange();
+}
+
+// ── Реактивность: подписчики уведомляются при любом изменении библиотеки ──
+type LibraryListener = () => void;
+const listeners = new Set<LibraryListener>();
+
+function emitChange() {
+  listeners.forEach((fn) => {
+    try {
+      fn();
+    } catch {
+      /* ошибка подписчика не ломает библиотеку */
+    }
+  });
 }
 
 export const library = {
+  /** Подписка на изменения библиотеки; возвращает функцию отписки. */
+  onChange(fn: LibraryListener): () => void {
+    listeners.add(fn);
+    return () => {
+      listeners.delete(fn);
+    };
+  },
+
   // ── История ──
   getHistory(): LibraryItem[] {
     return read(KEYS.history).sort((a, b) => b.updatedAt - a.updatedAt);

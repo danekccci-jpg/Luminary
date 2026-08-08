@@ -30,7 +30,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [ramCache,      setRamCache]      = useState<256 | 512 | 1024 | 2048>(settings.ramCacheMB || 512);
   const [jackettUrl,    setJackettUrl]    = useState(settings.jackettUrl || '');
   const [jackettApiKey, setJackettApiKey] = useState(settings.jackettApiKey || '');
-  const [vkToken,       setVkToken]       = useState(settings.vkToken || '');
   const [jacredUrl,     setJacredUrl]     = useState(settings.jacredUrl || '');
   const [transcodeAudio, setTranscodeAudio] = useState(settings.transcodeAudioToAac ?? true);
   const [platformInfo,  setPlatformInfo]  = useState({ platform: 'desktop', arch: 'x64' });
@@ -143,7 +142,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       ramCacheMB: ramCache,
       jackettUrl,
       jackettApiKey,
-      vkToken,
       jacredUrl,
       transcodeAudioToAac: transcodeAudio,
     });
@@ -745,20 +743,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           {/* VK Video & JacRed — онлайн-источники */}
           <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: '18px', padding: '1.2rem' }}>
-            {sectionTitle('VK Video & JacRed (Онлайн-источники)', 'rgba(0,242,254,0.55)')}
+            {sectionTitle('Онлайн-источники', 'rgba(0,242,254,0.55)')}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-              <input
-                type="password"
-                value={vkToken}
-                onChange={e => setVkToken(e.target.value)}
-                placeholder="VK User Access Token / session cookie"
-                className="input-glass"
-                style={{ height: '38px', fontSize: '0.82rem' }}
-              />
-              <p style={{ fontSize: '0.68rem', color: 'var(--text-muted)', lineHeight: 1.45, margin: '-0.2rem 0 0' }}>
-                Токен VK (vkhost.github.io → VK Official) включает поиск фильмов через
-                <span style={{ fontFamily: 'monospace' }}> api.vk.com/method/video.search </span>
-                в блоке «Онлайн / VK». Без токена VK-поиск ограничен публичными страницами.
+              <p style={{ fontSize: '0.68rem', color: 'var(--text-muted)', lineHeight: 1.45, margin: '0' }}>
+                VK Video работает без авторизации: публичный поиск по названию +
+                прямые HLS-потоки (блок «Онлайн / VK» в карточке фильма).
               </p>
               <input
                 type="text"

@@ -150,10 +150,79 @@ export class TorrServerService {
     imdbId?: string,
     fallbackQuery?: string
   ): Promise<{ releases: TorrentRelease[]; error?: string; jacredUnreachable?: boolean }> {
+    // Жёсткий дедлайн 8 с на ВЕСЬ поиск: даже если JacRed висит, RuTracker
+    // разгоняется, а IPC отвечает медленно — UI гарантированно получит ответ
+    // (пусть и пустой) и выйдет из скелетона. См. MovieDetailsModal.isScraping.
+    const search = this.searchTorrentsImpl(query, year, jackettUrl, jackettApiKey, imdbId, fallbackQuery);
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<{ releases: TorrentRelease[]; error?: string }>((resolve) => {
+      deadlineTimer = setTimeout(() => {
+        console.warn('[TorrServerService] searchTorrents: дедлайн 8 с истёк — часть источников недоступна');
+        resolve({
+          releases: [],
+          error: 'Поиск занял больше 8 секунд — парсеры временно недоступны. Нажмите «Повторить поиск».',
+        });
+      }, 8000);
+    });
+    return await Promise.race([search, deadline]).finally(() => clearTimeout(deadlineTimer));
+  }
+
+  /**
+   * RuTracker — МЕДЛЕННЫЙ путь (браузерная навигация: Cloudflare-челлендж +
+   * темы, обычно 6-15с). Не должен блокировать быстрый поиск и не должен
+   * обрезаться его дедлайном — поэтому вызывается фоном (searchRutrackerLate),
+   * а его раздачи мёржатся в список реактивно, когда готовы.
+   */
+  public async searchRutrackerLate(
+    query: string,
+    year?: string,
+    fallbackQuery?: string
+  ): Promise<{ releases: TorrentRelease[]; applicable: boolean }> {
+    const rutrackerSearch = window.electronAPI?.rutrackerSearch;
+    console.log('[TorrServerService] RuTracker late: старт query="' + query + '" (bridge=' + !!rutrackerSearch + ')');
+    if (!rutrackerSearch) return { releases: [], applicable: false };
+    // Без bb_session поиск пропускаем сразу (Cloudflare-челленджи не гоняем)
+    const rtStatus = await getRutrackerStatus().catch(() => null);
+    console.log('[TorrServerService] RuTracker late: status=' + (rtStatus?.loggedIn ? 'ok' : 'skip'));
+    if (!rtStatus?.loggedIn) return { releases: [], applicable: false };
+
+    const runAttempt = (timeoutMs: number): Promise<TorrentRelease[]> =>
+      Promise.race<TorrentRelease[]>([
+        rutrackerSearch(query, year, fallbackQuery)
+          .then((res) => (res.success && Array.isArray(res.releases) ? res.releases : []))
+          .catch((err: any) => {
+            console.warn('[TorrServerService] RuTracker search failed:', err?.message || err);
+            return [];
+          }),
+        new Promise<TorrentRelease[]>((resolve) => setTimeout(() => resolve([]), timeoutMs)),
+      ]);
+
+    // Попытка 1: основной проход. Пустой результат (челлендж/флак) — НЕ
+    // окончательный: повторяем ещё раз. Внутри main у поиска кэш + дедлайн
+    // 45с — рейсы 20с×2 покрывают до 40с, далее отдаём собранное.
+    const t0 = Date.now();
+    let releases = await runAttempt(20000);
+    if (releases.length === 0) {
+      console.log('[TorrServerService] RuTracker: первый проход пуст — повторная попытка');
+      releases = await runAttempt(20000);
+    }
+    return { releases, applicable: true };
+  }
+
+  private async searchTorrentsImpl(
+    query: string,
+    year?: string,
+    jackettUrl?: string,
+    jackettApiKey?: string,
+    imdbId?: string,
+    fallbackQuery?: string
+  ): Promise<{ releases: TorrentRelease[]; error?: string; jacredUnreachable?: boolean }> {
     // Два независимых источника, запрашиваются ПАРАЛЛЕЛЬНО:
     // 1) Electron-скрапер (Torrentio + Rutor + Jackett при настройке);
     // 2) JacRed API (RuTracker / NNM-Club / Rutor) — отказоустойчивый клиент
     //    с пулом инстансов и авто-фолбэком (src/services/scrapers/jacred.ts).
+    // RuTracker (браузерная сессия) — НЕ здесь: см. searchRutrackerLate,
+    // он догоняет раздачи фоном, не блокируя выдачу.
     let ipcErrorMsg: string | undefined;
     const ipcPromise: Promise<TorrentRelease[]> = window.electronAPI?.searchTorrents
       ? Promise.race<TorrentRelease[]>([
@@ -168,7 +237,7 @@ export class TorrServerService {
               console.error('[TorrServerService] searchTorrents error:', err);
               return [];
             }),
-          new Promise<TorrentRelease[]>((resolve) => setTimeout(() => resolve([]), 15000)),
+          new Promise<TorrentRelease[]>((resolve) => setTimeout(() => resolve([]), 8000)),
         ])
       : Promise.resolve([]);
 
@@ -177,34 +246,10 @@ export class TorrServerService {
       return [];
     });
 
-    // 3) RuTracker — браузерный сеанс: магнеты появляются ТОЛЬКО с bb_session.
-    //    Без входа поиск пропускаем сразу (Cloudflare-челленджи не гоняем).
-    //    Поиск через навигацию окна — ~8с на разогрев челленджа + темы; таймаут 25с.
-    let rutrackerPromise: Promise<TorrentRelease[]> = Promise.resolve([]);
-    if (window.electronAPI?.rutrackerSearch) {
-      const rtStatus = await getRutrackerStatus().catch(() => null);
-      if (rtStatus?.loggedIn) {
-        rutrackerPromise = Promise.race<TorrentRelease[]>([
-          window.electronAPI
-            .rutrackerSearch(query, year)
-            .then((res) => (res.success && Array.isArray(res.releases) ? res.releases : []))
-            .catch((err: any) => {
-              console.warn('[TorrServerService] RuTracker search failed:', err?.message || err);
-              return [];
-            }),
-          new Promise<TorrentRelease[]>((resolve) => setTimeout(() => resolve([]), 25000)),
-        ]);
-      }
-    }
-
-    const [ipcReleases, jacredReleases, rutrackerReleases] = await Promise.all([
-      ipcPromise,
-      jacredPromise,
-      rutrackerPromise,
-    ]);
+    const [ipcReleases, jacredReleases] = await Promise.all([ipcPromise, jacredPromise]);
 
     // Мёрдж: дедуп по BTIH-хэшу magnet + приоритет 4K/2160p → 1080p (по сидам)
-    const merged = mergeReleasesByHash(ipcReleases, jacredReleases, rutrackerReleases);
+    const merged = mergeReleasesByHash(ipcReleases, jacredReleases);
     // Все JacRed-зеркала мертвы — UI покажет плашку «RuTracker временно недоступен»
     const jacredUnreachable = getJacredStatus() === 'unreachable';
     if (merged.length > 0) {

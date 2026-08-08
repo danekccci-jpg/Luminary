@@ -14,7 +14,6 @@ import { tmdbService, TMDB_GENRES } from './services/tmdb';
 import { torrServerService } from './services/torrserver';
 import { toastBus } from './services/toast';
 import { library, formatClock, LibraryItem } from './services/library';
-import { setVkToken } from './services/vkVideoService';
 import { setCustomJacredUrl, refreshRemoteInstancePool, probeJacredPool } from './services/scrapers/jacred';
 import { initLocalJacred, getJacredServerStatus, JacredServerStatus } from './services/jacredServer';
 import { Heart, Bookmark, History, Play } from 'lucide-react';
@@ -53,6 +52,7 @@ const defaultSettings: UserSettings = {
   jackettApiKey: '',
   vkToken: '',
   jacredUrl: '',
+  kodikToken: '',
   autoStartTorrServer: true,
   autoCleanCacheOnClose: true,
   transcodeAudioToAac: true,
@@ -73,7 +73,6 @@ function loadSettings(): UserSettings {
 
 /** Применить настройки к модулям-сервисам (VK-токен, JacRed-инстанс, TMDB-ключ). */
 function applySettingsToServices(s: UserSettings) {
-  setVkToken(s.vkToken || '');
   setCustomJacredUrl(s.jacredUrl || '');
   if (s.tmdbApiKey?.trim()) tmdbService.setApiKey(s.tmdbApiKey.trim());
 }
@@ -157,6 +156,8 @@ export const App: React.FC = () => {
     /** Прямой HLS/MP4 поток (VK Video) — плеер играет без TorrServer. */
     directUrl?: string;
     directQuality?: string;
+    /** Referer для CDN прямого потока (онлайн-балансеры: kinobox/alloha…). */
+    directReferer?: string;
     /** .torrent-файл (base64, rutracker) — добавляем в TorrServer вместо магнета. */
     torrentFile?: string;
     /** Сезон/серия (для сериалов) — история ведётся по эпизодам. */
@@ -180,7 +181,18 @@ export const App: React.FC = () => {
   };
   useEffect(() => {
     refreshLibrary();
+    // Реактивность Избранное/Позже/История: любой toggle (модалка, карточка)
+    // мгновенно перерисовывает вкладки без перезагрузки приложения
+    const off = library.onChange(refreshLibrary);
+    return () => off();
   }, []);
+
+  /** Double-tap to top: повторный клик по активной «Главной» (таб или логотип). */
+  const resetHome = () => {
+    setSearchQuery('');        // очистка поискового запроса
+    setActiveTab('home');      // сброс вкладки/фильтров
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
   const [isSettingsOpen, setIsSettingsOpen]   = useState(false);
   const [isMagnetModalOpen, setIsMagnetModalOpen] = useState(false);
 
@@ -360,6 +372,7 @@ export const App: React.FC = () => {
         setActiveTab={setActiveTab}
         searchQuery={searchQuery}
         setSearchQuery={setSearchQuery}
+        onResetHome={resetHome}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenMagnetModal={() => setIsMagnetModalOpen(true)}
         torrServerStatus={torrServerStatus}
@@ -574,6 +587,7 @@ export const App: React.FC = () => {
         <MovieDetailsModal
           movie={selectedMovie}
           onClose={() => setSelectedMovie(null)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
           onPlayTorrent={(torrent) => {
             // Прогресс по конкретному эпизоду сериала (или фильму)
             const prog = selectedMovie
@@ -603,6 +617,7 @@ export const App: React.FC = () => {
           videoCodec={activeStream.videoCodec}
           audioCodec={activeStream.audioCodec}
           directUrl={activeStream.directUrl}
+          directReferer={activeStream.directReferer}
           torrentFile={activeStream.torrentFile}
           startPosition={activeStream.startPosition}
           transcodeAudioToAac={settings.transcodeAudioToAac}

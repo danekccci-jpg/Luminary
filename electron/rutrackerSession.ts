@@ -19,12 +19,15 @@
  */
 
 import { BrowserWindow, session } from 'electron';
+import { createHash } from 'crypto';
 import { TorrentScraper, TorrentRelease } from './scraper.js';
 
 const PARTITION = 'persist:rutracker';
 const SITE = 'https://rutracker.org';
 /** Сколько результатов отдаём за один поиск. */
 const MAX_RESULTS = 12;
+/** Время жизни кэша раздач (повторные открытия фильма — без навигации). */
+const SEARCH_CACHE_TTL_MS = 30 * 60 * 1000;
 
 /** Извлечение строк поиска tracker.php прямо в окне (без парсинга HTML в main). */
 const EXTRACT_ROWS_JS = `(() => {
@@ -44,7 +47,7 @@ const EXTRACT_ROWS_JS = `(() => {
       leechers: parseInt(((tr.querySelector('b.leechmed, span.leechmed') || {}).textContent || '0').replace(/[^0-9]/g, ''), 10) || 0,
     });
   }
-  return out.slice(0, 10);
+  return out.slice(0, 30);
 })()`;
 
 export interface RutrackerSessionStatus {
@@ -54,6 +57,8 @@ export interface RutrackerSessionStatus {
 }
 
 export class RutrackerSessionManager {
+  /** Кэш найденных раздач по запросу — стабильность при перезаходах в список. */
+  private searchCache = new Map<string, { releases: TorrentRelease[]; at: number }>();
   private win: BrowserWindow | null = null;
   private visible = false;
   private lastLoggedIn: boolean | null = null;
@@ -190,65 +195,145 @@ export class RutrackerSessionManager {
    * Поэтому: tracker.php → строки → для top-N тем навигация → magnet.
    * Таймауты на каждом шаге — окно НИКОГДА не блокирует выдачу.
    */
-  public async search(query: string, year?: string): Promise<TorrentRelease[]> {
+  public async search(query: string, year?: string, fallbackQuery?: string): Promise<TorrentRelease[]> {
+    // Кэш: найденные раздачи возвращаются МГНОВЕННО при повторном открытии
+    // фильма — Cloudflare-флак (челлендж «раз через раз») больше не приводит
+    // к «rutracker то есть, то нет» при перезаходах в список раздач.
+    const cacheKey = `${query}|${year || ''}|${fallbackQuery || ''}`;
+    const hit = this.searchCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < SEARCH_CACHE_TTL_MS) {
+      console.log(`[RutrackerSession] кэш: ${hit.releases.length} раздач для "${query}"`);
+      return hit.releases;
+    }
+
     const win = await this.ensureWindow(false);
     const searchStr = year ? `${query} ${year}` : query;
     const q = encodeURIComponent(searchStr);
+    const tStart = Date.now();
+    /** Общий дедлайн поиска: темы/скрипты не должны держать выдачу минутами. */
+    const DEADLINE_MS = 45000;
     try {
-      // 1) Страница поиска (навигация + ожидание прохождения челленджа)
-      const okSearch = await this.navigate(win, `${SITE}/forum/tracker.php?nm=${q}`, 20000);
+      // 1) Страница поиска (навигация + ожидание прохождения челленджа).
+      //    Челлендж Cloudflare флакает — до 2 повторных попыток навигации.
+      let okSearch = false;
+      for (let attempt = 0; attempt < 3 && !okSearch; attempt++) {
+        if (attempt > 0) {
+          console.warn(`[RutrackerSession] попытка ${attempt + 1}: повторная навигация на поиск`);
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        okSearch = await this.navigate(win, `${SITE}/forum/tracker.php?nm=${q}`, 12000);
+      }
+      console.log(`[RutrackerSession] t+${((Date.now() - tStart) / 1000).toFixed(1)}с: поиск ок=${okSearch}`);
       if (!okSearch) {
         console.warn('[RutrackerSession] страница поиска не загрузилась (челлендж/сеть)');
         return [];
       }
-      const rows: Array<{ title: string; topicId: string; size: string; seeders: number; leechers: number }> =
-        await win.webContents.executeJavaScript(EXTRACT_ROWS_JS).catch(() => []);
+      let rows: Array<{ title: string; topicId: string; size: string; seeders: number; leechers: number }> =
+        await this.execWithTimeout(win, EXTRACT_ROWS_JS, 5000).catch(() => []);
+
+      // 2) Пусто по русскому названию — второй проход по оригинальному
+      //    (темы 4К-рипов часто содержат ТОЛЬКО латиницу в названии).
+      if (!rows.length && fallbackQuery && fallbackQuery.toLowerCase() !== query.toLowerCase()) {
+        console.log(`[RutrackerSession] RU-поиск пуст → проход по оригиналу: "${fallbackQuery}"`);
+        okSearch = await this.navigate(
+          win,
+          `${SITE}/forum/tracker.php?nm=${encodeURIComponent(fallbackQuery)}`,
+          10000
+        );
+        if (okSearch) {
+          rows = await this.execWithTimeout(win, EXTRACT_ROWS_JS, 5000).catch(() => []);
+        }
+      }
       if (!rows.length) return [];
 
-      // 2) Темы top-N: навигация → магнет
+      // Ранжирование тем: НЕ порядок трекера (сверху свежие перезаливы), а
+      // качество (4К → 1080p → 720p → SD) + сиды. Иначе 4К-раздача с 49 сидами,
+      // стоящая 8-й в списке, никогда не попадёт в выдачу (пример t=6304483).
+      const ranked = rows
+        .map((r) => ({ ...r, rankScore: this.qualityRank(r.title) + r.seeders }))
+        .sort((a, b) => b.rankScore - a.rankScore);
+
+      // 2) Темы top-N: .torrent через dl.php (fetch со страницы поиска) —
+      //    БЕЗ навигации на viewtopic: Cloudflare тормозит навигации на темы
+      //    (30-225с, проверено live), а dl.php с той же сессии — 200мс.
       const releases: TorrentRelease[] = [];
-      for (const row of rows.slice(0, 6)) {
+      for (const row of ranked.slice(0, 8)) {
         if (!row.topicId) continue;
-        const okTopic = await this.navigate(win, `${SITE}/forum/viewtopic.php?t=${row.topicId}`, 15000);
-        if (!okTopic) continue;
-        const magnet: string = await win.webContents
-          .executeJavaScript(
-            `(() => { const a = document.querySelector('a[href^="magnet:"]'); return a ? a.href : ''; })()`
-          )
-          .catch(() => '');
-        if (!/^magnet:\?xt=urn:btih:/i.test(magnet)) continue;
-        const rel = this.scraper.normalize(
-          row.title,
-          magnet,
-          this.parseSizeBytes(row.size),
-          row.seeders || 0,
-          row.leechers || 0,
-          'RuTracker'
-        );
-        // .torrent-файл темы (dl.php с сессией) — надёжнее магнета: метаданные
-        // локально, без обмена метаданными через пиров (магнеты в этой сборке
-        // TorrServer часто застревают на этапе metadata exchange).
-        const torrentB64: string = await win.webContents
-          .executeJavaScript(
-            `fetch('/forum/dl.php?t=${row.topicId}', { credentials: 'include' }).then(async (r) => {
-               const buf = await r.arrayBuffer();
-               if (!buf || buf.byteLength < 1000) return '';
-               const bytes = new Uint8Array(buf);
-               let bin = '';
-               for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-               return btoa(bin);
-             })`
-          )
-          .catch(() => '');
-        if (torrentB64) rel.torrentFile = torrentB64;
-        releases.push(rel);
-        if (releases.length >= MAX_RESULTS) break;
+        if (Date.now() - tStart > DEADLINE_MS) break;
+        const budget = Math.min(9000, DEADLINE_MS - (Date.now() - tStart));
+        const rel = await Promise.race<TorrentRelease | null>([
+          this.collectFromDl(win, row).catch(() => null),
+          new Promise<TorrentRelease | null>((resolve) => setTimeout(() => resolve(null), budget)),
+        ]);
+        if (rel) {
+          releases.push(rel);
+          if (releases.length >= MAX_RESULTS) break;
+        }
+      }
+      if (Date.now() - tStart > DEADLINE_MS) {
+        console.warn(`[RutrackerSession] дедлайн ${DEADLINE_MS}мс истёк — вернул ${releases.length} раздач`);
+      }
+      if (releases.length > 0) {
+        this.searchCache.set(cacheKey, { releases, at: Date.now() });
+        if (this.searchCache.size > 30) {
+          // вытесняем самый старый ключ
+          let oldestKey: string | null = null;
+          let oldestAt = Infinity;
+          for (const [k, v] of this.searchCache) {
+            if (v.at < oldestAt) { oldestAt = v.at; oldestKey = k; }
+          }
+          if (oldestKey) this.searchCache.delete(oldestKey);
+        }
       }
       return releases;
     } catch (err: any) {
       console.warn('[RutrackerSession] search failed:', err?.message || err);
       return [];
     }
+  }
+
+  /**
+   * Собрать раздачу БЕЗ навигации на тему: dl.php отдаёт .torrent прямо со
+   * страницы поиска (та же сессия, Cloudflare не челленджит — проверено live:
+   * 200мс против 225с навигации на viewtopic). BTIH вычисляем из файла.
+   */
+  private async collectFromDl(
+    win: BrowserWindow,
+    row: { title: string; topicId: string; size: string; seeders: number; leechers: number }
+  ): Promise<TorrentRelease | null> {
+    const torrentB64: string = await this.execWithTimeout(
+      win,
+      `fetch('/forum/dl.php?t=${row.topicId}', { credentials: 'include' }).then(async (r) => {
+         const buf = await r.arrayBuffer();
+         if (!buf || buf.byteLength < 1000) return '';
+         const bytes = new Uint8Array(buf);
+         let bin = '';
+         for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+         return btoa(bin);
+       })`,
+      8000
+    ).catch(() => '');
+    if (!torrentB64) return null;
+    const btih = btihFromTorrent(torrentB64);
+    if (!btih) return null;
+    const rel = this.scraper.normalize(
+      row.title,
+      `magnet:?xt=urn:btih:${btih}&dn=${encodeURIComponent(row.title)}`,
+      this.parseSizeBytes(row.size),
+      row.seeders || 0,
+      row.leechers || 0,
+      'RuTracker'
+    );
+    rel.torrentFile = torrentB64;
+    return rel;
+  }
+
+  /** executeJavaScript с жёстким таймаутом — на ещё грузящемся окне он висит вечно. */
+  private async execWithTimeout(win: BrowserWindow, code: string, ms: number): Promise<any> {
+    return await Promise.race([
+      win.webContents.executeJavaScript(code),
+      new Promise<any>((resolve) => setTimeout(() => resolve(''), ms)),
+    ]);
   }
 
   /** Навигация + ожидание завершения Cloudflare-челленджа (до maxS секунд). */
@@ -260,11 +345,22 @@ export class RutrackerSessionManager {
     for (let i = 0; i < maxS * 2; i++) {
       await new Promise((r) => setTimeout(r, 500));
       if (win.webContents.isLoading()) continue;
-      const title = await win.webContents.executeJavaScript('document.title').catch(() => '');
+      // Таймаут ОБЯЗАТЕЛЕН: на pending-load окне executeJavaScript висит
+      // ~30с (проверено live) — без race навигация затягивает весь поиск.
+      const title = await this.execWithTimeout(win, 'document.title', 3000).catch(() => '');
       // «Just a moment…» / «Один момент…» — челлендж ещё идёт
       if (title && !/момент|moment/i.test(title)) return true;
     }
     return false;
+  }
+
+  /** Вес качества для ранжирования тем: 4К → 1080p → 720p → SD. */
+  private qualityRank(title: string): number {
+    const t = title.toLowerCase();
+    if (/\b2160p\b|\b4k\b|\buhd\b|\b3840\s*[x×]\s*2160\b/.test(t)) return 3000;
+    if (/\b1080p\b|\b1080i\b|\bfull.?hd\b|\b1920\s*[x×]\s*1080\b/.test(t)) return 1000;
+    if (/\b720p\b|\b1280\s*[x×]\s*720\b/.test(t)) return 300;
+    return 0;
   }
 
   private parseSizeBytes(sizeStr: string): number {
@@ -290,4 +386,66 @@ export class RutrackerSessionManager {
     }
     this.win = null;
   }
+}
+
+// ═══════════════════════════════════════════════════════
+//  BTIH из .torrent-файла (bencode → SHA1(info-словаря)).
+//  Позволяет строить magnet без навигации на тему —
+//  достаточно dl.php (200мс), который отдаёт .torrent.
+// ═══════════════════════════════════════════════════════
+export function btihFromTorrent(base64: string): string {
+  try {
+    const buf = Buffer.from(base64, 'base64');
+    const infoKey = Buffer.from('4:info');
+    const idx = buf.indexOf(infoKey);
+    if (idx < 0) return '';
+    const start = idx + infoKey.length;
+    const end = findBencodeValueEnd(buf, start);
+    if (end <= start) return '';
+    return createHash('sha1').update(buf.subarray(start, end)).digest('hex');
+  } catch {
+    return '';
+  }
+}
+
+/** Конец bencode-значения (словаря/списка/строки/числа), позиция ПОСЛЕ него. */
+function findBencodeValueEnd(buf: Buffer, pos: number): number {
+  const parseValue = (p: number): number => {
+    const c = buf[p];
+    if (c === 0x64) { // d
+      p++;
+      while (buf[p] !== undefined && buf[p] !== 0x65) {
+        const keyEnd = parseStringEnd(buf, p);
+        if (keyEnd < 0) return -1;
+        const valEnd = parseValue(keyEnd);
+        if (valEnd < 0) return -1;
+        p = valEnd;
+      }
+      return buf[p] === 0x65 ? p + 1 : -1;
+    }
+    if (c === 0x6c) { // l
+      p++;
+      while (buf[p] !== undefined && buf[p] !== 0x65) {
+        const itemEnd = parseValue(p);
+        if (itemEnd < 0) return -1;
+        p = itemEnd;
+      }
+      return buf[p] === 0x65 ? p + 1 : -1;
+    }
+    if (c === 0x69) { // i<num>e
+      const e = buf.indexOf(0x65, p);
+      return e < 0 ? -1 : e + 1;
+    }
+    return parseStringEnd(buf, p);
+  };
+  return parseValue(pos);
+}
+
+/** Конец bencode-строки "len:data". */
+function parseStringEnd(buf: Buffer, pos: number): number {
+  const colon = buf.indexOf(0x3a, pos);
+  if (colon < 0) return -1;
+  const len = parseInt(buf.subarray(pos, colon).toString('latin1'), 10);
+  if (!Number.isFinite(len) || len < 0) return -1;
+  return colon + 1 + len;
 }

@@ -26,6 +26,9 @@ interface PlayerModalProps {
   /** Прямой HLS/MP4 поток (VK Video) — играем без TorrServer и GStreamer:
    *  .m3u8 уходит в Hls.js, mp4 — в нативный <video>. */
   directUrl?: string;
+  /** Referer для CDN прямого потока (онлайн-балансеры kinobox/alloha и т.д.) —
+   *  ставится в Hls.js xhrSetup + в сетевой перехватчик Electron (для mp4). */
+  directReferer?: string;
   /** .torrent-файл (base64) — добавляем в TorrServer вместо магнета (rutracker). */
   torrentFile?: string;
   /** Сохранение прогресса просмотра (история) при закрытии/завершении. */
@@ -277,7 +280,7 @@ const NeonRingSpinner: React.FC<{ percent: number }> = ({ percent: raw }) => {
 };
 
 export const PlayerModal: React.FC<PlayerModalProps> = ({
-  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, directUrl, torrentFile, onProgressSave, startPosition, onClose,
+  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, directUrl, directReferer, torrentFile, onProgressSave, startPosition, onClose,
 }) => {
   const videoRef     = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -620,13 +623,34 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     return { risky, riskyAudio, audio: a || '—', video: v || '—', ext: ext || '—' };
   }, [videoCodec, audioCodec, containerExt]);
 
-  /** Нужен ли HLS-транскод TorrServer (gst → AAC/PCM): рискованное аудио
-   *  (DTS/DTS-HD/TrueHD/E-AC3/AC3) или HEVC-в-MKV. Для безопасных раздач
-   *  (AAC/MP4/H.264) играем нативный /stream — без накладных расходов ремукса. */
-  const needTranscode = transcodeAudioToAac && codecRisk.risky;
+  /**
+   * Нужен ли HLS-транскод TorrServer (gst → AAC): ДЛЯ ТОРРЕНТНЫХ РАЗДАЧ —
+   * ВСЕГДА. Название раздачи не гарантирует детекцию кодека (часто Unknown),
+   * а Chromium не декодирует AC3/EAC3/DTS/TrueHD/MLP — без транскода звук
+   * пропадает на любых 4К-рипах (проверено live: «Через вселенные» играл по
+   * /stream с оригинальным аудио без звука). gst ремуксует ТОЛЬКО аудио
+   * (видео HEVC/H.264 остаётся исходным — без потерь), поэтому транскод
+   * безопасен всегда. VK-direct (HLS/MP4) не проходит через TorrServer.
+   */
+  const needTranscode = !directUrl && transcodeAudioToAac;
 
   /** Защита от ping-pong native↔gst: одна попытка ретранскода на поток. */
   const gstTriedRef = useRef(false);
+
+  // ── Сетевой перехватчик Referer для онлайн-потоков (CDN балансеров) ──
+  // Hls.js ставит Referer через xhrSetup, но нативный <video>/mp4 заголовки
+  // слать не умеет — регистрируем хост потока в main (webRequest.onBeforeSendHeaders),
+  // чтобы Chromium слал Referer для манифеста и всех сегментов/mp4.
+  useEffect(() => {
+    if (!directUrl || !directReferer) return;
+    let host = '';
+    try { host = new URL(directUrl).hostname; } catch { /* некорректный URL */ }
+    if (!host) return;
+    window.electronAPI?.setOnlineStreamReferer?.(host, directReferer).catch(() => {});
+    return () => {
+      window.electronAPI?.clearOnlineStreamReferer?.(host).catch(() => {});
+    };
+  }, [directUrl, directReferer]);
 
   // Init torrent: предзагрузка + проверка HTTP 200 потока перед монтированием <video>
   useEffect(() => {
@@ -685,8 +709,22 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         }
         return true;
       }
-      // GST HLS недоступен (обычный бинарник без -gst) → откат на обычный /stream
+      // GST HLS не готов (файл ещё пишется на диск для gst-discoverer-1.0) →
+      // прогреваем /stream (качает данные на диск) и повторяем /gst/ несколько
+      // раз; только потом откат на обычный /stream (без транскода — на
+      // AC3/DTS/TrueHD-раздачах звука не будет).
       if (url.includes('/gst/') && torrentHash) {
+        try {
+          const plainProbeUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, false);
+          if (plainProbeUrl) await torrServerService.probeStream(plainProbeUrl, 8000);
+        } catch {
+          /* прогрев не критичен */
+        }
+        for (let attempt = 0; attempt < 4; attempt++) {
+          await new Promise((r) => setTimeout(r, 3000));
+          const r2 = await torrServerService.probeStream(url, 8000);
+          if (r2.ok) return true;
+        }
         const plainUrl = await torrServerService.getStreamUrl(torrentHash, videoIndex, false);
         if (plainUrl && plainUrl !== url) {
           currentUrl = plainUrl;
@@ -704,7 +742,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         //    URL сразу уходит в адаптивный эффект (Hls.js для .m3u8 /
         //    нативный src для mp4), буферизационный экран пропускается. ──
         if (directUrl) {
-          if (!/^https?:\/\//i.test(directUrl)) {
+          // vkstream:// — прокси VK (main); https — обычный прямой поток
+          if (!/^(https?:\/\/|vkstream:\/\/)/i.test(directUrl)) {
             throw new Error('Некорректная прямая ссылка потока (VK Video)');
           }
           currentUrl = directUrl;
@@ -1063,11 +1102,14 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         lowLatencyMode: false,
         maxBufferLength: 60,
         maxMaxBufferLength: 120,
-        // VK CDN (vkvd/vkuservideo) отдаёт 403 без Referer — добавляем его
-        // для прямых VK-потоков (VK Video), gst-манифесты TorrServer не трогаем.
+        // CDN балансеров (kinobox/alloha/videocdn) и VK отдают 403 без правильного
+        // Referer — добавляем его для прямых потоков (VK Video / онлайн-балансеры).
+        // gst-манифесты TorrServer (свой сервер) не трогаем.
         xhrSetup: (xhr) => {
           if (/vk\.com|vkvd|vkuservideo/i.test(streamUrl)) {
             xhr.setRequestHeader('Referer', 'https://vk.com/');
+          } else if (directReferer) {
+            xhr.setRequestHeader('Referer', directReferer);
           }
         },
       });
@@ -1257,8 +1299,16 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   // ── Клик по видео: одиночный — Play/Pause, двойной — Fullscreen.
   //    Одиночный клик откладывается на 260 мс и отменяется при dblclick,
   //    чтобы двойной клик не «мигал» паузой перед переключением fullscreen.
+  //    Обработчик вешается и на <video>, и на оверлей управления (он перехватывает
+  //    клики по полотну, когда панель видна) — поэтому клик по области изображения
+  //    всегда переключает play/pause.
   const singleClickTimer = useRef<number | null>(null);
-  const handleVideoClick = () => {
+  const handleVideoClick = (e: React.MouseEvent) => {
+    // Клики по элементам управления (кнопки, ползунки input) и нижней панели
+    // управления (data-player-controls, включая прогресс-бар и панель фильтров)
+    // не должны переключать play/pause — только клики по самому полотну видео.
+    const target = e.target as HTMLElement;
+    if (target.closest('button, input') || target.closest('[data-player-controls]')) return;
     if (singleClickTimer.current) window.clearTimeout(singleClickTimer.current);
     singleClickTimer.current = window.setTimeout(() => {
       singleClickTimer.current = null;
@@ -1855,6 +1905,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
           {/* ── CUSTOM CONTROLS OVERLAY ── */}
           <div
+            onClick={handleVideoClick}
+            onDoubleClick={handleVideoDoubleClick}
             style={{
               position: 'absolute',
               inset: 0,
@@ -1870,6 +1922,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                 панель настроек (bottom:100%) открывалась НАД панелью, а не
                 уходила за нижний край экрана */}
             <div
+              data-player-controls
               style={{
                 position: 'relative',
                 background: 'linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.6) 60%, transparent 100%)',

@@ -35,6 +35,25 @@ export interface TorrentRelease {
   torrentFile?: string;
 }
 
+/** Жёсткий таймаут источника: зависший парсер (сеть, 500, челлендж) не должен
+ *  держать выдачу остальных работающих источников. Возвращает Promise, который
+ *  отклоняется через `ms` миллисекунд, если источник не успел ответить. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`source timeout ${ms}ms`)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
+
 export class TorrentScraper {
   /**
    * Multi-source search. Lampa-style: primaryQuery (RU title) first;
@@ -88,18 +107,22 @@ export class TorrentScraper {
     console.log(`[Scraper] Multi-source search for "${safeQuery}" (${safeYear || 'any year'})...`);
 
     const results: TorrentRelease[] = [];
+    // Каждый источник обёрнут в withTimeout(5000): жёсткий кап 5 с на парсер.
+    // Promise.allSettled ниже гарантирует, что ни один отвалившийся/зависший
+    // источник (JacRed 500, Cloudflare-челлендж, мёртвое зеркало) не заблокирует
+    // выдачу остальных — pass всегда завершается ≤ ~5 с.
     const sources: Array<{ name: string; run: () => Promise<TorrentRelease[]> }> = [
       // JacRed (RuTracker / NNM-Club / Rutor) вынесен в renderer:
       // src/services/scrapers/jacred.ts — динамический пул + racing-опрос, мёрдж
       // с этой выдачей происходит в src/services/torrserver.ts (по BTIH-хэшу).
-      { name: 'Torrentio', run: () => this.queryTorrentio(safeQuery, safeYear, imdbId) },
-      { name: 'Rutor', run: () => this.scrapeRutor(safeQuery, safeYear) },
-      { name: 'BitSearch', run: () => this.scrapeBitSearch(safeQuery, safeYear) },
+      { name: 'Torrentio', run: () => withTimeout(this.queryTorrentio(safeQuery, safeYear, imdbId), 5000) },
+      { name: 'Rutor', run: () => withTimeout(this.scrapeRutor(safeQuery, safeYear), 5000) },
+      { name: 'BitSearch', run: () => withTimeout(this.scrapeBitSearch(safeQuery, safeYear), 5000) },
       // RuTracker — открытые зеркала (Zero-Config Fallback): перебор пула
       // зеркал/RSS в обход login-wall; защищённые (DDos-Guard/JS) молча
       // пропускаются. Глубокий поиск RuTracker — через локальный JacRed
       // с кредами (renderer + динамический разгон в jacredserver.ts).
-      { name: 'RuTrackerMirror', run: () => this.scrapeRuTrackerMirrors(safeQuery, safeYear) },
+      { name: 'RuTrackerMirror', run: () => withTimeout(this.scrapeRuTrackerMirrors(safeQuery, safeYear), 5000) },
       // VK Video НЕ источник торрентов: раньше генерировал фейковые magnet
       // (btih из нулей) → битые «раздачи» в UI. Реальный VK-поиск (HLS-потоки)
       // вынесен в renderer — src/services/vkVideoService.ts (блок «Онлайн / VK»).
@@ -108,7 +131,7 @@ export class TorrentScraper {
     if (jackettUrl && jackettApiKey) {
       sources.push({
         name: 'Jackett',
-        run: () => this.queryJackett(safeQuery, safeYear, jackettUrl, jackettApiKey),
+        run: () => withTimeout(this.queryJackett(safeQuery, safeYear, jackettUrl, jackettApiKey), 5000),
       });
     }
 
@@ -116,7 +139,8 @@ export class TorrentScraper {
     settled.forEach((outcome, i) => {
       const name = sources[i].name;
       if (outcome.status === 'fulfilled') {
-        results.push(...outcome.value);
+        // Страховка от спама: не больше 15 раздач с одного источника
+        results.push(...outcome.value.slice(0, 15));
         console.log(`[Scraper] ${name}: ${outcome.value.length} results`);
       } else {
         console.warn(`[Scraper] ${name} fallback skip:`, this.formatAxiosError(outcome.reason));
@@ -225,7 +249,7 @@ export class TorrentScraper {
     const streams = Array.isArray(response.data?.streams) ? response.data.streams : [];
     const searchStr = year ? `${query} ${year}` : query;
 
-    return streams
+    const parsed = streams
       .filter((st: any) => st?.infoHash)
       .map((st: any, i: number) => {
         const title = `${searchStr} [${st.name || 'HD'}] ${st.title || ''}`.trim();
@@ -237,7 +261,7 @@ export class TorrentScraper {
           ? this.parseSizeBytes(`${sizeMatch[1]} ${sizeMatch[2]}`)
           : 5 * 1024 * 1024 * 1024;
 
-        return this.normalizeRelease(
+        const rel = this.normalizeRelease(
           `torrentio-${id}-${i}`,
           title,
           magnet,
@@ -246,7 +270,31 @@ export class TorrentScraper {
           3,
           'Torrentio Network'
         );
+        return { ...rel, _rank: this.qualityRankForSort(title) + seeders };
       });
+
+    // Torrentio спамит 50+ стримов (CAM/TeleSync дубли, озвучки) — оставляем
+    // топ-8 по рангу (качество + сиды), максимум 2 раздачи на качество.
+    parsed.sort((a: any, b: any) => b._rank - a._rank);
+    const perQuality = new Map<string, number>();
+    const limited: TorrentRelease[] = [];
+    for (const p of parsed) {
+      const q = p.quality;
+      if ((perQuality.get(q) || 0) >= 2) continue;
+      perQuality.set(q, (perQuality.get(q) || 0) + 1);
+      limited.push(p);
+      if (limited.length >= 8) break;
+    }
+    return limited;
+  }
+
+  /** Вес качества для локальной сортировки (те же веса, что в rutrackerSession). */
+  private qualityRankForSort(title: string): number {
+    const t = title.toLowerCase();
+    if (/\b2160p\b|\b4k\b|\buhd\b/.test(t)) return 3000;
+    if (/\b1080p\b|\b1080i\b|\bfull.?hd\b|\b1920\s*[x×]\s*1080\b/.test(t)) return 1000;
+    if (/\b720p\b|\b1280\s*[x×]\s*720\b/.test(t)) return 300;
+    return 0;
   }
 
   private async resolveImdbId(query: string, year?: string): Promise<string | undefined> {
@@ -271,67 +319,96 @@ export class TorrentScraper {
   }
 
   private async scrapeRutor(query: string, year?: string): Promise<TorrentRelease[]> {
-    const searchStr = year ? `${query} ${year}` : query;
     // Пул зеркал Rutor (публичный, без авторизации)
     const mirrors = [
-      `http://rutor.info/search/0/0/100/0/${encodeURIComponent(searchStr)}`,
-      `http://rutor.is/search/0/0/100/0/${encodeURIComponent(searchStr)}`,
+      `http://rutor.info/search/0/0/100/0/`,
+      `http://rutor.is/search/0/0/100/0/`,
     ];
+    const headers = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    };
 
-    let response;
-    let lastErr: unknown;
-    for (const url of mirrors) {
-      try {
-        response = await axios.get(url, {
-          timeout: 5500,
-          validateStatus: (s) => s >= 200 && s < 300,
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          },
-        });
-        break;
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    if (!response) {
-      if (lastErr) throw lastErr;
-      return [];
-    }
-
-    const $ = cheerio.load(response.data);
-    const releases: TorrentRelease[] = [];
-
-    $('#index tr').each((i, el) => {
-      if (i === 0) return;
-      const cells = $(el).find('td');
-      if (cells.length < 3) return;
-
-      const titleCell = $(cells[1]);
-      const titleText = titleCell.text().trim();
-      const magnetLink = titleCell.find('a[href^="magnet:"]').attr('href');
-
-      if (!magnetLink || !titleText) return;
-
-      const sizeText = $(cells[cells.length - 2]).text().trim();
-      const seedText = $(cells[cells.length - 1]).find('span.green').text().trim() || '0';
-      const leechText = $(cells[cells.length - 1]).find('span.red').text().trim() || '0';
-
-      releases.push(
-        this.normalizeRelease(
-          `rutor-${i}-${Date.now()}`,
-          titleText,
-          magnetLink,
-          this.parseSizeBytes(sizeText),
-          parseInt(seedText, 10) || 0,
-          parseInt(leechText, 10) || 0,
-          'Rutor Tracker'
+    /** Поиск по конкретной строке: параллельный опрос зеркал, первое живое. */
+    const searchOnce = async (searchStr: string): Promise<TorrentRelease[]> => {
+      const fetches = await Promise.allSettled(
+        mirrors.map((m) =>
+          axios.get(m + encodeURIComponent(searchStr), {
+            timeout: 4500,
+            validateStatus: (s) => s >= 200 && s < 300,
+            headers,
+          })
         )
       );
-    });
+      for (const outcome of fetches) {
+        if (outcome.status !== 'fulfilled') continue;
+        const html: string = outcome.value.data;
+        if (!html || typeof html !== 'string' || html.length < 500) continue;
+        const $ = cheerio.load(html);
+        const releases: TorrentRelease[] = [];
+        $('#index tr').each((i, el) => {
+          if (i === 0) return;
+          const cells = $(el).find('td');
+          if (cells.length < 3) return;
+          const titleCell = $(cells[1]);
+          const titleText = titleCell.text().trim();
+          const magnetLink = titleCell.find('a[href^="magnet:"]').attr('href');
+          if (!magnetLink || !titleText) return;
+          const sizeText = $(cells[cells.length - 2]).text().trim();
+          const seedText = $(cells[cells.length - 1]).find('span.green').text().trim() || '0';
+          const leechText = $(cells[cells.length - 1]).find('span.red').text().trim() || '0';
+          releases.push(
+            this.normalizeRelease(
+              `rutor-${i}-${Date.now()}`,
+              titleText,
+              magnetLink,
+              this.parseSizeBytes(sizeText),
+              parseInt(seedText, 10) || 0,
+              parseInt(leechText, 10) || 0,
+              'Rutor Tracker'
+            )
+          );
+        });
+        if (releases.length > 0) return releases;
+      }
+      return [];
+    };
 
-    return releases;
+    // 1) Полное название + год (если есть)
+    const fullSearch = year ? `${query} ${year}` : query;
+    let releases = await searchOnce(fullSearch);
+    if (releases.length > 0) return this.rankAndLimitRutor(releases);
+
+    // 2) Rutor ищет СТРОГО по словам: «человек паук новый день 2026» → 0 строк.
+    //    Ретрай с сокращённым запросом (первые 2 значимых слова) — тот же Lampa-
+    //    приём «умного сокращения». Внешний кап 5 с на источник ограничивает.
+    const words = fullSearch.split(/\s+/).filter(Boolean);
+    if (words.length > 2) {
+      const shortSearch = words.slice(0, 2).join(' ');
+      releases = await searchOnce(shortSearch);
+      if (releases.length > 0) {
+        // Сокращённый запрос тянет чужие фильмы/игры с теми же первыми словами
+        // (Marvel's Spider-Man 2 — тоже «человек паук»). Приоритет — строки,
+        // содержащие «хвостовые» слова полного запроса («новый день»).
+        const tail = words.slice(2).filter((w) => !/^\d{4}$/.test(w));
+        const relevant = releases.filter((r) =>
+          tail.some((w) => r.title.toLowerCase().includes(w.toLowerCase()))
+        );
+        if (relevant.length > 0) return this.rankAndLimitRutor(relevant);
+      }
+      return this.rankAndLimitRutor(releases);
+    }
+    return [];
+  }
+
+  /** Rutor тоже спамит (52 строки на «Нет пути домой») — топ-12 по качеству+сидам. */
+  private rankAndLimitRutor(list: TorrentRelease[]): TorrentRelease[] {
+    return [...list]
+      .sort(
+        (a, b) =>
+          this.qualityRankForSort(b.title) + b.seeders - (this.qualityRankForSort(a.title) + a.seeders)
+      )
+      .slice(0, 12);
   }
 
   // ═══════════════════════════════════════════════════════

@@ -35,6 +35,23 @@ export interface OnlineStream {
   type?: 'movie' | 'tv';
 }
 
+/** Бесплатный онлайн-поток (KinoBox / Kodik) — прямая альтернатива торрентам. */
+export interface OnlineBalancerStream {
+  id: string;
+  /** Название балансера: Collaps, Alloha, Hdvb, Videocdn, Kodik… */
+  source: string;
+  /** Нормализованное качество: 4K / 1080p / 720p / SD. */
+  quality: string;
+  /** Перевод / озвучка: Дубляж, RHS, LostFilm, Оригинал… */
+  translation: string;
+  /** Прямой HLS-манифест (.m3u8) — уходит в Hls.js без TorrServer. */
+  m3u8Url?: string;
+  /** iframe-ссылка плеера балансера (fallback: внешний плеер). */
+  iframeUrl?: string;
+  /** Origin для заголовка Referer при воспроизведении (CDN балансеров). */
+  referer?: string;
+}
+
 /** Unified catalog item from HDRezka / Filmix */
 export interface CatalogItem {
   id: string;
@@ -134,6 +151,8 @@ export interface UserSettings {
   vkToken: string;
   /** Пользовательский JacRed-инстанс (base URL) — RuTracker/NNM/Rutor через JacRed */
   jacredUrl: string;
+  /** Kodik API-токен (опционально) — онлайн-потоки для аниме/сериалов. */
+  kodikToken: string;
   autoStartTorrServer: boolean;
   autoCleanCacheOnClose: boolean;
   transcodeAudioToAac: boolean;
@@ -189,6 +208,19 @@ declare global {
         items: Array<{ ownerId: string; videoId: string; hash?: string; title?: string }>;
         error?: string;
       }>;
+      // VK Video БЕЗ токена: публичный агрегатор → HLS (electron/vkScraper.ts)
+      vkScrapeVideo: (query: string) => Promise<{
+        success: boolean;
+        items: Array<{
+          ownerId: string;
+          videoId: string;
+          title?: string;
+          duration?: number;
+          hlsUrl?: string;
+          mp4Url?: string;
+        }>;
+        error?: string;
+      }>;
       // Локальный JacRed (Zero-Config: бинарник + spawn на 127.0.0.1:9117)
       getJacredStatus: () => Promise<{
         running: boolean;
@@ -215,8 +247,19 @@ declare global {
       rutrackerGetStatus: () => Promise<{ loggedIn: boolean; loginWindowOpen: boolean; error?: string }>;
       rutrackerOpenLogin: () => Promise<{ loggedIn: boolean; loginWindowOpen: boolean; error?: string }>;
       rutrackerHideLogin: () => Promise<{ ok: boolean }>;
-      rutrackerSearch: (query: string, year?: string) => Promise<{ success: boolean; releases: TorrentRelease[]; error?: string }>;
+      rutrackerSearch: (query: string, year?: string, fallbackQuery?: string) => Promise<{ success: boolean; releases: TorrentRelease[]; error?: string }>;
       onRutrackerStatusChanged: (callback: (st: { loggedIn: boolean }) => void) => () => void;
+      // Онлайн-потоки (KinoBox + Kodik): прямой .m3u8 без TorrServer
+      searchOnlineStreams: (
+        kinopoiskId?: number | string,
+        tmdbId?: number | string,
+        title?: string,
+        year?: string,
+        kodikToken?: string
+      ) => Promise<{ success: boolean; streams: OnlineBalancerStream[]; error?: string }>;
+      /** Referer для CDN активного онлайн-потока (сетевой перехватчик Electron). */
+      setOnlineStreamReferer: (host: string, referer: string) => Promise<{ ok: boolean }>;
+      clearOnlineStreamReferer: (host: string) => Promise<{ ok: boolean }>;
     };
   }
 }

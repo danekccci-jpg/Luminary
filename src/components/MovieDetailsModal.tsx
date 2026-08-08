@@ -1,28 +1,34 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Video, Heart, Bookmark, Tv } from 'lucide-react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Video, Heart, Bookmark, Tv, Radio, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
 import { library, LibraryItem, formatClock } from '../services/library';
 import { extractYear } from '../utils/year';
 import { parseTorrentMeta } from '../utils/torrentMeta';
-import { Movie, TorrentRelease } from '../types';
+import { Movie, TorrentRelease, OnlineBalancerStream } from '../types';
 import { tmdbService } from '../services/tmdb';
 import { torrServerService } from '../services/torrserver';
+import { mergeReleasesByHash } from '../services/scrapers/jacred';
 import { toastBus } from '../services/toast';
 import { searchVkVideo, VkVideoItem } from '../services/vkVideoService';
+import { searchOnlineStreams } from '../services/onlineBalancers';
 import { TorrentSelector } from './TorrentSelector';
 import { EpisodeResumeDialog } from './EpisodeResumeDialog';
 
 interface MovieDetailsModalProps {
   movie: Movie;
   onClose: () => void;
+  /** Открыть окно настроек (для получения VK-токена). */
+  onOpenSettings?: () => void;
   onPlayTorrent: (torrent: {
     magnet: string;
     title: string;
     poster?: string;
     videoCodec?: string;
     audioCodec?: string;
-    /** Прямой HLS/MP4 поток (VK Video) — плеер играет без TorrServer. */
+    /** Прямой HLS/MP4 поток (VK Video / онлайн-балансеры) — плеер играет без TorrServer. */
     directUrl?: string;
     directQuality?: string;
+    /** Referer для CDN прямого потока (онлайн-балансеры: kinobox/alloha…). */
+    directReferer?: string;
     /** .torrent-файл (base64, rutracker) — в TorrServer вместо магнета. */
     torrentFile?: string;
     /** Сезон/серия (для сериалов) — история ведётся по эпизодам. */
@@ -36,6 +42,7 @@ interface MovieDetailsModalProps {
 export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   movie,
   onClose,
+  onOpenSettings,
   onPlayTorrent,
 }) => {
   const [details, setDetails] = useState<Movie | null>(null);
@@ -54,7 +61,14 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   const toggleLater = () => { setIsLater(library.toggleLater(libItem())); };
   const [releases, setReleases] = useState<TorrentRelease[]>([]);
   const [vkItems, setVkItems] = useState<VkVideoItem[]>([]);
+  /** Онлайн-потоки (KinoBox/Kodik) — бесплатная альтернатива торрентам. */
+  const [onlineStreams, setOnlineStreams] = useState<OnlineBalancerStream[]>([]);
+  const [isSearchingOnline, setIsSearchingOnline] = useState(true);
+  /** Секция «Онлайн» свёрнута/развёрнута (переключатель). */
+  const [isOnlineOpen, setIsOnlineOpen] = useState(true);
   const [isScraping, setIsScraping] = useState(true);
+  /** Фоновый поиск RuTracker ещё идёт (раздачи приедут позже, реактивно). */
+  const [isRutrackerSearching, setIsRutrackerSearching] = useState(false);
   const [isSearchingVk, setIsSearchingVk] = useState(true);
   const [searchError, setSearchError] = useState<string | null>(null);
   /** История просмотра (сериалы: сезон/серия + процент) — для умного меню запуска. */
@@ -74,11 +88,42 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   // movie.year (год раздачи HDRezka/Filmix, ремастер 4K) — только как fallback.
   const year = extractYear(movie.release_date || movie.first_air_date) || extractYear(movie.year) || '';
 
+  /** Сколько сезонов в сериале: TMDB (details.seasons) + максимум из раздач. */
+  const tvSeasons = useMemo(() => {
+    if (movie.media_type !== 'tv') return 0;
+    let max = 0;
+    const tmdbSeasons = (details as any)?.seasons;
+    if (Array.isArray(tmdbSeasons)) {
+      for (const s of tmdbSeasons) {
+        const n = Number(s?.season_number);
+        if (Number.isFinite(n) && n > max) max = n;
+      }
+    }
+    for (const r of releases) {
+      const meta = parseTorrentMeta(r.title);
+      if (meta.seasons != null && meta.seasons > max) max = meta.seasons;
+    }
+    return max;
+  }, [movie, details, releases]);
+
+  /** Счётчик «Повторить поиск» — инкремент перезапускает поиск раздач. */
+  const [searchNonce, setSearchNonce] = useState(0);
+  /** Фильтр сезона для сериалов (0 = все). Смена сезона переищет RuTracker. */
+  const [seasonFilter, setSeasonFilter] = useState(0);
+  /** Модалка ещё смонтирована (guard для фоновых ответов поиска). */
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   useEffect(() => {
     // TMDB-First: мгновенно показываем данные из карточки, фоном обогащаем деталями
     setDetails(movie);
     setIsScraping(true);
     setIsSearchingVk(true);
+    setIsSearchingOnline(true);
+    setOnlineStreams([]);
     setSearchError(null);
     setHistItems(library.getHistory()); // история (сезон/серия, прогресс) для умного меню
     setEpisodeUi(null);
@@ -120,6 +165,30 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
         if (!cancelled) setIsSearchingVk(false);
       });
 
+    // ── 1b) Онлайн-потоки (KinoBox по KP-ID / Kodik по TMDB-ID) — параллельно
+    //       с торрентами, не блокирует список. Торренты остаются главным
+    //       источником: онлайн-список просто появляется ниже при наличии. ──
+    searchOnlineStreams({
+      // KinoBox принимает Кинопоиск-ID; в каталоге TMDB его нет, поэтому
+      // KinoBox используется при наличии внешнего KP-ID, Kodik — по TMDB-ID
+      // (movie.id) или названию+году (аниме/сериалы).
+      kinopoiskId: undefined,
+      tmdbId: typeof movie.id === 'number' ? movie.id : Number(movie.id) || undefined,
+      title: primaryQuery,
+      year,
+    })
+      .then((items) => {
+        if (cancelled) return;
+        setOnlineStreams(items);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        console.warn('[MovieDetailsModal] Online streams search failed:', err?.message || err);
+      })
+      .finally(() => {
+        if (!cancelled) setIsSearchingOnline(false);
+      });
+
     // ── 2) Торренты через TorrServer / JacRed (on-demand) ──
     torrServerService
       .searchTorrents(primaryQuery, year, undefined, undefined, undefined, fallbackQuery)
@@ -142,8 +211,38 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
         toastBus.push(msg, 'error');
       });
 
-    return () => { cancelled = true; };
-  }, [movie]);
+    // ── 3) RuTracker (браузерная сессия) — фоном, обычно 6-15с. ──
+    // Не блокирует список: раздачи мёржатся реактивно, когда готовы —
+    // раньше этот путь обрезался дедлайном 8с и раздачи «пропадали».
+    setIsRutrackerSearching(true);
+    torrServerService
+      .searchRutrackerLate(primaryQuery, year, fallbackQuery)
+      .then(({ releases: late }) => {
+        if (cancelled) return;
+        if (late.length > 0) {
+          console.log(`[MovieDetailsModal] RuTracker догрузил ${late.length} раздач — мёржаем`);
+          setReleases((prev) => mergeReleasesByHash(prev, late));
+          setIsScraping(false);
+        }
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        console.warn('[MovieDetailsModal] RuTracker late search failed:', err?.message || err);
+      })
+      .finally(() => {
+        if (!cancelled) setIsRutrackerSearching(false);
+      });
+
+    // ── Safety: жёсткий сброс скелетона через 8 с, даже если сервис завис ──
+    const skeletonTimer = setTimeout(() => {
+      if (!cancelled) setIsScraping(false);
+    }, 8000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(skeletonTimer);
+    };
+  }, [movie, searchNonce]);
 
   /** Воспроизвести раздачу (с опциональным сезоном/серией/таймкодом). */
   const playRelease = useCallback((
@@ -206,6 +305,29 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
       directUrl: url,
       directQuality: item.quality,
     });
+  };
+
+  /**
+   * Воспроизвести онлайн-поток балансера: прямой .m3u8 уходит в Hls.js
+   * (с Referer CDN балансера). Без .m3u8 — открываем iframe-плеер в браузере.
+   */
+  const handlePlayOnline = (stream: OnlineBalancerStream) => {
+    if (stream.m3u8Url) {
+      onPlayTorrent({
+        magnet: '',
+        title: `${movie.title} [${stream.source} ${stream.quality}]`,
+        poster: posterUrl,
+        directUrl: stream.m3u8Url,
+        directQuality: stream.quality,
+        directReferer: stream.referer || 'https://kinobox.tv/',
+      });
+      return;
+    }
+    if (stream.iframeUrl) {
+      window.electronAPI?.openExternal?.(stream.iframeUrl);
+      return;
+    }
+    toastBus.push('У этого потока не удалось получить ссылку воспроизведения', 'error');
   };
 
   return (
@@ -661,7 +783,217 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
               releases={releases}
               isLoading={isScraping}
               onPlayRelease={handlePlayRelease}
+              onRetry={() => setSearchNonce((n) => n + 1)}
+              error={searchError}
+              isRutrackerSearching={isRutrackerSearching}
+              tvSeasons={tvSeasons}
+              seasonFilter={seasonFilter}
+              onSeasonFilterChange={(s) => {
+                setSeasonFilter(s);
+                if (s > 0 && movie.media_type === 'tv' && window.electronAPI?.rutrackerSearch) {
+                  // Сезон выбран — ищем RuTracker-раздачи именно этого сезона
+                  // (темы вида «Название [S01]»); результат домёржится в список.
+                  const baseQ = movie.title || movie.original_title || '';
+                  const q = `${baseQ} S${String(s).padStart(2, '0')}`;
+                  torrServerService.searchRutrackerLate(q, year).then(({ releases: late }) => {
+                    if (!isMountedRef.current || late.length === 0) return;
+                    setReleases((prev) => mergeReleasesByHash(prev, late));
+                  }).catch(() => {});
+                }
+              }}
             />
+
+            {/* ── Онлайн (KinoBox · Kodik): бесплатные потоки без TorrServer ──
+                Альтернатива торрентам: прямой .m3u8 играется в Hls.js.
+                Секция видна при загрузке/наличии потоков (прогрессив-дисклозюр):
+                нет потоков → не занимает место, торренты остаются главными. */}
+            {(isSearchingOnline || onlineStreams.length > 0) && (
+            <div
+              style={{
+                marginTop: '1rem',
+                background: 'rgba(14,15,21,0.93)',
+                border: '1px solid rgba(255,255,255,0.07)',
+                borderRadius: '22px',
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                onClick={() => setIsOnlineOpen((o) => !o)}
+                title={isOnlineOpen ? 'Свернуть онлайн-потоки' : 'Развернуть онлайн-потоки'}
+                style={{
+                  padding: '1.2rem 1.4rem 1rem',
+                  borderBottom: isOnlineOpen ? '1px solid rgba(255,255,255,0.05)' : 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.65rem',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                }}
+              >
+                <div
+                  style={{
+                    width: '34px',
+                    height: '34px',
+                    borderRadius: '10px',
+                    background: 'linear-gradient(135deg, rgba(138,43,226,0.2), rgba(0,198,251,0.15))',
+                    border: '1px solid rgba(138,43,226,0.3)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: '0 0 12px rgba(138,43,226,0.15)',
+                    flexShrink: 0,
+                  }}
+                >
+                  <Radio size={16} style={{ color: 'var(--cyan)' }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--text-primary)' }}>
+                    Онлайн (KinoBox · Kodik)
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 500 }}>
+                    Бесплатные потоки без TorrServer · 1080p
+                  </div>
+                </div>
+                {onlineStreams.length > 0 && (
+                  <span
+                    style={{
+                      padding: '2px 8px',
+                      borderRadius: '999px',
+                      background: 'rgba(138,43,226,0.12)',
+                      border: '1px solid rgba(138,43,226,0.35)',
+                      color: 'var(--cyan)',
+                      fontSize: '0.7rem',
+                      fontWeight: 800,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {onlineStreams.length}
+                  </span>
+                )}
+                <span style={{ flexShrink: 0, color: 'var(--text-muted)', display: 'flex' }}>
+                  {isOnlineOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </span>
+              </div>
+
+              {isOnlineOpen && (
+                <div style={{ padding: '0.8rem 1.4rem 1.1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {isSearchingOnline ? (
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      {[1, 2, 3].map((n) => (
+                        <div key={n} className="skeleton" style={{ width: '180px', height: '40px', borderRadius: '10px' }} />
+                      ))}
+                    </div>
+                  ) : onlineStreams.length === 0 ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                      <Radio size={14} />
+                      Онлайн-потоки не найдены — используйте торренты
+                    </div>
+                  ) : (
+                    onlineStreams.map((stream) => (
+                      <button
+                        key={stream.id}
+                        onClick={() => handlePlayOnline(stream)}
+                        title={
+                          stream.m3u8Url
+                            ? `Воспроизвести в плеере Luminary: ${stream.source} · ${stream.translation}`
+                            : `Открыть плеер ${stream.source} в браузере`
+                        }
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '0.6rem',
+                          padding: '0.55rem 0.9rem',
+                          borderRadius: '12px',
+                          background: 'rgba(255,255,255,0.025)',
+                          border: '1px solid rgba(255,255,255,0.06)',
+                          color: 'var(--text-primary)',
+                          fontFamily: 'inherit',
+                          cursor: 'pointer',
+                          transition: 'all 0.2s ease',
+                          textAlign: 'left',
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'rgba(138,43,226,0.08)';
+                          e.currentTarget.style.borderColor = 'rgba(138,43,226,0.3)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'rgba(255,255,255,0.025)';
+                          e.currentTarget.style.borderColor = 'rgba(255,255,255,0.06)';
+                        }}
+                      >
+                        {/* Балансер */}
+                        <span
+                          style={{
+                            flexShrink: 0,
+                            padding: '2px 8px',
+                            borderRadius: '6px',
+                            fontSize: '0.64rem',
+                            fontWeight: 900,
+                            letterSpacing: '0.05em',
+                            background: 'rgba(138,43,226,0.14)',
+                            color: '#C9A2FF',
+                            border: '1px solid rgba(138,43,226,0.4)',
+                            maxWidth: '110px',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {stream.source}
+                        </span>
+                        {/* Качество */}
+                        <span
+                          style={{
+                            flexShrink: 0,
+                            padding: '2px 7px',
+                            borderRadius: '6px',
+                            fontSize: '0.64rem',
+                            fontWeight: 900,
+                            letterSpacing: '0.05em',
+                            background: stream.quality === '4K'
+                              ? 'rgba(255,184,0,0.14)'
+                              : stream.quality === '1080p'
+                              ? 'rgba(0,242,254,0.12)'
+                              : stream.quality === '720p'
+                              ? 'rgba(16,245,172,0.12)'
+                              : 'rgba(255,255,255,0.07)',
+                            color: stream.quality === '4K' ? '#FFB800' : stream.quality === '1080p' ? '#00F2FE' : stream.quality === '720p' ? '#10F5AC' : 'rgba(240,242,248,0.55)',
+                            border: `1px solid ${stream.quality === '4K' ? 'rgba(255,184,0,0.4)' : stream.quality === '1080p' ? 'rgba(0,242,254,0.35)' : stream.quality === '720p' ? 'rgba(16,245,172,0.3)' : 'rgba(255,255,255,0.1)'}`,
+                          }}
+                        >
+                          {stream.quality}
+                        </span>
+                        {/* Перевод / озвучка */}
+                        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', fontWeight: 600 }}>
+                          {stream.translation}
+                        </span>
+                        <span
+                          style={{
+                            flexShrink: 0,
+                            width: '34px',
+                            height: '34px',
+                            borderRadius: '10px',
+                            background: stream.m3u8Url
+                              ? 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(138,43,226,0.2))'
+                              : 'rgba(255,255,255,0.05)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                          }}
+                        >
+                          {stream.m3u8Url ? (
+                            <Play size={13} fill="white" style={{ color: '#fff', marginLeft: '1px' }} />
+                          ) : (
+                            <ExternalLink size={13} style={{ color: 'var(--text-muted)' }} />
+                          )}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+            )}
           </div>
         </div>
       </div>

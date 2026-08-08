@@ -18,6 +18,8 @@ interface HeaderProps {
   setActiveTab: (tab: string) => void;
   searchQuery: string;
   setSearchQuery: (query: string) => void;
+  /** Повторный клик по активной «Главной» — очистка поиска/фильтров + скролл наверх. */
+  onResetHome: () => void;
   onOpenSettings: () => void;
   onOpenMagnetModal: () => void;
   torrServerStatus: TorrServerStatusInfo;
@@ -28,12 +30,35 @@ export const Header: React.FC<HeaderProps> = ({
   setActiveTab,
   searchQuery,
   setSearchQuery,
+  onResetHome,
   onOpenSettings,
   onOpenMagnetModal,
   torrServerStatus,
 }) => {
   const [searchFocused, setSearchFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  /** Клик по табу: повторный клик по активной «Главной» = сброс наверх (double-tap to top). */
+  const handleTabClick = (tabId: string) => {
+    if (tabId === 'home' && activeTab === 'home') {
+      onResetHome();
+      return;
+    }
+    setActiveTab(tabId);
+  };
+
+  const handleLogoClick = () => {
+    if (activeTab === 'home') {
+      onResetHome();
+      return;
+    }
+    setActiveTab('home');
+  };
+
+  // ── macOS hiddenInset titlebar: шапка = drag-зона, отступ под «светофоры» ──
+  const isElectron = !!window.electronAPI;
+  const drag: React.CSSProperties = { WebkitAppRegion: 'drag' } as React.CSSProperties;
+  const noDrag: React.CSSProperties = { WebkitAppRegion: 'no-drag' } as React.CSSProperties;
 
   const tabs = [
     { id: 'home',      label: 'Главная' },
@@ -50,6 +75,8 @@ export const Header: React.FC<HeaderProps> = ({
       style={{
         background: 'rgba(10, 11, 14, 0.85)',
         borderBottom: '1px solid rgba(255,255,255,0.06)',
+        // hiddenInset: вся шапка перетаскивает окно (клики по кнопкам работают)
+        ...(isElectron ? drag : {}),
       }}
     >
       <div
@@ -57,6 +84,8 @@ export const Header: React.FC<HeaderProps> = ({
           maxWidth: '1400px',
           margin: '0 auto',
           padding: '0 1.5rem',
+          // macOS: свободная зона под «светофорами» (traffic lights) слева
+          paddingLeft: isElectron ? 'calc(1.5rem + 78px)' : '1.5rem',
           height: '64px',
           display: 'flex',
           alignItems: 'center',
@@ -65,7 +94,8 @@ export const Header: React.FC<HeaderProps> = ({
       >
         {/* ── Logo ── */}
         <div
-          onClick={() => setActiveTab('home')}
+          onClick={handleLogoClick}
+          title={activeTab === 'home' ? 'Наверх (сброс поиска)' : 'На главную'}
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -129,12 +159,14 @@ export const Header: React.FC<HeaderProps> = ({
             padding: '4px',
             borderRadius: '14px',
             border: '1px solid rgba(255,255,255,0.06)',
+            ...(isElectron ? noDrag : {}),
           }}
         >
           {tabs.map((tab) => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => handleTabClick(tab.id)}
+              title={tab.id === 'home' && activeTab === 'home' ? 'Наверх (сброс поиска)' : undefined}
               style={{
                 padding: '0.38rem 0.9rem',
                 borderRadius: '10px',
@@ -167,7 +199,7 @@ export const Header: React.FC<HeaderProps> = ({
         </nav>
 
         {/* ── Search Bar ── */}
-        <div style={{ flex: 1, position: 'relative', maxWidth: '320px', marginLeft: 'auto' }}>
+        <div style={{ flex: 1, position: 'relative', maxWidth: '320px', marginLeft: 'auto', ...(isElectron ? noDrag : {}) }}>
           <Search
             size={15}
             style={{
@@ -223,7 +255,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* ── Right Actions ── */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0, ...(isElectron ? noDrag : {}) }}>
           {/* Magnet Button */}
           <button
             onClick={onOpenMagnetModal}
