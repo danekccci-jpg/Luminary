@@ -12,6 +12,8 @@ import { searchVkVideo, VkVideoItem } from '../services/vkVideoService';
 import { searchOnlineStreams } from '../services/onlineBalancers';
 import { TorrentSelector } from './TorrentSelector';
 import { EpisodeResumeDialog, findRelease } from './EpisodeResumeDialog';
+import { useFocusTrap, keyActivate } from '../utils/focus';
+import { registerBackHandler } from '../utils/tv';
 
 interface MovieDetailsModalProps {
   movie: Movie;
@@ -114,6 +116,11 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   const [searchNonce, setSearchNonce] = useState(0);
   /** Фильтр сезона для сериалов (0 = все). Смена сезона переищет RuTracker. */
   const [seasonFilter, setSeasonFilter] = useState(0);
+
+  // ── TV/клавиатура: focus trap внутри модалки + Back (пульт/Escape) закрывает ──
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(true, modalRef);
+  useEffect(() => registerBackHandler(() => { onClose(); return true; }), [onClose]);
   /** Модалка ещё смонтирована (guard для фоновых ответов поиска). */
   const isMountedRef = useRef(true);
   useEffect(() => {
@@ -124,6 +131,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   useEffect(() => {
     // TMDB-First: мгновенно показываем данные из карточки, фоном обогащаем деталями
     setDetails(movie);
+    setReleases([]); // новый фильм/повторный поиск — старые раздачи не мёржатся
     setIsScraping(true);
     setIsSearchingVk(true);
     setIsSearchingOnline(true);
@@ -135,7 +143,11 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     // Lampa-style dual-language search:
     // 1. Primary: Russian title + year → finds more RU-dubbed releases on Rutor/JacRed
     // 2. Fallback: original_title + year → if no RU results
-    const primaryQuery = movie.title || movie.original_title || '';
+    // Названия из Истории/Избранного содержат суффикс качества («… (4K)»,
+    // «… (SD)», «… [VK SD]») — такой запрос даёт 0 результатов на rutracker
+    // (nm-поиск по мусорному хвосту пуст) → «rutracker пропадает». Срезаем.
+    const cleanTitle = (movie.title || '').replace(/\s*(?:\([^)]*\)|\[[^\]]*\])+$/, '');
+    const primaryQuery = cleanTitle || movie.original_title || '';
     const fallbackQuery =
       movie.original_title && movie.original_title !== movie.title
         ? movie.original_title
@@ -151,6 +163,22 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
         .getMovieDetails(id, mediaType)
         .then((enriched) => {
           if (!cancelled && enriched) setDetails({ ...movie, ...enriched });
+          // Страховка для Истории/Избранного: в записях библиотеки нет
+          // original_title (подставлен = title) → EN-проход RuTracker не
+          // запускался, а 4К-рипы на rutracker часто названы ТОЛЬКО латиницей.
+          // Берём оригинал из TMDB и догоняем поиск — иначе «rutracker
+          // пропадает» при открытии фильмов из личной библиотеки.
+          const orig = enriched?.original_title;
+          if (!cancelled && orig && orig !== primaryQuery && !fallbackQuery) {
+            console.log(`[MovieDetailsModal] EN-догонка RuTracker: "${orig}"`);
+            torrServerService
+              .searchRutrackerLate(primaryQuery, year, orig)
+              .then(({ releases: late }) => {
+                if (cancelled || late.length === 0) return;
+                setReleases((prev) => mergeReleasesByHash(prev, late));
+              })
+              .catch(() => {});
+          }
         })
         .catch(() => { /* карточка уже на экране — не критично */ });
     }
@@ -198,7 +226,14 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
       .searchTorrents(primaryQuery, year, undefined, undefined, undefined, fallbackQuery)
       .then(({ releases, error }) => {
         if (cancelled) return;
-        setReleases(releases);
+        // МЁРЖ с уже пришедшим RuTracker (не перезапись!): кэш браузерной
+        // сессии отвечает мгновенно — раньше быстрый поиск (2-8с) стирал
+        // смёрженные rutracker-строки → «RuTracker раз через раз пропадает».
+        console.log(
+          `[MovieDetailsModal] быстрый поиск: ${releases.length} раздач` +
+            (releases.length === 0 ? ', error: ' + (error || '—') : '')
+        );
+        setReleases((prev) => mergeReleasesByHash(releases, prev));
         setSearchError(error || null);
         setIsScraping(false);
         if (error) {
@@ -208,7 +243,8 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
       .catch((err: any) => {
         if (cancelled) return;
         console.error('[MovieDetailsModal] Torrent search failed:', err);
-        setReleases([]);
+        // RuTracker мог успеть ответить — не стираем уже пришедшие раздачи
+        setReleases((prev) => prev);
         const msg = 'Не удалось выполнить поиск торрентов. Запустите TorrServer или проверьте соединение.';
         setSearchError(msg);
         setIsScraping(false);
@@ -348,6 +384,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
 
   return (
     <div
+      ref={modalRef}
       style={{
         position: 'fixed',
         inset: 0,
@@ -809,7 +846,10 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                 if (s > 0 && movie.media_type === 'tv' && window.electronAPI?.rutrackerSearch) {
                   // Сезон выбран — ищем RuTracker-раздачи именно этого сезона
                   // (темы вида «Название [S01]»); результат домёржится в список.
-                  const baseQ = movie.title || movie.original_title || '';
+                  const baseQ = (movie.title || movie.original_title || '').replace(
+                    /\s*(?:\([^)]*\)|\[[^\]]*\])+$/,
+                    ''
+                  );
                   const q = `${baseQ} S${String(s).padStart(2, '0')}`;
                   torrServerService.searchRutrackerLate(q, year).then(({ releases: late }) => {
                     if (!isMountedRef.current || late.length === 0) return;
@@ -835,6 +875,10 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
             >
               <div
                 onClick={() => setIsOnlineOpen((o) => !o)}
+                onKeyDown={(e) => keyActivate(e, () => setIsOnlineOpen((o) => !o))}
+                tabIndex={0}
+                role="button"
+                aria-expanded={isOnlineOpen}
                 title={isOnlineOpen ? 'Свернуть онлайн-потоки' : 'Развернуть онлайн-потоки'}
                 style={{
                   padding: '1.2rem 1.4rem 1rem',

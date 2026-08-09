@@ -1,11 +1,13 @@
 import React, { useState, useMemo } from 'react';
 import {
-  Play, Download, Users, HardDrive, Search,
-  AlertTriangle, Zap, Volume2, Loader2,
+  Play, Download, Search,
+  Volume2, Loader2,
 } from 'lucide-react';
 import { TorrentRelease, DubbingType } from '../types';
 import { parseTorrentMeta, russianPriority } from '../utils/torrentMeta';
 import { sanitizeTrackerName } from '../utils/trackerName';
+import { keyActivate } from '../utils/focus';
+import { TorrentCard } from './TorrentCard';
 
 interface TorrentSelectorProps {
   releases: TorrentRelease[];
@@ -413,7 +415,7 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
         {isLoading ? (
           <div style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
             {[1, 2, 3].map(n => (
-              <div key={n} className="skeleton" style={{ height: '80px', borderRadius: '14px' }} />
+              <div key={n} className="torrent-card-skeleton" />
             ))}
           </div>
         ) : sorted.length === 0 ? (
@@ -468,220 +470,14 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            {sorted.map((release, idx) => {
-              const qs = getQualityStyle(release.quality);
-              const ds = getDubbingStyle(release.dubbing);
-
-              return (
-                <div
-                  key={release.id}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '1rem',
-                    padding: '0.9rem 1rem',
-                    borderRadius: '16px',
-                    background: 'rgba(255,255,255,0.025)',
-                    border: '1px solid rgba(255,255,255,0.05)',
-                    transition: 'all 0.2s ease',
-                    animation: `fadeUp 0.3s ease ${idx * 0.04}s both`,
-                  }}
-                  onMouseEnter={e => {
-                    (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.05)';
-                    (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(0,242,254,0.2)';
-                  }}
-                  onMouseLeave={e => {
-                    (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.025)';
-                    (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(255,255,255,0.05)';
-                  }}
-                >
-                  {/* Health Ring */}
-                  <HealthRing score={release.stabilityScore} label={release.stabilityLabel} />
-
-                  {/* Main Content */}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    {/* Top Badges Row */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.45rem', flexWrap: 'wrap' }}>
-                      {/* Quality */}
-                      <span
-                        style={{
-                          padding: '2px 8px',
-                          borderRadius: '6px',
-                          background: qs.bg,
-                          color: qs.color,
-                          border: `1px solid ${qs.border}`,
-                          fontSize: '0.68rem',
-                          fontWeight: 900,
-                          letterSpacing: '0.06em',
-                          boxShadow: qs.glow ? `0 0 8px ${qs.glow}` : 'none',
-                          textShadow: qs.glow ? `0 0 6px ${qs.color}` : 'none',
-                        }}
-                      >
-                        {release.quality}
-                      </span>
-
-                      {/* Dubbing */}
-                      <span
-                        style={{
-                          padding: '2px 8px',
-                          borderRadius: '999px',
-                          background: ds.bg,
-                          color: ds.color,
-                          border: `1px solid ${ds.border}`,
-                          fontSize: '0.67rem',
-                          fontWeight: 700,
-                          boxShadow: `0 0 8px ${ds.glow}`,
-                        }}
-                      >
-                        {release.dubbing}
-                      </span>
-
-                      {/* Tags (HDR, REMUX etc) */}
-                      {release.tags.slice(0, 2).map(tag => (
-                        <span key={tag} className="tag-chip">{tag}</span>
-                      ))}
-
-                      {/* Codec */}
-                      <span className={`tag-chip ${release.videoCodec === 'HEVC' ? 'tag-chip-hevc' : release.videoCodec === 'AV1' ? 'tag-chip-av1' : ''}`}>
-                        {release.videoCodec}
-                      </span>
-
-                      {/* HEVC Warning */}
-                      {release.videoCodec === 'HEVC' && (
-                        <span title="Требует поддержки HEVC декодирования" style={{ display: 'inline-flex' }}>
-                          <AlertTriangle size={12} style={{ color: '#FFB800', opacity: 0.7 }} />
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Release Title */}
-                    <div
-                      style={{
-                        fontSize: '0.82rem',
-                        fontWeight: 600,
-                        color: 'var(--text-primary)',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        marginBottom: '0.3rem',
-                      }}
-                    >
-                      {release.title}
-                    </div>
-
-                    {/* Meta Row */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                        <HardDrive size={11} style={{ color: 'rgba(138,43,226,0.7)' }} />
-                        {release.size}
-                      </span>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', color: 'rgba(16,245,172,0.8)' }}>
-                        <Users size={11} />
-                        {release.seeders} seed
-                      </span>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                        <Zap size={11} style={{ color: 'rgba(255,184,0,0.6)' }} />
-                        ~{release.requiredMbps} Mbps
-                      </span>
-                      <span
-                        title={release.source}
-                        style={{ color: 'rgba(240,242,248,0.25)', fontSize: '0.67rem' }}
-                      >
-                        {sanitizeTrackerName(release.source)}
-                      </span>
-                    </div>
-
-                    {/* ── Метаданные из названия: озвучки, серии/сезоны, аудио ── */}
-                    {(metaOf(release).dubbings.length > 0 ||
-                      metaOf(release).seasons ||
-                      metaOf(release).episodes ||
-                      metaOf(release).audioTracks.length > 0) && (
-                      <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.45rem', alignItems: 'center' }}>
-                        {metaOf(release).dubbings.slice(0, 4).map((d) => (
-                          <span
-                            key={d}
-                            style={{
-                              padding: '1px 7px',
-                              borderRadius: '999px',
-                              background: 'rgba(138,43,226,0.12)',
-                              border: '1px solid rgba(138,43,226,0.35)',
-                              color: '#B57BFF',
-                              fontSize: '0.62rem',
-                              fontWeight: 700,
-                            }}
-                          >
-                            {d}
-                          </span>
-                        ))}
-                        {metaOf(release).seasons != null && (
-                          <span
-                            style={{
-                              padding: '1px 7px',
-                              borderRadius: '999px',
-                              background: 'rgba(16,245,172,0.1)',
-                              border: '1px solid rgba(16,245,172,0.3)',
-                              color: '#10F5AC',
-                              fontSize: '0.62rem',
-                              fontWeight: 700,
-                            }}
-                          >
-                            S{metaOf(release).seasons}
-                            {metaOf(release).episodes != null ? `E${metaOf(release).episodes}` : ''}
-                          </span>
-                        )}
-                        {metaOf(release).episodes != null && metaOf(release).seasons == null && (
-                          <span
-                            style={{
-                              padding: '1px 7px',
-                              borderRadius: '999px',
-                              background: 'rgba(16,245,172,0.1)',
-                              border: '1px solid rgba(16,245,172,0.3)',
-                              color: '#10F5AC',
-                              fontSize: '0.62rem',
-                              fontWeight: 700,
-                            }}
-                          >
-                            {metaOf(release).episodes} серий
-                          </span>
-                        )}
-                        {metaOf(release).audioTracks.slice(0, 3).map((a) => (
-                          <span
-                            key={a}
-                            title="Аудиодорожка"
-                            style={{
-                              padding: '1px 6px',
-                              borderRadius: '6px',
-                              background: 'rgba(255,184,0,0.1)',
-                              border: '1px solid rgba(255,184,0,0.3)',
-                              color: '#FFB800',
-                              fontSize: '0.6rem',
-                              fontWeight: 700,
-                            }}
-                          >
-                            {a}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Stream Action */}
-                  <button
-                    onClick={() => onPlayRelease(release)}
-                    className="btn-primary"
-                    style={{
-                      padding: '0.55rem 1.1rem',
-                      fontSize: '0.82rem',
-                      flexShrink: 0,
-                      borderRadius: '12px',
-                    }}
-                  >
-                    <Play size={13} fill="white" />
-                    <span>Смотреть</span>
-                  </button>
-                </div>
-              );
-            })}
+            {sorted.map((release, idx) => (
+              <TorrentCard
+                key={release.id}
+                release={release}
+                index={idx}
+                onPlay={() => onPlayRelease(release)}
+              />
+            ))}
           </div>
         )}
       </div>

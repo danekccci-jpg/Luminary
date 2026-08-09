@@ -14,6 +14,7 @@ import { probeAudioTracks, audioTrackLabel as mkvTrackLabel, StreamAudioTrack } 
 // автоматический транскодинг HEVC/H.265, AC3/DTS/TrueHD, 10-bit MKV → MSE.
 // (Chromium не умеет эти кодеки нативно, но умеет их декодировать через MSE.)
 import Hls from 'hls.js';
+import { registerBackHandler } from '../utils/tv';
 
 interface PlayerModalProps {
   magnet: string;
@@ -42,6 +43,8 @@ interface PlayerModalProps {
   /** Возобновить просмотр с этого таймкода (из истории). */
   startPosition?: number;
   onClose: () => void;
+  /** TV-режим (пульт): ArrowUp/Down переходят в панели контролов вместо громкости. */
+  tvMode?: boolean;
 }
 
 /** Максимум попыток проверки HTTP 200 потока (1.5s интервал → ~45s). */
@@ -295,7 +298,7 @@ const NeonRingSpinner: React.FC<{ percent: number }> = ({ percent: raw }) => {
 };
 
 export const PlayerModal: React.FC<PlayerModalProps> = ({
-  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, directUrl, directQuality, directReferer, torrentFile, nextEpisode, onPlayNext, onProgressSave, startPosition, onClose,
+  magnet, title, poster, audioCodec, videoCodec, transcodeAudioToAac = true, directUrl, directQuality, directReferer, torrentFile, nextEpisode, onPlayNext, onProgressSave, startPosition, onClose, tvMode = false,
 }) => {
   const videoRef     = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -563,27 +566,31 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamReady, isBuffering, streamUrl, hash]);
 
+  // TV: фокус на корне плеера — пульт сразу управляет воспроизведением
+  useEffect(() => {
+    if (tvMode) containerRef.current?.focus({ preventScroll: true });
+  }, [tvMode]);
+
   // Клавиатурное управление
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Escape работает всегда (даже при буферизации/ошибке) и возвращает
-      // в MovieDetailsModal (выбор торрента/серии), а не на главный экран.
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        handleClose();
-        return;
-      }
+      // Escape/Back теперь обрабатывает общий Back-стек (см. registerBackHandler)
       if (isBuffering || errorMsg || codecError) return;
       const target = e.target as HTMLElement;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+      // Фокус на нативных контролах (кнопка/слайдер/seek-бар) — не перехватываем:
+      // Space/Enter жмут кнопку, стрелки двигают фокус (spatial navigation WebView).
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON' || target.tagName === 'A')) return;
+      if (target && target.closest('[data-seekbar]')) return;
       switch (e.key) {
         case 'ArrowUp':
           e.preventDefault();
+          if (tvMode) { focusControlsPanel('top'); break; }
           setVolumeLevel(Math.min(1, volume + 0.05));
           showVolumeHud(Math.round(Math.min(1, volume + 0.05) * 100));
           break;
         case 'ArrowDown':
           e.preventDefault();
+          if (tvMode) { focusControlsPanel('bottom'); break; }
           setVolumeLevel(Math.max(0, volume - 0.05));
           showVolumeHud(Math.round(Math.max(0, volume - 0.05) * 100));
           break;
@@ -594,6 +601,11 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         case 'ArrowRight':
           e.preventDefault();
           skipSeconds(10);
+          break;
+        case 'Enter':
+          // OK на пульте = play/pause (как клик по видео)
+          e.preventDefault();
+          togglePlay();
           break;
         case ' ':
           e.preventDefault();
@@ -616,7 +628,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isBuffering, errorMsg, codecError, volume, isPlaying, duration]);
+  }, [isBuffering, errorMsg, codecError, volume, isPlaying, duration, tvMode]);
 
   // Picture-in-Picture
   const togglePip = async () => {
@@ -1306,6 +1318,19 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     onClose();
   };
 
+  // ── Back (пульт/Escape/Backspace): закрывает плеер (см. handleClose).
+  // В TV-режиме Back из панели контролов сначала возвращает фокус на видео.
+  useEffect(() => registerBackHandler(() => {
+    const root = containerRef.current;
+    const active = document.activeElement as HTMLElement | null;
+    if (tvMode && root && active && active !== root && root.contains(active)) {
+      root.focus();
+      return true;
+    }
+    handleClose();
+    return true;
+  }), [tvMode, handleClose]);
+
   /** Видео завершилось — end-screen (авто-следующее для сериалов в UI каталога). */
   const handleEnded = () => {
     if (onProgressSave && videoRef.current) {
@@ -1516,7 +1541,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     </button>
   );
 
-  const handleMouseMove = () => {
+  const handleControlsPoke = () => {
     setShowControls(true);
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     controlsTimerRef.current = setTimeout(() => {
@@ -1525,6 +1550,20 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         setShowQuality(false); // меню качества скрывается вместе с контролами
       }
     }, 3500);
+  };
+
+  /** TV: ArrowUp/Down с видео → фокус в верхнюю/нижнюю панель контролов. */
+  const focusControlsPanel = (which: 'top' | 'bottom') => {
+    handleControlsPoke();
+    requestAnimationFrame(() => {
+      const root = containerRef.current;
+      if (!root) return;
+      const panel = which === 'top'
+        ? root.querySelector<HTMLElement>('[data-player-topbar]')
+        : root.querySelector<HTMLElement>('[data-player-controls]');
+      const el = panel?.querySelector<HTMLElement>('button, [tabindex]:not([tabindex="-1"])');
+      el?.focus();
+    });
   };
 
   const toggleMute = () => {
@@ -1630,7 +1669,11 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   return (
     <div
       ref={containerRef}
-      onMouseMove={handleMouseMove}
+      tabIndex={0}
+      data-player-root
+      onMouseMove={handleControlsPoke}
+      onPointerDown={handleControlsPoke}
+      onKeyDown={handleControlsPoke}
       style={{
         position: 'fixed',
         inset: 0,
@@ -1644,6 +1687,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     >
       {/* ── Top Bar: название фильма + закрыть (как у Netflix, скрывается вместе с контролами) ── */}
       <div
+        data-player-topbar
         style={{
           position: 'absolute',
           top: 0,
@@ -2276,9 +2320,30 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
               {/* Progress / Seek Bar */}
               <div
                 ref={progressRef}
+                data-seekbar
+                tabIndex={0}
+                role="slider"
+                aria-label="Прогресс воспроизведения"
+                aria-valuemin={0}
+                aria-valuemax={Math.floor(duration)}
+                aria-valuenow={Math.floor(currentTime)}
                 onClick={handleSeek}
                 onMouseMove={handleScrubHover}
                 onMouseLeave={() => { setScrubHover(null); setScrubPreviewImg(null); if (scrubPreviewTimer.current) clearTimeout(scrubPreviewTimer.current); }}
+                onKeyDown={(e) => {
+                  // Клавиатура/пульт на seek-баре: Left/Right — перемотка, Up/Down — громкость
+                  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                    e.preventDefault(); e.stopPropagation();
+                    skipSeconds(e.key === 'ArrowLeft' ? -10 : 10);
+                  } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                    e.preventDefault(); e.stopPropagation();
+                    setVolumeLevel(e.key === 'ArrowUp' ? Math.min(1, volume + 0.05) : Math.max(0, volume - 0.05));
+                  } else if (e.key === 'Home' || e.key === 'End') {
+                    e.preventDefault(); e.stopPropagation();
+                    const v = videoRef.current;
+                    if (v) v.currentTime = e.key === 'Home' ? 0 : (v.duration || 0);
+                  }
+                }}
                 style={{
                   position: 'relative',
                   height: '20px',

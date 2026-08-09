@@ -1,9 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useEffect, useState } from 'react';
 import { X, Play, SkipForward, Tv, CheckCircle2, Clock } from 'lucide-react';
 import { Movie, TorrentRelease } from '../types';
 import { LibraryItem, library, formatClock } from '../services/library';
 import { parseTorrentMeta } from '../utils/torrentMeta';
 import { toastBus } from '../services/toast';
+import { useFocusTrap } from '../utils/focus';
+import { registerBackHandler } from '../utils/tv';
 
 interface EpisodeResumeDialogProps {
   movie: Movie;
@@ -46,6 +48,11 @@ export const EpisodeResumeDialog: React.FC<EpisodeResumeDialogProps> = ({
   onClose,
 }) => {
   const [view, setView] = useState<'dialog' | 'picker'>(historyItem ? 'dialog' : 'picker');
+
+  // ── TV/клавиатура: focus trap + Back (пульт/Escape) закрывает диалог ──
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(true, dialogRef);
+  useEffect(() => registerBackHandler(() => { onClose(); return true; }), [onClose]);
 
   const season = historyItem?.season;
   const episode = historyItem?.episode;
@@ -115,6 +122,7 @@ export const EpisodeResumeDialog: React.FC<EpisodeResumeDialogProps> = ({
 
   return (
     <div
+      ref={dialogRef}
       style={{
         position: 'fixed',
         inset: 0,

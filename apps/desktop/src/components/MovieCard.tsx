@@ -3,6 +3,7 @@ import { Star, Play, Film } from 'lucide-react';
 import { Movie } from '../types';
 import { tmdbService } from '../services/tmdb';
 import { extractYear } from '../utils/year';
+import { keyActivate } from '../utils/focus';
 
 interface MovieCardProps {
   movie: Movie;
@@ -12,6 +13,10 @@ interface MovieCardProps {
 
 export const MovieCard: React.FC<MovieCardProps> = React.memo(({ movie, onClick, index = 0 }) => {
   const [hovered, setHovered] = useState(false);
+  // Фокус (клавиатура / пульт D-pad) — те же визуалы, что и hover: карточка
+  // подсвечивается, когда на неё навели курсором ИЛИ навели фокус пультом.
+  const [focused, setFocused] = useState(false);
+  const active = hovered || focused;
   const displayTitle = movie.title || movie.name || 'Без названия';
 
   // TMDB-First: прямой постер с CDN (image.tmdb.org — быстрый, CORS разрешён),
@@ -46,22 +51,29 @@ export const MovieCard: React.FC<MovieCardProps> = React.memo(({ movie, onClick,
 
   return (
     <div
+      className="movie-card"
       onClick={onClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      onKeyDown={(e) => keyActivate(e, onClick)}
+      tabIndex={0}
+      role="button"
+      aria-label={displayTitle}
       style={{
         position: 'relative',
         borderRadius: '20px',
         overflow: 'hidden',
         cursor: 'pointer',
         background: '#121318',
-        border: hovered
+        border: active
           ? '1px solid rgba(0,242,254,0.4)'
           : '1px solid rgba(255,255,255,0.06)',
-        boxShadow: hovered
+        boxShadow: active
           ? '0 0 0 1px rgba(0,242,254,0.15), 0 12px 40px rgba(0,0,0,0.7), 0 4px 16px rgba(0,242,254,0.1)'
           : '0 4px 16px rgba(0,0,0,0.4)',
-        transform: hovered ? 'translateY(-8px) scale(1.02)' : 'translateY(0) scale(1)',
+        transform: active ? 'translateY(-8px) scale(1.02)' : 'translateY(0) scale(1)',
         transition: 'all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1)',
         willChange: 'transform',
         animation: `fadeUp 0.4s ease ${Math.min(index, 24) * 0.03}s both`,
@@ -82,7 +94,7 @@ export const MovieCard: React.FC<MovieCardProps> = React.memo(({ movie, onClick,
               justifyContent: 'center',
               gap: '0.6rem',
               padding: '1rem',
-              transform: hovered ? 'scale(1.08)' : 'scale(1)',
+              transform: active ? 'scale(1.08)' : 'scale(1)',
               transition: 'transform 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
             }}
           >
@@ -128,7 +140,7 @@ export const MovieCard: React.FC<MovieCardProps> = React.memo(({ movie, onClick,
               width: '100%',
               height: '100%',
               objectFit: 'cover',
-              transform: hovered ? 'scale(1.08)' : 'scale(1)',
+              transform: active ? 'scale(1.08)' : 'scale(1)',
               transition: 'transform 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
               background: 'linear-gradient(135deg, #121318, #1a1030)',
             }}
@@ -141,7 +153,7 @@ export const MovieCard: React.FC<MovieCardProps> = React.memo(({ movie, onClick,
             position: 'absolute',
             inset: 0,
             background: 'linear-gradient(to top, rgba(10,11,14,0.95) 0%, rgba(10,11,14,0.3) 40%, transparent 100%)',
-            opacity: hovered ? 1 : 0,
+            opacity: active ? 1 : 0,
             transition: 'opacity 0.3s ease',
             display: 'flex',
             alignItems: 'center',
@@ -158,7 +170,7 @@ export const MovieCard: React.FC<MovieCardProps> = React.memo(({ movie, onClick,
               alignItems: 'center',
               justifyContent: 'center',
               boxShadow: '0 0 24px rgba(0,198,251,0.5)',
-              transform: hovered ? 'scale(1)' : 'scale(0.7)',
+              transform: active ? 'scale(1)' : 'scale(0.7)',
               transition: 'transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
             }}
           >

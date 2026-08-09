@@ -12,6 +12,7 @@ import {
   History,
 } from 'lucide-react';
 import { TorrServerStatusInfo } from '../types';
+import { keyActivate } from '../utils/focus';
 
 interface HeaderProps {
   activeTab: string;
@@ -95,6 +96,10 @@ export const Header: React.FC<HeaderProps> = ({
         {/* ── Logo ── */}
         <div
           onClick={handleLogoClick}
+          onKeyDown={(e) => keyActivate(e, handleLogoClick)}
+          tabIndex={0}
+          role="button"
+          aria-label={activeTab === 'home' ? 'Наверх (сброс поиска)' : 'На главную'}
           title={activeTab === 'home' ? 'Наверх (сброс поиска)' : 'На главную'}
           style={{
             display: 'flex',

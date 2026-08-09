@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { X, Key, Power, Cpu, Database, RefreshCw, ScrollText, AlertTriangle, ExternalLink } from 'lucide-react';
 import logoUrl from '../assets/logo.png';
 import { TorrServerStatusInfo, UserSettings } from '../types';
 import { torrServerService } from '../services/torrserver';
 import { JacredServerStatus, startJacredServer, stopJacredServer, openJacredUi, getJacredAuthStatus, JacredAuthStatus, jacredLoginTracker } from '../services/jacredServer';
 import { getRutrackerStatus, openRutrackerLogin, hideRutrackerLogin, onRutrackerStatusChanged, RutrackerStatus } from '../services/rutrackerService';
+import { useFocusTrap } from '../utils/focus';
+import { registerBackHandler, getTvModeSetting } from '../utils/tv';
 
 interface SettingsModalProps {
   settings: UserSettings;
@@ -44,6 +46,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [rtMsg, setRtMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [showLogs,      setShowLogs]      = useState(false);
   const [logs,          setLogs]          = useState<string[]>([]);
+  /** TV-режим (пульт) — тумблер для теста на десктопе; на Android TV включается сам. */
+  const [tvMode,        setTvModeLocal]   = useState(getTvModeSetting());
+
+  // ── TV/клавиатура: focus trap + Back (пульт/Escape) закрывает ──
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(true, modalRef);
+  useEffect(() => registerBackHandler(() => { onClose(); return true; }), [onClose]);
 
   // Загрузка логов TorrServer (последние 100 строк из torrserver.log)
   const refreshLogs = async () => {
@@ -144,6 +153,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       jackettApiKey,
       jacredUrl,
       transcodeAudioToAac: transcodeAudio,
+      tvMode,
     });
     torrServerService.configureServer(ramCache);
     onClose();
@@ -157,6 +167,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div
+      ref={modalRef}
       style={{
         position: 'fixed',
         inset: 0,
@@ -706,6 +717,55 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     position: 'absolute',
                     top: '3px',
                     left: transcodeAudio ? '27px' : '3px',
+                    width: '22px',
+                    height: '22px',
+                    borderRadius: '50%',
+                    background: '#fff',
+                    transition: 'left 0.25s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                  }}
+                />
+              </button>
+            </div>
+          </div>
+
+          {/* TV-режим (пульт) */}
+          <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: '18px', padding: '1.2rem' }}>
+            {sectionTitle('Телевизор', 'rgba(138,43,226,0.7)')}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                  TV-пульт (D-pad)
+                </div>
+                <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '3px', lineHeight: 1.4, maxWidth: '320px' }}>
+                  Навигация пультом: фокус-кольца, кнопка Back, автофокус карточек.
+                  На Android TV включается автоматически — здесь для теста на компьютере.
+                </p>
+              </div>
+              <button
+                onClick={() => setTvModeLocal(!tvMode)}
+                aria-pressed={tvMode}
+                title="TV-пульт (D-pad)"
+                style={{
+                  width: '52px',
+                  height: '28px',
+                  borderRadius: '14px',
+                  border: 'none',
+                  background: tvMode
+                    ? 'linear-gradient(135deg, rgba(0,198,251,0.6), rgba(138,43,226,0.5))'
+                    : 'rgba(255,255,255,0.1)',
+                  cursor: 'pointer',
+                  position: 'relative',
+                  transition: 'all 0.25s ease',
+                  boxShadow: tvMode ? '0 0 12px rgba(0,198,251,0.3)' : 'none',
+                  flexShrink: 0,
+                }}
+              >
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '3px',
+                    left: tvMode ? '27px' : '3px',
                     width: '22px',
                     height: '22px',
                     borderRadius: '50%',

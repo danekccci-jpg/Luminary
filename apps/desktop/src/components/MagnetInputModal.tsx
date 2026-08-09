@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { X, Play } from 'lucide-react';
+import { useFocusTrap } from '../utils/focus';
+import { registerBackHandler } from '../utils/tv';
 
 interface MagnetInputModalProps {
   onClose: () => void;
@@ -13,6 +15,11 @@ export const MagnetInputModal: React.FC<MagnetInputModalProps> = ({
   const [magnet, setMagnet] = useState('');
   const [title,  setTitle]  = useState('');
 
+  // ── TV/клавиатура: focus trap + Back (пульт/Escape) закрывает ──
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(true, modalRef);
+  useEffect(() => registerBackHandler(() => { onClose(); return true; }), [onClose]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!magnet.trim()) return;
@@ -21,6 +28,7 @@ export const MagnetInputModal: React.FC<MagnetInputModalProps> = ({
 
   return (
     <div
+      ref={modalRef}
       style={{
         position: 'fixed',
         inset: 0,

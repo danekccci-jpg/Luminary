@@ -217,13 +217,28 @@ export class RutrackerSessionManager {
     // Очередь: окно одно — параллельные навигации (быстрое переключение
     // фильмов) ломают друг друга («раз через раз»). Поиски идут строго
     // последовательно; кэш делает повторные открытия мгновенными.
-    const run = () => this.searchImpl(query, year, fallbackQuery, cacheKey);
+    const run = (skipCache: boolean) => this.searchImpl(query, year, fallbackQuery, cacheKey, skipCache);
     let result: TorrentRelease[] = [];
-    const task = this.searchChain.then(async () => {
-      result = await run();
-    });
-    this.searchChain = task.catch(() => {});
-    await task;
+    const enqueue = (task: Promise<void>) => {
+      const chained = this.searchChain.then(() => task);
+      this.searchChain = chained.catch(() => {});
+      return chained;
+    };
+    await enqueue((async () => { result = await run(false); })());
+
+    // ГАРАНТИЯ «rutracker в любом сценарии»: пустой результат РЕАЛЬНОГО
+    // прохода (кэш-хит вернулся бы выше) — почти всегда CF-челлендж с нуля
+    // не уложился в бюджет (клиренс протух за ~30 мин простоя). Повторный
+    // проход идёт с уже прогретым клиренсом и обычно занимает секунды.
+    // Один повтор; свежий кэш пустых (3 мин) защищает от повторов, когда
+    // раздач реально нет.
+    if (result.length === 0) {
+      console.log('[RutrackerSession] первый проход пуст — повторный заход на сайт');
+      await enqueue((async () => { result = await run(true); })());
+      if (result.length > 0) {
+        console.log(`[RutrackerSession] повторный проход дал ${result.length} раздач`);
+      }
+    }
     return result;
   }
 
@@ -232,24 +247,35 @@ export class RutrackerSessionManager {
     query: string,
     year?: string,
     fallbackQuery?: string,
-    cacheKey: string = ''
+    cacheKey: string = '',
+    skipCache: boolean = false
   ): Promise<TorrentRelease[]> {
+    if (!skipCache) {
+      const hit = this.searchCache.get(cacheKey);
+      if (hit) {
+        const ttl = hit.releases.length > 0 ? SEARCH_CACHE_TTL_MS : EMPTY_CACHE_TTL_MS;
+        if (Date.now() - hit.at < ttl) return hit.releases;
+      }
+    }
     const win = await this.ensureWindow(false);
     const searchStr = year ? `${query} ${year}` : query;
     const q = encodeURIComponent(searchStr);
     const tStart = Date.now();
     /** Общий дедлайн поиска: темы/скрипты не должны держать выдачу минутами. */
-    const DEADLINE_MS = 45000;
+    const DEADLINE_MS = 60000;
     try {
       // 1) Страница поиска (навигация + ожидание прохождения челленджа).
       //    Челлендж Cloudflare флакает — до 2 повторных попыток навигации.
+      //    Первой попытке даём 25с: челлендж С НУЛЯ (клиренс протух за время
+      //    простоя) занимает 10-20с, таймаут 12с его обрезал → «rutracker
+      //    раз через раз пропадает».
       let okSearch = false;
       for (let attempt = 0; attempt < 3 && !okSearch; attempt++) {
         if (attempt > 0) {
           console.warn(`[RutrackerSession] попытка ${attempt + 1}: повторная навигация на поиск`);
           await new Promise((r) => setTimeout(r, 2000));
         }
-        okSearch = await this.navigate(win, `${SITE}/forum/tracker.php?nm=${q}`, 12000);
+        okSearch = await this.navigate(win, `${SITE}/forum/tracker.php?nm=${q}`, attempt === 0 ? 25000 : 12000);
       }
       console.log(`[RutrackerSession] t+${((Date.now() - tStart) / 1000).toFixed(1)}с: поиск ок=${okSearch}`);
       if (!okSearch) {

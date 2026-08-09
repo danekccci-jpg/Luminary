@@ -1,6 +1,5 @@
 import { TorrServerStatusInfo, TorrentRelease, TorrServerStats } from '../types';
 import { searchJacRed, mergeReleasesByHash, getJacredStatus } from './scrapers/jacred';
-import { getRutrackerStatus } from './rutrackerService';
 
 export class TorrServerService {
   public async getStatus(): Promise<TorrServerStatusInfo> {
@@ -181,33 +180,16 @@ export class TorrServerService {
     const rutrackerSearch = window.electronAPI?.rutrackerSearch;
     console.log('[TorrServerService] RuTracker late: старт query="' + query + '" (bridge=' + !!rutrackerSearch + ')');
     if (!rutrackerSearch) return { releases: [], applicable: false };
-    // Без bb_session поиск пропускаем сразу (Cloudflare-челленджи не гоняем)
-    const rtStatus = await getRutrackerStatus().catch(() => null);
-    console.log('[TorrServerService] RuTracker late: status=' + (rtStatus?.loggedIn ? 'ok' : 'skip'));
-    if (!rtStatus?.loggedIn) return { releases: [], applicable: false };
 
-    // Без жёсткого обрезания race'ом: main сам ограничен дедлайном (45с),
-    // а результат МЕДЛЕННОГО (но успешного) прохода НЕ теряется — раньше
-    // таймаут 20с выбрасывал найденные раздачи, ретрай молотил Cloudflare
-    // заново → «rutracker то есть, то нет» (проверено live).
-    const attempt = (): Promise<TorrentRelease[]> =>
-      rutrackerSearch(query, year, fallbackQuery)
-        .then((res) => (res.success && Array.isArray(res.releases) ? res.releases : []))
-        .catch((err: any) => {
-          console.warn('[TorrServerService] RuTracker search failed:', err?.message || err);
-          return [];
-        });
-
-    // Попытка 1: основной проход. Если завершился БЫСТРО и пусто
-    // (челлендж-флак первого прохода) — второй проход. Медленный пустой
-    // (реально нет раздач) — не дублируем: кэш пустых в main (3 мин)
-    // защищает от повторных 40-секундных ожиданий.
-    const t0 = Date.now();
-    let releases = await attempt();
-    if (releases.length === 0 && Date.now() - t0 < 25000) {
-      console.log('[TorrServerService] RuTracker: первый проход пуст — повторная попытка');
-      releases = await attempt();
-    }
+    // Ретраи и гарантии — ВНУТРИ main: rutrackerSession.search сам повторяет
+    // пустой реальный проход (CF-челлендж с нуля, повтор с тёплым клиренсом
+    // быстрый). Renderer просто получает финальный результат.
+    const releases = await rutrackerSearch(query, year, fallbackQuery)
+      .then((res) => (res.success && Array.isArray(res.releases) ? res.releases : []))
+      .catch((err: any) => {
+        console.warn('[TorrServerService] RuTracker search failed:', err?.message || err);
+        return [];
+      });
     return { releases, applicable: true };
   }
 

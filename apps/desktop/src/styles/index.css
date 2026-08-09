@@ -641,3 +641,148 @@ body {
   color: rgba(0,242,254,0.8);
   border-color: rgba(0,242,254,0.2);
 }
+
+/* ── TV / Клавиатурная навигация ──────────────────────
+   :focus-visible срабатывает ТОЛЬКО для клавиатуры/D-pad —
+   мышиный клик его не вызывает, десктоп-поведение не меняется. */
+:focus-visible {
+  outline: 3px solid var(--cyan);
+  outline-offset: 3px;
+  border-radius: inherit;
+}
+
+/* На TV (пульт) кольцо толще + свечение — видно с дивана */
+.tv-mode :focus-visible {
+  outline: 4px solid var(--cyan);
+  outline-offset: 4px;
+  box-shadow: 0 0 18px rgba(0, 242, 254, 0.45);
+}
+
+/* Пульт — курсора нет */
+.tv-mode,
+.tv-mode * {
+  cursor: none !important;
+}
+
+/* История просмотра: подсветка строки при фокусе (пульт/клавиатура) */
+.history-row {
+  transition: all 0.2s ease;
+}
+
+.history-row:focus-visible {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(0, 242, 254, 0.2);
+}
+
+/* ── TorrentCard: карточка торрент-раздачи (дизайн по образцу UI) ──────
+   rounded-xl + полупрозрачный тёмный фон bg-neutral-900/80, hover-подсветка,
+   pills тегов bg-neutral-800, размер в светлой плашке bg-neutral-200. */
+.torrent-card {
+  border-radius: 12px;                 /* rounded-xl */
+  background: rgba(23, 23, 23, 0.8);   /* bg-neutral-900/80 */
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 0.8rem 0.95rem;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.torrent-card:hover {
+  background: rgba(38, 38, 38, 0.85);  /* bg-neutral-800 hover */
+  border-color: rgba(0, 242, 254, 0.25);
+}
+.torrent-card-focused {
+  background: rgba(38, 38, 38, 0.9);
+  border-color: rgba(0, 242, 254, 0.35);
+}
+
+/* Оригинальное полное имя раздачи — максимум 2 строки */
+.torrent-card-title {
+  font-size: 0.83rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.35;
+  margin-bottom: 0.5rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Ряд тегов-пилюль */
+.torrent-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.65rem;
+}
+.torrent-card-pill {
+  padding: 2px 8px;                    /* px-2 py-0.5 */
+  border-radius: 8px;                  /* rounded-md */
+  background: #262626;                 /* bg-neutral-800 */
+  color: rgba(229, 229, 229, 0.9);
+  font-size: 0.72rem;                  /* text-xs */
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+/* Футер: слева дата + трекер, справа метрики + размер-плашка */
+.torrent-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.torrent-card-meta-left {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.torrent-card-tracker {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  color: rgba(240, 242, 248, 0.35);
+}
+.torrent-card-meta-right {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.torrent-card-size {
+  padding: 2px 9px;                    /* светлая плашка размера */
+  border-radius: 6px;
+  background: #E5E5E5;                 /* bg-neutral-200 */
+  color: #000;                         /* text-black */
+  font-weight: 800;                    /* font-bold */
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+/* Скелетон-заглушка под карточку (во время поиска) */
+.torrent-card-skeleton {
+  border-radius: 12px;
+  height: 112px;
+  background: rgba(23, 23, 23, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+  position: relative;
+}
+.torrent-card-skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.05) 50%, transparent 70%);
+  animation: skeleton-shimmer 1.4s infinite;
+}
+@keyframes skeleton-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}

@@ -156,6 +156,8 @@ export interface UserSettings {
   autoStartTorrServer: boolean;
   autoCleanCacheOnClose: boolean;
   transcodeAudioToAac: boolean;
+  /** TV-режим (управление пультом, D-pad) — тумблер в настройках; пусто = авто (UA). */
+  tvMode?: boolean;
 }
 
 declare global {

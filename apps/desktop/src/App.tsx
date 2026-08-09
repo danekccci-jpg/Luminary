@@ -18,6 +18,8 @@ import { setCustomJacredUrl, refreshRemoteInstancePool, probeJacredPool } from '
 import { initLocalJacred, getJacredServerStatus, JacredServerStatus } from './services/jacredServer';
 import { Heart, Bookmark, History, Play } from 'lucide-react';
 import { Flame, TrendingUp, Award, Search as SearchIcon, Tv, Zap, Film } from 'lucide-react';
+import { isTvMode, setTvMode as persistTvMode, applyTvModeClass, addBackListener, dispatchBack } from './utils/tv';
+import { focusFirstCard, keyActivate } from './utils/focus';
 
 /** Zero-Config: фоновая авто-настройка источников на старте приложения. */
 async function initZeroConfigSources() {
@@ -117,8 +119,12 @@ function extractDominantHue(imageUrl: string): Promise<string> {
 
 /** Конвертация элемента библиотеки в Movie для MovieGrid/деталей. */
 function libItemToMovie(item: LibraryItem): Movie {
+  // Числовой id (TMDB) — чтобы модалка могла обогатить фильм из TMDB:
+  // у записей Истории/Избранного нет original_title (EN-проход RuTracker
+  // отключён), обогащение восстанавливает его и догоняет поиск.
+  const numId = Number(item.id);
   return {
-    id: item.id as any,
+    id: Number.isFinite(numId) && String(numId) === item.id ? numId : (item.id as any),
     title: item.title,
     original_title: item.title,
     overview: '',
@@ -209,6 +215,36 @@ export const App: React.FC = () => {
   const [ambientColor, setAmbientColor] = useState('rgba(0,242,254,0.05)');
 
   const [settings, setSettings] = useState<UserSettings>(loadSettings);
+
+  // ── TV-режим (управление пультом, D-pad) ──
+  const [tvMode, setTvMode] = useState<boolean>(isTvMode);
+  useEffect(() => {
+    applyTvModeClass(tvMode);
+  }, [tvMode]);
+
+  // ── Back (пульт / Escape / Backspace): закрывает верхний слой UI ──
+  // Модалки и плеер регистрируют свои обработчики в стеке (registerBackHandler);
+  // здесь только верхний необработанный случай — сброс активного поиска.
+  const overlayOpen = !!selectedMovie || !!activeStream || isSettingsOpen || isMagnetModalOpen;
+  useEffect(() => {
+    const off = addBackListener(() => {
+      if (dispatchBack()) return;           // 1) верхний слой (модалка/плеер)
+      if (searchQuery.trim()) {             // 2) поиск → обратно к каталогу
+        setSearchQuery('');
+        return;
+      }
+      // 3) главный экран — Back не перехватываем (WebView/Activity закроет приложение)
+    });
+    return off;
+  }, [searchQuery]);
+
+  // ── TV: автофокус на первую карточку при смене вида (не поверх модалок) ──
+  const mainRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!tvMode || overlayOpen) return;
+    const t = setTimeout(() => focusFirstCard(mainRef.current), 80);
+    return () => clearTimeout(t);
+  }, [tvMode, overlayOpen, activeTab, searchQuery]);
 
   // Initial data load
   useEffect(() => {
@@ -323,6 +359,11 @@ export const App: React.FC = () => {
       localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(newSettings));
     } catch { /* переполнение localStorage — игнорируем */ }
     applySettingsToServices(newSettings);
+    // TV-режим: тумблер сохраняется и применяется сразу (пульт/тест на десктопе)
+    if (newSettings.tvMode !== undefined) {
+      setTvMode(!!newSettings.tvMode);
+      persistTvMode(!!newSettings.tvMode);
+    }
     fetchCatalog();
   };
 
@@ -387,6 +428,7 @@ export const App: React.FC = () => {
 
       {/* Main Scrollable Content */}
       <main
+        ref={mainRef}
         style={{
           flex: 1,
           position: 'relative',
@@ -466,7 +508,12 @@ export const App: React.FC = () => {
                       return (
                         <div
                           key={item.id}
+                          className="history-row"
                           onClick={() => setSelectedMovie(libItemToMovie(item))}
+                          onKeyDown={(e) => keyActivate(e, () => setSelectedMovie(libItemToMovie(item)))}
+                          tabIndex={0}
+                          role="button"
+                          aria-label={item.title}
                           style={{
                             display: 'flex',
                             alignItems: 'center',
@@ -635,6 +682,7 @@ export const App: React.FC = () => {
           nextEpisode={activeStream.nextEpisode}
           onPlayNext={activeStream.onPlayNext}
           transcodeAudioToAac={settings.transcodeAudioToAac}
+          tvMode={tvMode}
           onProgressSave={(cur, dur) => {
             if (activeStream.mediaId) {
               library.saveProgress(
