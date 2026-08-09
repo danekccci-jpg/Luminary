@@ -1,0 +1,41 @@
+# ── Dependencies ──
+node_modules/
+
+# ── Build outputs ──
+dist/
+dist-electron/
+release/
+out/
+*.asar
+
+# ── Logs ──
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# ── Environment / Secrets ──
+.env
+.env.local
+.env.*.local
+*.local
+
+# ── Editor / OS ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Runtime data (TorrServer binary, cache) ──
+*.dmg
+*.exe
+*.zip
+
+# ── TorrServer binaries: скачиваются scripts/fetch-torrserver.js
+#    (не коммитим 60MB-бинарники; CI качает их перед сборкой) ──
+resources/torrserver/TorrServer-*
+
+# ── Helper scripts (local only) ──
+verify-zip.ps1
+make-mac-zip.ps1

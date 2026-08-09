@@ -1,0 +1,101 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.luminary.torrentcinema",
+  "productName": "Luminary",
+  "copyright": "Copyright © 2026 Luminary Team",
+  "directories": {
+    "output": "release",
+    "buildResources": "build"
+  },
+  "files": [
+    "dist/**/*",
+    "dist-electron/**/*",
+    "package.json"
+  ],
+  "extraMetadata": {
+    "main": "dist-electron/main.js"
+  },
+  // TorrServer binaries ship OUTSIDE app.asar (extraResources → Resources/torrserver)
+  // so Electron can exec them directly via process.resourcesPath.
+  "extraResources": [
+    {
+      "from": "resources/torrserver",
+      "to": "torrserver",
+      "filter": ["**/*"]
+    }
+  ],
+  "asar": true,
+  "mac": {
+    "category": "public.app-category.entertainment",
+    "icon": "build/icon.png",
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false,
+    "entitlements": "build/entitlements.mac.plist",
+    "entitlementsInherit": "build/entitlements.mac.plist",
+    "target": [
+      {
+        "target": "dmg",
+        "arch": ["x64", "arm64"]
+      },
+      {
+        "target": "zip",
+        "arch": ["x64", "arm64"]
+      }
+    ],
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "extendInfo": {
+      "CFBundleName": "Luminary",
+      "CFBundleDisplayName": "Luminary - Torrent Cinema",
+      "NSHighResolutionCapable": true,
+      "NSSupportsAutomaticGraphicsSwitching": true,
+      "LSApplicationCategoryType": "public.app-category.entertainment"
+    }
+  },
+  "dmg": {
+    "contents": [
+      { "x": 130, "y": 220 },
+      { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+    ],
+    "window": { "width": 540, "height": 380 },
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+  "win": {
+    "icon": "build/icon.png",
+    "signAndEditExecutable": false,
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      },
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "${productName}-${version}-${arch}-Setup.${ext}"
+  },
+  "portable": {
+    "artifactName": "${productName}-${version}-${arch}-Portable.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "allowElevation": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Luminary Cinema",
+    "installerIcon": "build/icon.ico",
+    "uninstallerIcon": "build/icon.ico",
+    "installerHeaderIcon": "build/icon.ico",
+    "deleteAppDataOnUninstall": false,
+    "runAfterFinish": true,
+    "menuCategory": "Entertainment",
+    "warningsAsErrors": false,
+    "differentialPackage": false,
+    "installerLanguages": ["en_US", "ru_RU"],
+    "language": "1033",
+    "displayLanguageSelector": true,
+    "include": "build/installer.nsh"
+  }
+}

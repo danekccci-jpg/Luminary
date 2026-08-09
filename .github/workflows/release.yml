@@ -1,0 +1,124 @@
+name: Release
+
+# Сборка десктопных релизов (macOS .dmg + Windows .exe) и публикация в GitHub Releases.
+# Запуск: пуш тега v* (например v1.0.0) — соберёт всё и создаст Release с артефактами.
+# Вручную (workflow_dispatch) — соберёт и зальёт артефакты в draft-релиз.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Без подписи: у приложения нет Apple Developer / Windows сертификатов.
+  # Пользователям macOS нужно «Правая кнопка → Открыть», Windows — «Подробнее → Выполнить в любом случае».
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+jobs:
+  mac:
+    name: 'macOS (.dmg)'
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run selftest
+
+      - name: Build renderer + main process
+        run: npm run build
+
+      - name: Fetch TorrServer binaries (arm64 + x64, std + gst)
+        run: node scripts/fetch-torrserver.js --platform darwin
+
+      - name: Package .dmg + .zip (x64 + arm64)
+        run: npx electron-builder --mac --x64 --arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest-mac.yml
+
+  windows:
+    name: 'Windows (.exe)'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run selftest
+
+      - name: Build renderer + main process
+        run: npm run build
+
+      - name: Fetch TorrServer binary (x64)
+        run: node scripts/fetch-torrserver.js --platform win32
+
+      - name: Package NSIS + portable .exe
+        run: npx electron-builder --win nsis portable
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest.yml
+
+  release:
+    name: 'Publish GitHub Release'
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release (tag) or draft (manual run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          FILES=$(find artifacts -type f)
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            echo "::notice::Creating release $GITHUB_REF_NAME"
+            gh release create "$GITHUB_REF_NAME" $FILES \
+              --title "Luminary $GITHUB_REF_NAME" \
+              --generate-notes
+          else
+            echo "::notice::Manual run — creating draft release"
+            gh release create "draft-$(date +%s)" $FILES \
+              --draft \
+              --title "Luminary manual build"
+          fi
