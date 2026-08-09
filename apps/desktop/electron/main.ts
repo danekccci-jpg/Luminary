@@ -359,13 +359,20 @@ function startJacredAsync(attempt: number = 1) {
 //  Keep-Alive Service: heartbeat /echo + авто-восстановление
 // ═══════════════════════════════════════════════════════════
 const HEARTBEAT_INTERVAL_MS = 7000; // каждые 7 сек — /echo
+/** Рестарт по heartbeat только после N подряд неудачных /echo (≈21с):
+ *  единичный медленный ответ (gst-транскод грузит CPU) НЕ должен убивать
+ *  сервер посреди просмотра — это был источник «зависает каждые 3-5 минут». */
+const HEARTBEAT_MAX_FAILS = 3;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 /** Последнее подтверждённое состояние /echo (null — ещё не проверяли). */
 let lastHeartbeatAlive: boolean | null = null;
+/** Подряд идущие неудачные /echo (сбрасывается при первом живом ответе). */
+let heartbeatFailCount = 0;
 
 /** Одна проверка heartbeat: /echo + push при смене + keep-alive при падении. */
 async function heartbeatTick() {
   const alive = await torrServer.checkHealth();
+  heartbeatFailCount = alive ? 0 : heartbeatFailCount + 1;
   // Смена состояния → мгновенный push в Renderer (индикатор без клика)
   if (alive !== lastHeartbeatAlive) {
     lastHeartbeatAlive = alive;
@@ -377,12 +384,16 @@ async function heartbeatTick() {
       error: alive ? undefined : lastErr.error,
     });
   }
-  // Keep-Alive: сервер упал / не отвечает → авто-запуск, НО:
+  // Keep-Alive: сервер не отвечает N тиков подряд → авто-запуск, НО:
   //  - не во время штатного старта (isStarting),
   //  - не после ЯВНОЙ остановки пользователем (isManuallyStopped),
   //  - с лимитами ZONE 2 (MAX_AUTO_RESTARTS=3, cooldown 15с).
-  if (!alive && !torrServer.isStarting() && !torrServer.isManuallyStopped()) {
-    console.warn('[KeepAlive] Heartbeat: TorrServer не отвечает — авто-восстановление');
+  if (!alive && heartbeatFailCount >= HEARTBEAT_MAX_FAILS && !torrServer.isStarting() && !torrServer.isManuallyStopped()) {
+    console.warn(`[KeepAlive] Heartbeat: TorrServer не отвечает ${heartbeatFailCount} тиков подряд — авто-восстановление`);
+    // Диагностика: хвост лога сервера перед рестартом (почему замолчал)
+    const tail = torrServer.getLogs(5).join(' | ');
+    if (tail) console.warn('[KeepAlive] TorrServer log tail:', tail);
+    heartbeatFailCount = 0;
     torrServer.keepAliveRestart('heartbeat-timeout');
   }
 }

@@ -38,8 +38,10 @@ export function parseTorrentTags(title: string): TorrentTags {
   if (/\bdolby\s*vision\b|\bdv\b/.test(lower)) formats.push('DV');
   if (/\bhevc\b|\bx265\b|h\.?265/.test(lower)) formats.push('HEVC');
   if (/\bh\.?264\b|\bx264\b|\bavc\b/.test(lower)) formats.push('H.264');
+  if (/\bremux\b/.test(lower)) formats.push('REMUX');
   if (/\bbd-?rip\b|\bblu-?ray\b|\bbr-?rip\b/.test(lower)) formats.push('BDRip');
-  if (/\bweb-?dl\b|\bweb-?rip\b/.test(lower)) formats.push('WEB-DL');
+  if (/\bweb-?dl\b/.test(lower)) formats.push('WEB-DL');
+  else if (/\bweb-?rip\b/.test(lower)) formats.push('WEBRip');
 
   // ── Аудиоканалы/форматы звука ──
   const audio: string[] = [];
@@ -59,9 +61,16 @@ export function parseTorrentTags(title: string): TorrentTags {
   // ── Озвучки и язык (Rus/Eng — только если это не «Rus/Eng Sub») ──
   const dubbing: string[] = [];
   if (/дубляж|двухголос|многоголос|профессиональн|закадров/i.test(t)) dubbing.push('Дубляж');
+  if (/оригинал\s*\+?\s*суб/i.test(t)) dubbing.push('Оригинал + Субтитры');
+  else if (/оригинал/i.test(t)) dubbing.push('Оригинал');
   if (/\brhs\b/i.test(t)) dubbing.push('RHS');
   if (/hdrezka/i.test(t)) dubbing.push('HDRezka');
   if (/lost\s?film/i.test(t)) dubbing.push('LostFilm');
+  if (/tvshows|твшоу/i.test(t)) dubbing.push('TVShows');
+  if (/кубик\s*в\s*кубе/i.test(t)) dubbing.push('Кубик в Кубе');
+  if (/ozz|озз/i.test(t)) dubbing.push('Ozz');
+  if (/new\s?studio|ню\s?студио/i.test(t)) dubbing.push('NewStudio');
+  if (/пифагор/i.test(t)) dubbing.push('Пифагор');
   if (/сектор/i.test(t)) dubbing.push('Сектор');
   if (/ledoyen/i.test(t)) dubbing.push('LeDoyen');
   if (/\beng\b/i.test(t) && !/\beng\s*sub/i.test(t)) dubbing.push('Eng');

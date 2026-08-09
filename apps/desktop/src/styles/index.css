@@ -56,6 +56,32 @@
   --shadow-purple:   0 0 24px rgba(138, 43, 226, 0.4), 0 0 60px rgba(138, 43, 226, 0.15);
   --shadow-card:     0 8px 32px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
   --shadow-elevated: 0 20px 60px rgba(0, 0, 0, 0.8), 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* Torrent Panel — calm "signal" palette.
+     Сдержанные акценты поверх глубокого графита вместо неоновых свечений:
+     лёд (основной), янтарь (4K), сталь (720p), фиолет (аудио), изумруд (озвучки/сиды). */
+  --tint:            #6EA8FE;
+  --tint-strong:     #8FBDFF;
+  --tint-dim:        rgba(110, 168, 254, 0.12);
+  --amber:           #E5A54B;
+  --amber-strong:    #E5B36B;
+  --amber-dim:       rgba(229, 165, 75, 0.13);
+  --steel:           #7F93B8;
+  --steel-strong:    #A7B8D6;
+  --steel-dim:       rgba(127, 147, 184, 0.12);
+  --violet-soft:     #9D8CFF;
+  --violet-strong:   #B7A9FF;
+  --violet-dim:      rgba(157, 140, 255, 0.09);
+  --green-soft:      #4CC38A;
+  --green-strong:    #6FD6A2;
+  --green-dim:       rgba(76, 195, 138, 0.09);
+  --rose-soft:       #E4697C;
+  --panel:           #0E1117;
+  --panel-elevated:  #12151C;
+  --panel-hover:     #161A22;
+  --panel-focused:   #171B24;
+  --hairline:        rgba(255, 255, 255, 0.06);
+  --hairline-strong: rgba(255, 255, 255, 0.12);
 }
 
 /* ── Base Reset ────────────────────────────── */
@@ -298,165 +324,52 @@ body {
   outline-offset: 2px;
 }
 
-/* ── Quality Badges ────────────────────────── */
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0.22rem 0.6rem;
-  border-radius: var(--radius-sm);
-  font-size: 0.7rem;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  border: 1px solid transparent;
-}
-
-.badge-4k {
-  background: rgba(255, 184, 0, 0.14);
-  color: var(--amber);
-  border-color: rgba(255, 184, 0, 0.4);
-  text-shadow: 0 0 8px rgba(255, 184, 0, 0.5);
-}
-
-.badge-1080p {
-  background: rgba(0, 242, 254, 0.1);
-  color: var(--cyan);
-  border-color: rgba(0, 242, 254, 0.35);
-  text-shadow: 0 0 8px rgba(0, 242, 254, 0.4);
-}
-
-.badge-720p {
-  background: rgba(16, 245, 172, 0.1);
-  color: var(--emerald);
-  border-color: rgba(16, 245, 172, 0.3);
-}
-
-.badge-sd {
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--text-muted);
-  border-color: var(--border-subtle);
-}
-
-.badge-hdr {
-  background: rgba(255, 84, 112, 0.12);
-  color: var(--coral);
-  border-color: rgba(255, 84, 112, 0.35);
-}
-
-.badge-remux {
-  background: rgba(217, 70, 239, 0.12);
-  color: var(--magenta);
-  border-color: rgba(217, 70, 239, 0.35);
-}
-
-/* ── Dubbing Studio Chips ──────────────────── */
-.chip-dubbing {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.2rem 0.6rem;
-  border-radius: var(--radius-pill);
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  border: 1px solid transparent;
-  backdrop-filter: blur(8px);
-}
-
-.chip-dub-studio {
-  background: rgba(16, 245, 172, 0.1);
-  color: var(--emerald);
-  border-color: rgba(16, 245, 172, 0.3);
-  box-shadow: 0 0 8px rgba(16, 245, 172, 0.2);
-}
-
-.chip-dub-rezka {
-  background: rgba(138, 43, 226, 0.12);
-  color: var(--text-purple);
-  border-color: rgba(138, 43, 226, 0.35);
-  box-shadow: 0 0 8px rgba(138, 43, 226, 0.2);
-}
-
-.chip-dub-lost {
-  background: rgba(138, 43, 226, 0.1);
-  color: #c084fc;
-  border-color: rgba(192, 132, 252, 0.3);
-  box-shadow: 0 0 8px rgba(192, 132, 252, 0.15);
-}
-
-.chip-dub-orig {
-  background: rgba(0, 242, 254, 0.08);
-  color: var(--cyan);
-  border-color: rgba(0, 242, 254, 0.25);
-  box-shadow: 0 0 8px rgba(0, 242, 254, 0.12);
-}
-
-.chip-dub-other {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-muted);
-  border-color: var(--border-subtle);
-}
-
-/* ── Filter Chip Toggle ────────────────────── */
+/* ── Filter Chip Toggle (Torrent Panel) ────── */
 .filter-chip {
-  padding: 0.3rem 0.85rem;
-  border-radius: var(--radius-pill);
-  font-size: 0.78rem;
-  font-weight: 700;
-  border: 1px solid var(--border-subtle);
+  height: 26px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  border: 1px solid rgba(255, 255, 255, 0.09);
   background: transparent;
-  color: var(--text-muted);
+  color: rgba(237, 241, 247, 0.55);
   cursor: pointer;
   font-family: var(--font);
-  transition: all 0.18s ease;
   white-space: nowrap;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
 }
 
 .filter-chip:hover {
-  background: rgba(255,255,255,0.06);
-  color: var(--text-primary);
-  border-color: var(--border-normal);
+  background: rgba(255, 255, 255, 0.055);
+  color: rgba(237, 241, 247, 0.85);
+  border-color: rgba(255, 255, 255, 0.16);
 }
 
-.filter-chip.active-cyan {
-  background: rgba(0, 242, 254, 0.12);
-  color: var(--cyan);
-  border-color: var(--border-cyan);
-  box-shadow: 0 0 10px rgba(0,242,254,0.2);
+.filter-chip.active {
+  background: var(--tint-dim);
+  color: var(--tint-strong);
+  border-color: rgba(110, 168, 254, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(110, 168, 254, 0.08);
 }
 
-.filter-chip.active-purple {
-  background: rgba(138, 43, 226, 0.15);
-  color: var(--text-purple);
-  border-color: var(--border-purple);
-  box-shadow: 0 0 10px rgba(138,43,226,0.25);
+/* Активный чип 4K резонирует с янтарной рельсой карточки */
+.filter-chip.active-amber {
+  background: var(--amber-dim);
+  color: var(--amber-strong);
+  border-color: rgba(229, 165, 75, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(229, 165, 75, 0.08);
 }
 
-/* ── Stability / Health Score Badges ───────── */
-.stability-excellent {
-  background: rgba(16, 245, 172, 0.1);
-  color: var(--emerald);
-  border-color: rgba(16, 245, 172, 0.35);
-  box-shadow: 0 0 8px rgba(16, 245, 172, 0.2);
+.filter-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(110, 168, 254, 0.35);
 }
 
-.stability-good {
-  background: rgba(0, 242, 254, 0.1);
-  color: var(--cyan);
-  border-color: rgba(0, 242, 254, 0.3);
-}
-
-.stability-moderate {
-  background: rgba(255, 184, 0, 0.1);
-  color: var(--amber);
-  border-color: rgba(255, 184, 0, 0.35);
-}
-
-.stability-low {
-  background: rgba(255, 84, 112, 0.1);
-  color: var(--coral);
-  border-color: rgba(255, 84, 112, 0.35);
-}
 
 /* ── Input Styling ─────────────────────────── */
 .input-glass {
@@ -617,31 +530,6 @@ body {
   background: linear-gradient(90deg, transparent, var(--border-normal), transparent);
 }
 
-/* ── Tag / Codec Chip ──────────────────────── */
-.tag-chip {
-  padding: 0.18rem 0.5rem;
-  border-radius: 6px;
-  font-size: 0.68rem;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  background: rgba(255,255,255,0.06);
-  color: var(--text-muted);
-  border: 1px solid var(--border-subtle);
-}
-
-.tag-chip-hevc {
-  background: rgba(255, 184, 0, 0.08);
-  color: rgba(255,184,0,0.85);
-  border-color: rgba(255,184,0,0.25);
-}
-
-.tag-chip-av1 {
-  background: rgba(0,242,254,0.08);
-  color: rgba(0,242,254,0.8);
-  border-color: rgba(0,242,254,0.2);
-}
-
 /* ── TV / Клавиатурная навигация ──────────────────────
    :focus-visible срабатывает ТОЛЬКО для клавиатуры/D-pad —
    мышиный клик его не вызывает, десктоп-поведение не меняется. */
@@ -674,115 +562,604 @@ body {
   border-color: rgba(0, 242, 254, 0.2);
 }
 
-/* ── TorrentCard: карточка торрент-раздачи (дизайн по образцу UI) ──────
-   rounded-xl + полупрозрачный тёмный фон bg-neutral-900/80, hover-подсветка,
-   pills тегов bg-neutral-800, размер в светлой плашке bg-neutral-200. */
+/* ── Torrent Release Panel («Signal» console) ─────────────────────────
+   Сдержанный графит + hairline-границы + лимитированная палитра акцентов.
+   Техническая спека — острые чипы с микро-типографикой, аудио/языки —
+   мягкие пилюли; футер оперирует иконками и таб-цифрами. */
+
+/* ── Panel container ── */
+.torrent-panel {
+  margin-top: 2rem;
+  background: var(--panel);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 18px 44px -24px rgba(0, 0, 0, 0.8);
+}
+
+/* ── Header ── */
+.torrent-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.torrent-panel-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.torrent-panel-icon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: var(--tint-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.torrent-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 0.92rem;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
+
+.torrent-panel-count {
+  min-width: 22px;
+  height: 19px;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--tint-dim);
+  border: 1px solid rgba(110, 168, 254, 0.3);
+  color: var(--tint-strong);
+  font-size: 0.7rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.torrent-panel-sub {
+  margin-top: 3px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+}
+
+/* ── Keyword search ── */
+.torrent-search {
+  position: relative;
+  width: 230px;
+}
+
+.torrent-search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: rgba(237, 241, 247, 0.3);
+  pointer-events: none;
+}
+
+.torrent-search-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 12px 0 30px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: var(--text-primary);
+  font: 600 0.75rem/1 var(--font);
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.torrent-search-input::placeholder { color: rgba(237, 241, 247, 0.32); }
+.torrent-search-input:hover { border-color: rgba(255, 255, 255, 0.14); }
+
+.torrent-search-input:focus {
+  border-color: rgba(110, 168, 254, 0.55);
+  background: rgba(110, 168, 254, 0.04);
+  box-shadow: 0 0 0 3px rgba(110, 168, 254, 0.12);
+}
+
+/* ── Filter rows ── */
+.torrent-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.torrent-filter-row,
+.torrent-season-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.torrent-season-row {
+  padding: 10px 18px 4px;
+}
+
+.torrent-filter-label {
+  min-width: 74px;
+  padding-top: 7px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: rgba(237, 241, 247, 0.42);
+  white-space: nowrap;
+}
+
+.torrent-filter-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ── RuTracker background search note ── */
+.torrent-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 14px 0;
+  padding: 8px 12px;
+  border-radius: 9px;
+  background: rgba(110, 168, 254, 0.06);
+  border: 1px solid rgba(110, 168, 254, 0.18);
+  color: rgba(160, 196, 255, 0.85);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+/* ── Release list + custom scrollbar ── */
+.torrent-list {
+  padding: 10px 12px 14px;
+  max-height: 480px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* GPU-композитинг скролл-контейнера (микро-фризы на M1 при repaint) */
+  transform: translateZ(0);
+  will-change: transform;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+
+.torrent-list::-webkit-scrollbar { width: 6px; }
+.torrent-list::-webkit-scrollbar-track { background: transparent; }
+.torrent-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 99px;
+  border: 1px solid transparent;
+  background-clip: padding-box;
+}
+.torrent-list:hover::-webkit-scrollbar-thumb { background: rgba(110, 168, 254, 0.4); }
+
+/* ── TorrentCard ──
+   Сигнатура: 2px-рельса качества слева + hairline-иерархия.
+   Карточка приподнимается на 1px при hover, рельса подсвечивается. */
 .torrent-card {
-  border-radius: 12px;                 /* rounded-xl */
-  background: rgba(23, 23, 23, 0.8);   /* bg-neutral-900/80 */
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  padding: 0.8rem 0.95rem;
+  position: relative;
+  border-radius: 12px;
+  background: var(--panel-elevated);
+  border: 1px solid rgba(255, 255, 255, 0.07);
   cursor: pointer;
-  transition: background 0.2s ease, border-color 0.2s ease;
+  overflow: hidden;
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
 }
+
 .torrent-card:hover {
-  background: rgba(38, 38, 38, 0.85);  /* bg-neutral-800 hover */
-  border-color: rgba(0, 242, 254, 0.25);
+  background: var(--panel-hover);
+  border-color: rgba(255, 255, 255, 0.12);
+  transform: translateY(-1px);
 }
+
 .torrent-card-focused {
-  background: rgba(38, 38, 38, 0.9);
-  border-color: rgba(0, 242, 254, 0.35);
+  background: var(--panel-focused);
+  border-color: rgba(110, 168, 254, 0.35);
 }
+
+.torrent-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(110, 168, 254, 0.45);
+}
+
+/* На TV (пульт) сохраняем толстое видимое с дивана кольцо */
+.tv-mode .torrent-card:focus-visible {
+  outline: 4px solid var(--cyan);
+  outline-offset: 4px;
+  box-shadow: 0 0 18px rgba(0, 242, 254, 0.45), 0 0 0 2px rgba(110, 168, 254, 0.45);
+}
+
+.torrent-card-body {
+  padding: 11px 14px 10px 16px;
+}
+
+/* Рельса качества (сигнатура компонента) */
+.torrent-card-rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  transition: box-shadow 0.18s ease;
+}
+
+.torrent-card.q-4k .torrent-card-rail    { background: var(--amber); }
+.torrent-card.q-1080 .torrent-card-rail  { background: var(--tint); }
+.torrent-card.q-720 .torrent-card-rail   { background: var(--steel); }
+.torrent-card.q-sd .torrent-card-rail    { background: rgba(255, 255, 255, 0.14); }
+
+.torrent-card.q-4k:hover .torrent-card-rail    { box-shadow: 0 0 12px -1px rgba(229, 165, 75, 0.55); }
+.torrent-card.q-1080:hover .torrent-card-rail  { box-shadow: 0 0 12px -1px rgba(110, 168, 254, 0.55); }
+.torrent-card.q-720:hover .torrent-card-rail   { box-shadow: 0 0 12px -1px rgba(127, 147, 184, 0.55); }
+.torrent-card.q-sd:hover .torrent-card-rail    { box-shadow: 0 0 12px -1px rgba(255, 255, 255, 0.25); }
 
 /* Оригинальное полное имя раздачи — максимум 2 строки */
 .torrent-card-title {
-  font-size: 0.83rem;
-  font-weight: 600;
-  color: var(--text-primary);
-  line-height: 1.35;
-  margin-bottom: 0.5rem;
+  font-size: 0.84rem;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+  color: #EFF2F8;
+  line-height: 1.4;
+  margin-bottom: 8px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  transition: color 0.18s ease;
 }
 
-/* Ряд тегов-пилюль */
-.torrent-card-tags {
+.torrent-card:hover .torrent-card-title { color: #FFFFFF; }
+
+/* Техническая спека: качество → кодек/контейнер */
+.torrent-card-specs,
+.torrent-card-lang {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem;
-  margin-bottom: 0.65rem;
+  align-items: center;
+  gap: 5px;
 }
-.torrent-card-pill {
-  padding: 2px 8px;                    /* px-2 py-0.5 */
-  border-radius: 8px;                  /* rounded-md */
-  background: #262626;                 /* bg-neutral-800 */
-  color: rgba(229, 229, 229, 0.9);
-  font-size: 0.72rem;                  /* text-xs */
-  font-weight: 600;
-  line-height: 1.4;
+
+.torrent-card-specs { margin-bottom: 6px; }
+
+/* ── Tags ── */
+.torrent-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 5px;
+  font-size: 0.62rem;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  line-height: 1;
   white-space: nowrap;
 }
 
-/* Футер: слева дата + трекер, справа метрики + размер-плашка */
+/* Качество — акцентный чип, резонирует с рельсой */
+.torrent-tag-quality.q-4k {
+  background: var(--amber-dim);
+  color: var(--amber-strong);
+  border: 1px solid rgba(229, 165, 75, 0.4);
+}
+
+.torrent-tag-quality.q-1080 {
+  background: var(--tint-dim);
+  color: var(--tint-strong);
+  border: 1px solid rgba(110, 168, 254, 0.38);
+}
+
+.torrent-tag-quality.q-720 {
+  background: var(--steel-dim);
+  color: var(--steel-strong);
+  border: 1px solid rgba(127, 147, 184, 0.34);
+}
+
+.torrent-tag-quality.q-sd {
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(237, 241, 247, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Кодеки/контейнеры — острые, нейтральные, микро-типографика */
+.torrent-tag-spec {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(237, 241, 247, 0.66);
+}
+
+/* Аудио/языки — мягкие пилюли, sentence-case */
+.torrent-tag-audio,
+.torrent-tag-dub,
+.torrent-tag-sub {
+  border-radius: 999px;
+  padding: 0 9px;
+  font-size: 0.66rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  text-transform: none;
+}
+
+/* Дорожки — фиолет */
+.torrent-tag-audio {
+  background: var(--violet-dim);
+  border: 1px solid rgba(157, 140, 255, 0.24);
+  color: var(--violet-strong);
+}
+
+/* Озвучки — изумруд + тактильная точка */
+.torrent-tag-dub {
+  background: var(--green-dim);
+  border: 1px solid rgba(76, 195, 138, 0.26);
+  color: var(--green-strong);
+}
+
+.torrent-tag-dub::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
+}
+
+/* Субтитры — пунктир, спокойный тон */
+.torrent-tag-sub {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  color: rgba(237, 241, 247, 0.55);
+}
+
+/* ── Footer ── */
 .torrent-card-footer {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.6rem;
+  gap: 12px;
   flex-wrap: wrap;
 }
+
 .torrent-card-meta-left {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--text-muted);
+  gap: 9px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
+
+.tc-year {
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: rgba(237, 241, 247, 0.82);
+  font-variant-numeric: tabular-nums;
+}
+
 .torrent-card-tracker {
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  text-transform: lowercase;
-  color: rgba(240, 242, 248, 0.35);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(237, 241, 247, 0.34);
 }
+
+/* Индикатор здоровья раздачи */
+.tc-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: rgba(237, 241, 247, 0.5);
+  white-space: nowrap;
+}
+
+.tc-health-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tc-health.h-good .tc-health-dot { background: var(--green-soft); box-shadow: 0 0 0 2px rgba(76, 195, 138, 0.16); }
+.tc-health.h-ok   .tc-health-dot { background: var(--tint); box-shadow: 0 0 0 2px rgba(110, 168, 254, 0.16); }
+.tc-health.h-mid  .tc-health-dot { background: var(--amber); box-shadow: 0 0 0 2px rgba(229, 165, 75, 0.16); }
+.tc-health.h-low  .tc-health-dot { background: var(--rose-soft); box-shadow: 0 0 0 2px rgba(228, 105, 124, 0.16); }
+
+/* Статы: битрейт / сиды / пиры / размер */
 .torrent-card-meta-right {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--text-muted);
+  gap: 13px;
+  flex-wrap: wrap;
 }
-.torrent-card-size {
-  padding: 2px 9px;                    /* светлая плашка размера */
-  border-radius: 6px;
-  background: #E5E5E5;                 /* bg-neutral-200 */
-  color: #000;                         /* text-black */
-  font-weight: 800;                    /* font-bold */
-  font-size: 0.72rem;
+
+.tc-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  font-weight: 750;
+  color: rgba(237, 241, 247, 0.6);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.tc-stat-icon { opacity: 0.55; }
+
+.tc-seeders { color: var(--green-strong); }
+.tc-seeders .tc-stat-icon { opacity: 0.9; }
+
+.tc-leechers { color: #E27D8E; }
+.tc-leechers .tc-stat-icon { opacity: 0.9; }
+
+/* Размер — главный числовой элемент футера */
+.torrent-card-size {
+  height: 22px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  color: #FFFFFF;
+  transition: border-color 0.18s ease;
+}
+
+.torrent-card-size b {
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.torrent-card-size small {
+  font-size: 0.56rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(237, 241, 247, 0.45);
+}
+
+.torrent-card:hover .torrent-card-size { border-color: rgba(255, 255, 255, 0.18); }
+
+/* ── Empty state ── */
+.torrent-empty {
+  padding: 44px 20px;
+  text-align: center;
+}
+
+.torrent-empty-icon {
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 14px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(237, 241, 247, 0.4);
+}
+
+.torrent-empty-title {
+  font-size: 0.9rem;
+  font-weight: 650;
+  color: var(--text-secondary);
+  margin-bottom: 5px;
+}
+
+.torrent-empty-sub {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+
+.btn-accent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 9px;
+  border: 1px solid rgba(110, 168, 254, 0.35);
+  background: rgba(110, 168, 254, 0.1);
+  color: var(--tint-strong);
+  font-size: 0.78rem;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.btn-accent:hover {
+  background: rgba(110, 168, 254, 0.18);
+  border-color: rgba(110, 168, 254, 0.5);
 }
 
 /* Скелетон-заглушка под карточку (во время поиска) */
 .torrent-card-skeleton {
   border-radius: 12px;
-  height: 112px;
-  background: rgba(23, 23, 23, 0.6);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  height: 132px;
+  background: var(--panel-elevated);
+  border: 1px solid rgba(255, 255, 255, 0.05);
   overflow: hidden;
   position: relative;
 }
+
 .torrent-card-skeleton::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.05) 50%, transparent 70%);
+  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.045) 50%, transparent 70%);
   animation: skeleton-shimmer 1.4s infinite;
 }
+
 @keyframes skeleton-shimmer {
   from { transform: translateX(-100%); }
   to { transform: translateX(100%); }
+}
+
+/* ── Responsive (узкие окна / TV) ── */
+@media (max-width: 640px) {
+  .torrent-panel-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .torrent-search { width: 100%; }
+
+  .torrent-filter-label {
+    min-width: 0;
+    width: 100%;
+    padding-top: 0;
+  }
+
+  .torrent-card-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .torrent-card-meta-right {
+    justify-content: space-between;
+    gap: 10px;
+  }
 }

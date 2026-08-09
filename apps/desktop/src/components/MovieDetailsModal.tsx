@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Video, Heart, Bookmark, Tv, Radio, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
+import { X, Star, Calendar, Clock, User, AlertTriangle, Play, Heart, Bookmark, Tv, Radio, ChevronDown, ChevronUp } from 'lucide-react';
 import { library, LibraryItem, formatClock } from '../services/library';
 import { extractYear } from '../utils/year';
 import { parseTorrentMeta } from '../utils/torrentMeta';
@@ -8,7 +8,7 @@ import { tmdbService } from '../services/tmdb';
 import { torrServerService } from '../services/torrserver';
 import { mergeReleasesByHash } from '../services/scrapers/jacred';
 import { toastBus } from '../services/toast';
-import { searchVkVideo, VkVideoItem } from '../services/vkVideoService';
+import { searchVkVideo, VkVideoItem, normalizeVkTitle } from '../services/vkVideoService';
 import { searchOnlineStreams } from '../services/onlineBalancers';
 import { TorrentSelector } from './TorrentSelector';
 import { EpisodeResumeDialog, findRelease } from './EpisodeResumeDialog';
@@ -45,6 +45,52 @@ interface MovieDetailsModalProps {
   }) => void;
 }
 
+// ── Единая модель онлайн-секции ──
+// VK и балансеры приводятся к общему виду: карточка = (источник + фильм),
+// внутри — варианты «озвучка · качество», которые выбираются перед просмотром.
+
+interface OnlineVariant {
+  key: string;
+  /** Озвучка: из заголовка VK / translation балансера. */
+  dubbing?: string;
+  quality: string;
+  /** Длительность (VK), секунды. */
+  duration?: number;
+  // VK:
+  hlsUrl?: string;
+  mp4Url?: string;
+  // Балансер:
+  m3u8Url?: string;
+  referer?: string;
+  iframeUrl?: string;
+}
+
+interface OnlineCard {
+  key: string;
+  /** Подпись источника: VK / Kodik / Collaps… */
+  sourceLabel: string;
+  sourceTone: 'vk' | 'balancer';
+  title: string;
+  variants: OnlineVariant[];
+}
+
+const QUALITY_ORDER: Record<string, number> = { '4K': 0, '1080p': 1, '720p': 2, '480p': 3, SD: 4 };
+
+function qualityRank(q: string): number {
+  return QUALITY_ORDER[q] ?? 9;
+}
+
+/** Заголовок карточки VK: без «смотреть онлайн»/качества/студии на конце. */
+function cleanStreamTitle(title: string): string {
+  return (
+    String(title || '')
+      .replace(/\s*(?:смотреть\s*онлайн|в\s*хорошем\s*качестве|бесплатно|полностью|фильм)\s*$/i, '')
+      .replace(/\s+[-–—].*(?:смотреть|онлайн).*$/i, '')
+      .replace(/\s+(?:дубляж|многоголос|двухголос|оригинал|субтитры|lost\s?film|hdrezka|rhs|ozz)\s*$/i, '')
+      .trim() || 'Онлайн-поток'
+  );
+}
+
 export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   movie,
   onClose,
@@ -55,13 +101,21 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   const [isFav, setIsFav] = useState(() => library.isFavorite(String(movie.id)));
   const [isLater, setIsLater] = useState(() => library.isInLater(String(movie.id)));
 
-  const libItem = (): Omit<LibraryItem, 'updatedAt'> => ({
-    id: String(movie.id),
-    title: movie.title || movie.name || 'Без названия',
-    poster: movie.poster_path,
-    year: movie.year || (movie.release_date || '').slice(0, 4),
-    mediaType: movie.media_type || 'movie',
-  });
+  const libItem = (): Omit<LibraryItem, 'updatedAt'> => {
+    // Обогащённые TMDB-данные (details ?? movie) сохраняем в библиотеку,
+    // чтобы карточка/модалка из избранного не теряли рейтинг и описание.
+    const src = details ?? movie;
+    return {
+      id: String(movie.id),
+      title: src.title || src.name || 'Без названия',
+      poster: src.poster_path,
+      year: src.year || (src.release_date || '').slice(0, 4),
+      mediaType: src.media_type || 'movie',
+      rating: typeof src.vote_average === 'number' ? src.vote_average : undefined,
+      overview: src.overview || undefined,
+      backdrop: src.backdrop_path,
+    };
+  };
 
   const toggleFav = () => { setIsFav(library.toggleFavorite(libItem())); };
   const toggleLater = () => { setIsLater(library.toggleLater(libItem())); };
@@ -72,6 +126,8 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   const [isSearchingOnline, setIsSearchingOnline] = useState(true);
   /** Секция «Онлайн» свёрнута/развёрнута (переключатель). */
   const [isOnlineOpen, setIsOnlineOpen] = useState(true);
+  /** Выбранная карточка онлайн-секции — диалог выбора озвучки перед стартом. */
+  const [pendingStream, setPendingStream] = useState<OnlineCard | null>(null);
   const [isScraping, setIsScraping] = useState(true);
   /** Фоновый поиск RuTracker ещё идёт (раздачи приедут позже, реактивно). */
   const [isRutrackerSearching, setIsRutrackerSearching] = useState(false);
@@ -86,13 +142,19 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     initialView: 'dialog' | 'picker';
   } | null>(null);
 
-  // TMDB-First: прямые постеры с CDN
-  const backdropUrl = tmdbService.getImageUrl(movie.backdrop_path, 'w1280');
-  const posterUrl   = tmdbService.getImageUrl(movie.poster_path, 'w500');
+  // TMDB-First: прямые постеры с CDN. Обогащённые данные (details) приходят
+  // фоном — берём их в приоритете, иначе у Избранного/Истории постер и рейтинг
+  // застревали бы в «пустых» значениях карточки (0.0 / заглушка).
+  const m = details ?? movie;
+  const backdropUrl = tmdbService.getImageUrl(m.backdrop_path, 'w1280');
+  const posterUrl   = tmdbService.getImageUrl(m.poster_path, 'w500');
+  // Постера нет/битый URL — сразу показываем SVG-заглушку с названием.
+  const posterPlaceholder = tmdbService.getPosterPlaceholder(movie.title || movie.name || '');
+  const posterSrc = posterUrl || posterPlaceholder;
 
   // Год — строго из оригинальной даты релиза (release_date / first_air_date),
   // movie.year (год раздачи HDRezka/Filmix, ремастер 4K) — только как fallback.
-  const year = extractYear(movie.release_date || movie.first_air_date) || extractYear(movie.year) || '';
+  const year = extractYear(m.release_date || m.first_air_date) || extractYear(m.year) || '';
 
   /** Сколько сезонов в сериале: TMDB (details.seasons) + максимум из раздач. */
   const tvSeasons = useMemo(() => {
@@ -157,31 +219,44 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     const mediaType = movie.media_type || 'movie';
     const id = movie.id;
 
-    // ── Обогащение из TMDB (описание, актеры, кадры) — фоном, не блокирует UI ──
-    if (typeof id === 'number') {
-      tmdbService
-        .getMovieDetails(id, mediaType)
-        .then((enriched) => {
-          if (!cancelled && enriched) setDetails({ ...movie, ...enriched });
-          // Страховка для Истории/Избранного: в записях библиотеки нет
-          // original_title (подставлен = title) → EN-проход RuTracker не
-          // запускался, а 4К-рипы на rutracker часто названы ТОЛЬКО латиницей.
-          // Берём оригинал из TMDB и догоняем поиск — иначе «rutracker
-          // пропадает» при открытии фильмов из личной библиотеки.
-          const orig = enriched?.original_title;
-          if (!cancelled && orig && orig !== primaryQuery && !fallbackQuery) {
-            console.log(`[MovieDetailsModal] EN-догонка RuTracker: "${orig}"`);
-            torrServerService
-              .searchRutrackerLate(primaryQuery, year, orig)
-              .then(({ releases: late }) => {
-                if (cancelled || late.length === 0) return;
-                setReleases((prev) => mergeReleasesByHash(prev, late));
-              })
-              .catch(() => {});
-          }
-        })
-        .catch(() => { /* карточка уже на экране — не критично */ });
-    }
+    // ── Обогащение из TMDB (описание, рейтинг, актеры, кадры) — фоном, не блокирует UI ──
+    // Числовой id (TMDB) берём напрямую; строковый (каталог HDRezka/Filmix) —
+    // сначала ищем фильм по названию+году, чтобы добрать рейтинг и описание
+    // (иначе в избранном «0.0», а в описании «Описание недоступно»).
+    const enrichFromTmdb = async (): Promise<Movie | null> => {
+      try {
+        if (typeof id === 'number') {
+          return await tmdbService.getMovieDetails(id, mediaType);
+        }
+        const found = await tmdbService.searchMovies(String(primaryQuery || movie.title || ''));
+        const match =
+          found.find((f) => year && String(extractYear(f.release_date)) === String(year)) ||
+          found[0];
+        if (!match) return null;
+        return await tmdbService.getMovieDetails(match.id, match.media_type || mediaType);
+      } catch {
+        return null; /* карточка уже на экране — не критично */
+      }
+    };
+    enrichFromTmdb().then((enriched) => {
+      if (!cancelled && enriched) setDetails({ ...movie, ...enriched, id });
+      // Страховка для Истории/Избранного: в записях библиотеки нет
+      // original_title (подставлен = title) → EN-проход RuTracker не
+      // запускался, а 4К-рипы на rutracker часто названы ТОЛЬКО латиницей.
+      // Берём оригинал из TMDB и догоняем поиск — иначе «rutracker
+      // пропадает» при открытии фильмов из личной библиотеки.
+      const orig = enriched?.original_title;
+      if (!cancelled && orig && orig !== primaryQuery && !fallbackQuery) {
+        console.log(`[MovieDetailsModal] EN-догонка RuTracker: "${orig}"`);
+        torrServerService
+          .searchRutrackerLate(primaryQuery, year, orig)
+          .then(({ releases: late }) => {
+            if (cancelled || late.length === 0) return;
+            setReleases((prev) => mergeReleasesByHash(prev, late));
+          })
+          .catch(() => {});
+      }
+    });
 
     // ── 1) VK Video: прямые HLS-потоки (Lampa-style, без TorrServer) ──
     searchVkVideo(`${primaryQuery}${year ? ' ' + year : ''}`.trim())
@@ -343,44 +418,111 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     playRelease(release, opts);
   }, [movie, histItems, playRelease]);
 
-  /** Воспроизвести VK-поток в нативном плеере Luminary (Hls.js, без TorrServer). */
-  const handlePlayVk = (item: VkVideoItem) => {
-    const url = item.hlsUrl || item.mp4Url;
-    if (!url) {
-      toastBus.push('У этого VK-видео не удалось получить поток', 'error');
-      return;
-    }
-    onPlayTorrent({
-      magnet: '',
-      title: `${movie.title} [VK ${item.quality}]`,
-      poster: posterUrl,
-      directUrl: url,
-      directQuality: item.quality,
-    });
-  };
-
-  /**
-   * Воспроизвести онлайн-поток балансера: прямой .m3u8 уходит в Hls.js
-   * (с Referer CDN балансера). Без .m3u8 — открываем iframe-плеер в браузере.
-   */
-  const handlePlayOnline = (stream: OnlineBalancerStream) => {
-    if (stream.m3u8Url) {
+  /** Воспроизвести вариант (озвучка · качество) из карточки онлайн-секции. */
+  const playVariant = (v: OnlineVariant, card: OnlineCard) => {
+    setPendingStream(null);
+    if (card.sourceTone === 'vk') {
+      const url = v.hlsUrl || v.mp4Url;
+      if (!url) {
+        toastBus.push('У этого VK-видео не удалось получить поток', 'error');
+        return;
+      }
       onPlayTorrent({
         magnet: '',
-        title: `${movie.title} [${stream.source} ${stream.quality}]`,
+        title: `${movie.title} [VK ${v.quality}${v.dubbing ? ' · ' + v.dubbing : ''}]`,
         poster: posterUrl,
-        directUrl: stream.m3u8Url,
-        directQuality: stream.quality,
-        directReferer: stream.referer || 'https://kinobox.tv/',
+        directUrl: url,
+        directQuality: v.quality,
       });
       return;
     }
-    if (stream.iframeUrl) {
-      window.electronAPI?.openExternal?.(stream.iframeUrl);
+    // Балансер: прямой .m3u8 в Hls.js (с Referer CDN); иначе iframe в браузере.
+    if (v.m3u8Url) {
+      onPlayTorrent({
+        magnet: '',
+        title: `${movie.title} [${card.sourceLabel} ${v.quality}${v.dubbing ? ' · ' + v.dubbing : ''}]`,
+        poster: posterUrl,
+        directUrl: v.m3u8Url,
+        directQuality: v.quality,
+        directReferer: v.referer || 'https://kinobox.tv/',
+      });
+      return;
+    }
+    if (v.iframeUrl) {
+      window.electronAPI?.openExternal?.(v.iframeUrl);
       return;
     }
     toastBus.push('У этого потока не удалось получить ссылку воспроизведения', 'error');
   };
+
+  /** Клик по карточке онлайн-потока: одна озвучка — играем сразу,
+   *  несколько — диалог выбора озвучки перед началом просмотра. */
+  const playStreamCard = (card: OnlineCard) => {
+    if (card.variants.length === 1) {
+      playVariant(card.variants[0], card);
+      return;
+    }
+    setPendingStream(card);
+  };
+
+  /** Единый список «Онлайн»: VK-группы (по фильму) + балансеры (по источнику). */
+  const onlineCards = useMemo<OnlineCard[]>(() => {
+    const cards: OnlineCard[] = [];
+    const vkGroups = new Map<string, VkVideoItem[]>();
+    for (const it of vkItems) {
+      const k = normalizeVkTitle(it.title);
+      const list = vkGroups.get(k) || [];
+      list.push(it);
+      vkGroups.set(k, list);
+    }
+    for (const [, list] of vkGroups) {
+      cards.push({
+        key: `vk-${normalizeVkTitle(list[0].title)}`,
+        sourceLabel: 'VK',
+        sourceTone: 'vk',
+        title: cleanStreamTitle(list[0].title),
+        variants: [...list]
+          .sort(
+            (a, b) =>
+              (b.dubbing ? 1 : 0) - (a.dubbing ? 1 : 0) ||
+              qualityRank(a.quality) - qualityRank(b.quality)
+          )
+          .map((it) => ({
+            key: it.id,
+            dubbing: it.dubbing,
+            quality: it.quality,
+            duration: it.duration,
+            hlsUrl: it.hlsUrl,
+            mp4Url: it.mp4Url,
+          })),
+      });
+    }
+    const balGroups = new Map<string, OnlineBalancerStream[]>();
+    for (const s of onlineStreams) {
+      const list = balGroups.get(s.source) || [];
+      list.push(s);
+      balGroups.set(s.source, list);
+    }
+    for (const [source, list] of balGroups) {
+      cards.push({
+        key: `bal-${source}`,
+        sourceLabel: source,
+        sourceTone: 'balancer',
+        title: movie.title || movie.name || 'Онлайн-поток',
+        variants: [...list]
+          .sort((a, b) => qualityRank(a.quality) - qualityRank(b.quality))
+          .map((s) => ({
+            key: s.id,
+            dubbing: s.translation && s.translation !== 'Не указано' ? s.translation : undefined,
+            quality: s.quality,
+            m3u8Url: s.m3u8Url,
+            referer: s.referer,
+            iframeUrl: s.iframeUrl,
+          })),
+      });
+    }
+    return cards;
+  }, [vkItems, onlineStreams, movie]);
 
   return (
     <div
@@ -466,7 +608,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
             <div style={{ position: 'absolute', bottom: '1.5rem', left: '1.8rem', right: '1.8rem', display: 'flex', alignItems: 'flex-end', gap: '1.5rem' }}>
               {/* Poster */}
               <img
-                src={posterUrl}
+                src={posterSrc}
                 alt={movie.title}
                 style={{
                   width: '110px',
@@ -479,6 +621,12 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                   display: 'none',
                 }}
                 onLoad={e => { (e.currentTarget as HTMLImageElement).style.display = 'block'; }}
+                onError={e => {
+                  const img = e.currentTarget as HTMLImageElement;
+                  if (img.src === posterPlaceholder) return; // уже заглушка
+                  img.src = posterPlaceholder;
+                  img.style.display = 'block';
+                }}
               />
 
               {/* Text Meta */}
@@ -487,7 +635,9 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.6rem', flexWrap: 'wrap' }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: '3px', padding: '3px 9px', borderRadius: '999px', background: 'rgba(255,184,0,0.15)', border: '1px solid rgba(255,184,0,0.4)', color: '#FFB800', fontSize: '0.75rem', fontWeight: 800, boxShadow: '0 0 10px rgba(255,184,0,0.2)' }}>
                     <Star size={11} fill="#FFB800" />
-                    {movie.vote_average?.toFixed(1) || '8.0'}
+                    {(m.vote_average || movie.vote_average || 0) > 0
+                      ? (m.vote_average || movie.vote_average || 0).toFixed(1)
+                      : '—'}
                   </span>
                   {year && <span style={{ padding: '3px 9px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', color: 'rgba(240,242,248,0.65)', fontSize: '0.75rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '3px' }}><Calendar size={11}/>{year}</span>}
                   {details?.runtime && <span style={{ padding: '3px 9px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', color: 'rgba(240,242,248,0.65)', fontSize: '0.75rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '3px' }}><Clock size={11}/>{details.runtime} мин</span>}
@@ -543,11 +693,11 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
 
                 {/* Title */}
                 <h1 style={{ fontSize: 'clamp(1.4rem, 3vw, 2.2rem)', fontWeight: 900, color: '#fff', letterSpacing: '-0.02em', lineHeight: 1.1, marginBottom: '0.3rem', textShadow: '0 2px 12px rgba(0,0,0,0.8)' }}>
-                  {movie.title || movie.name}
+                  {m.title || m.name}
                 </h1>
 
-                {movie.original_title && movie.original_title !== movie.title && (
-                  <p style={{ fontSize: '0.82rem', color: 'rgba(0,242,254,0.5)', fontWeight: 600 }}>{movie.original_title}</p>
+                {m.original_title && m.original_title !== m.title && (
+                  <p style={{ fontSize: '0.82rem', color: 'rgba(0,242,254,0.5)', fontWeight: 600 }}>{m.original_title}</p>
                 )}
               </div>
             </div>
@@ -561,7 +711,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                 Сюжет
               </div>
               <p style={{ fontSize: '0.9rem', color: 'rgba(240,242,248,0.68)', lineHeight: 1.65 }}>
-                {movie.overview || details?.overview || 'Описание недоступно.'}
+                {m.overview || 'Описание недоступно.'}
               </p>
             </div>
 
@@ -645,7 +795,10 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
               </div>
             )}
 
-            {/* ── Онлайн / VK Video: прямые HLS-потоки (без TorrServer) ── */}
+            {/* ── Онлайн: VK + Kodik + балансеры в едином списке с подписями ──
+                Каждая карточка = источник + фильм; внутри — озвучки (чипы).
+                Клик: одна озвучка → сразу просмотр, несколько → диалог выбора. */}
+            {(isSearchingVk || isSearchingOnline || onlineCards.length > 0) && (
             <div
               style={{
                 marginBottom: '1rem',
@@ -656,12 +809,20 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
               }}
             >
               <div
+                onClick={() => setIsOnlineOpen((o) => !o)}
+                onKeyDown={(e) => keyActivate(e, () => setIsOnlineOpen((o) => !o))}
+                tabIndex={0}
+                role="button"
+                aria-expanded={isOnlineOpen}
+                title={isOnlineOpen ? 'Свернуть онлайн-потоки' : 'Развернуть онлайн-потоки'}
                 style={{
                   padding: '1.2rem 1.4rem 1rem',
-                  borderBottom: '1px solid rgba(255,255,255,0.05)',
+                  borderBottom: isOnlineOpen ? '1px solid rgba(255,255,255,0.05)' : 'none',
                   display: 'flex',
                   alignItems: 'center',
                   gap: '0.65rem',
+                  cursor: 'pointer',
+                  userSelect: 'none',
                 }}
               >
                 <div
@@ -669,26 +830,25 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                     width: '34px',
                     height: '34px',
                     borderRadius: '10px',
-                    background: 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(16,245,172,0.15))',
-                    border: '1px solid rgba(0,242,254,0.25)',
+                    background: 'linear-gradient(135deg, rgba(0,198,251,0.18), rgba(138,43,226,0.14))',
+                    border: '1px solid rgba(0,242,254,0.22)',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    boxShadow: '0 0 12px rgba(0,242,254,0.15)',
                     flexShrink: 0,
                   }}
                 >
-                  <Video size={16} style={{ color: 'var(--cyan)' }} />
+                  <Radio size={16} style={{ color: 'var(--cyan)' }} />
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--text-primary)' }}>
-                    Онлайн / VK Video
+                    Онлайн
                   </div>
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 500 }}>
-                    Прямые HLS-потоки из VK · без TorrServer
+                    VK · Kodik · балансеры · без TorrServer
                   </div>
                 </div>
-                {vkItems.length > 0 && (
+                {onlineCards.length > 0 && (
                   <span
                     style={{
                       padding: '2px 8px',
@@ -701,100 +861,154 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                       flexShrink: 0,
                     }}
                   >
-                    {vkItems.length}
+                    {onlineCards.length}
                   </span>
                 )}
+                <span style={{ flexShrink: 0, color: 'var(--text-muted)', display: 'flex' }}>
+                  {isOnlineOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </span>
               </div>
-              <div style={{ padding: '0.8rem 1.4rem 1.1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                {isSearchingVk ? (
-                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                    {[1, 2, 3].map((n) => (
-                      <div key={n} className="skeleton" style={{ width: '140px', height: '40px', borderRadius: '10px' }} />
-                    ))}
-                  </div>
-                ) : vkItems.length === 0 ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                    <Video size={14} />
-                    VK-потоки не найдены — используйте торренты ниже
-                  </div>
-                ) : (
-                  vkItems.map((item) => (
-                    <button
-                      key={item.id}
-                      onClick={() => handlePlayVk(item)}
-                      title={`Воспроизвести в плеере Luminary: ${item.title}`}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.6rem',
-                        padding: '0.55rem 0.9rem',
-                        borderRadius: '12px',
-                        background: 'rgba(255,255,255,0.025)',
-                        border: '1px solid rgba(255,255,255,0.06)',
-                        color: 'var(--text-primary)',
-                        fontFamily: 'inherit',
-                        cursor: 'pointer',
-                        transition: 'all 0.2s ease',
-                        textAlign: 'left',
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.background = 'rgba(0,242,254,0.08)';
-                        e.currentTarget.style.borderColor = 'rgba(0,242,254,0.3)';
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.background = 'rgba(255,255,255,0.025)';
-                        e.currentTarget.style.borderColor = 'rgba(255,255,255,0.06)';
-                      }}
-                    >
-                      {/* Пометка качества */}
-                      <span
+
+              {isOnlineOpen && (
+                <div style={{ padding: '0.8rem 1.4rem 1.1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {isSearchingVk || isSearchingOnline ? (
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      {[1, 2, 3].map((n) => (
+                        <div key={n} className="skeleton" style={{ width: '180px', height: '40px', borderRadius: '10px' }} />
+                      ))}
+                    </div>
+                  ) : onlineCards.length === 0 ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                      <Radio size={14} />
+                      Онлайн-потоки не найдены — используйте торренты ниже
+                    </div>
+                  ) : (
+                    onlineCards.map((card) => (
+                      <button
+                        key={card.key}
+                        onClick={() => playStreamCard(card)}
+                        title={`Выбрать поток: ${card.sourceLabel} · ${card.title}`}
                         style={{
-                          flexShrink: 0,
-                          padding: '2px 7px',
-                          borderRadius: '6px',
-                          fontSize: '0.64rem',
-                          fontWeight: 900,
-                          letterSpacing: '0.05em',
-                          background: item.quality === '4K'
-                            ? 'rgba(255,184,0,0.14)'
-                            : item.quality === '1080p'
-                            ? 'rgba(0,242,254,0.12)'
-                            : item.quality === '720p'
-                            ? 'rgba(16,245,172,0.12)'
-                            : 'rgba(255,255,255,0.07)',
-                          color: item.quality === '4K' ? '#FFB800' : item.quality === '1080p' ? '#00F2FE' : item.quality === '720p' ? '#10F5AC' : 'rgba(240,242,248,0.55)',
-                          border: `1px solid ${item.quality === '4K' ? 'rgba(255,184,0,0.4)' : item.quality === '1080p' ? 'rgba(0,242,254,0.35)' : item.quality === '720p' ? 'rgba(16,245,172,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                        }}
-                      >
-                        {item.quality}
-                      </span>
-                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', fontWeight: 600 }}>
-                        {item.title}
-                      </span>
-                      {item.duration ? (
-                        <span style={{ flexShrink: 0, fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-                          {formatClock(item.duration)}
-                        </span>
-                      ) : null}
-                      <span
-                        style={{
-                          flexShrink: 0,
-                          width: '34px',
-                          height: '34px',
-                          borderRadius: '10px',
-                          background: 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(138,43,226,0.2))',
                           display: 'flex',
                           alignItems: 'center',
-                          justifyContent: 'center',
+                          gap: '0.6rem',
+                          padding: '0.55rem 0.9rem',
+                          borderRadius: '12px',
+                          background: 'rgba(255,255,255,0.025)',
+                          border: '1px solid rgba(255,255,255,0.06)',
+                          color: 'var(--text-primary)',
+                          fontFamily: 'inherit',
+                          cursor: 'pointer',
+                          transition: 'all 0.2s ease',
+                          textAlign: 'left',
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'rgba(0,242,254,0.07)';
+                          e.currentTarget.style.borderColor = 'rgba(0,242,254,0.28)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'rgba(255,255,255,0.025)';
+                          e.currentTarget.style.borderColor = 'rgba(255,255,255,0.06)';
                         }}
                       >
-                        <Play size={13} fill="white" style={{ color: '#fff', marginLeft: '1px' }} />
-                      </span>
-                    </button>
-                  ))
-                )}
-              </div>
+                        {/* Источник */}
+                        <span
+                          style={{
+                            flexShrink: 0,
+                            padding: '2px 8px',
+                            borderRadius: '6px',
+                            fontSize: '0.64rem',
+                            fontWeight: 900,
+                            letterSpacing: '0.05em',
+                            maxWidth: '110px',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            ...(card.sourceTone === 'vk'
+                              ? { background: 'rgba(0,242,254,0.12)', color: '#00F2FE', border: '1px solid rgba(0,242,254,0.3)' }
+                              : { background: 'rgba(138,43,226,0.12)', color: '#C9A2FF', border: '1px solid rgba(138,43,226,0.35)' }),
+                          }}
+                        >
+                          {card.sourceLabel}
+                        </span>
+                        {/* Качество лучшего варианта */}
+                        <span
+                          style={{
+                            flexShrink: 0,
+                            padding: '2px 7px',
+                            borderRadius: '6px',
+                            fontSize: '0.64rem',
+                            fontWeight: 900,
+                            letterSpacing: '0.05em',
+                            background: card.variants[0].quality === '4K'
+                              ? 'rgba(255,184,0,0.14)'
+                              : card.variants[0].quality === '1080p'
+                              ? 'rgba(0,242,254,0.12)'
+                              : card.variants[0].quality === '720p'
+                              ? 'rgba(16,245,172,0.12)'
+                              : 'rgba(255,255,255,0.07)',
+                            color: card.variants[0].quality === '4K' ? '#FFB800' : card.variants[0].quality === '1080p' ? '#00F2FE' : card.variants[0].quality === '720p' ? '#10F5AC' : 'rgba(240,242,248,0.55)',
+                            border: `1px solid ${card.variants[0].quality === '4K' ? 'rgba(255,184,0,0.4)' : card.variants[0].quality === '1080p' ? 'rgba(0,242,254,0.35)' : card.variants[0].quality === '720p' ? 'rgba(16,245,172,0.3)' : 'rgba(255,255,255,0.1)'}`,
+                          }}
+                        >
+                          {card.variants[0].quality}
+                        </span>
+                        {/* Название */}
+                        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', fontWeight: 600 }}>
+                          {card.title}
+                        </span>
+                        {/* Доступные озвучки (чипы) */}
+                        <span style={{ display: 'flex', gap: '4px', flexShrink: 0, alignItems: 'center' }}>
+                          {card.variants.slice(0, 3).map((v) => (
+                            <span
+                              key={v.key}
+                              style={{
+                                padding: '1px 7px',
+                                borderRadius: '999px',
+                                fontSize: '0.62rem',
+                                fontWeight: 700,
+                                background: 'rgba(76,195,138,0.1)',
+                                color: '#6FD6A2',
+                                border: '1px solid rgba(76,195,138,0.26)',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {v.dubbing || 'Оригинал'}
+                            </span>
+                          ))}
+                          {card.variants.length > 3 && (
+                            <span style={{ fontSize: '0.62rem', fontWeight: 800, color: 'var(--text-muted)' }}>
+                              +{card.variants.length - 3}
+                            </span>
+                          )}
+                        </span>
+                        {/* Длительность (VK) */}
+                        {card.sourceTone === 'vk' && card.variants[0].duration ? (
+                          <span style={{ flexShrink: 0, fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                            {formatClock(card.variants[0].duration)}
+                          </span>
+                        ) : null}
+                        <span
+                          style={{
+                            flexShrink: 0,
+                            width: '34px',
+                            height: '34px',
+                            borderRadius: '10px',
+                            background: 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(138,43,226,0.2))',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                          }}
+                        >
+                          <Play size={13} fill="white" style={{ color: '#fff', marginLeft: '1px' }} />
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
+            )}
 
             {/* Torrent Releases */}
             {searchError && (
@@ -859,204 +1073,113 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
               }}
             />
 
-            {/* ── Онлайн (KinoBox · Kodik): бесплатные потоки без TorrServer ──
-                Альтернатива торрентам: прямой .m3u8 играется в Hls.js.
-                Секция видна при загрузке/наличии потоков (прогрессив-дисклозюр):
-                нет потоков → не занимает место, торренты остаются главными. */}
-            {(isSearchingOnline || onlineStreams.length > 0) && (
-            <div
-              style={{
-                marginTop: '1rem',
-                background: 'rgba(14,15,21,0.93)',
-                border: '1px solid rgba(255,255,255,0.07)',
-                borderRadius: '22px',
-                overflow: 'hidden',
-              }}
-            >
-              <div
-                onClick={() => setIsOnlineOpen((o) => !o)}
-                onKeyDown={(e) => keyActivate(e, () => setIsOnlineOpen((o) => !o))}
-                tabIndex={0}
-                role="button"
-                aria-expanded={isOnlineOpen}
-                title={isOnlineOpen ? 'Свернуть онлайн-потоки' : 'Развернуть онлайн-потоки'}
-                style={{
-                  padding: '1.2rem 1.4rem 1rem',
-                  borderBottom: isOnlineOpen ? '1px solid rgba(255,255,255,0.05)' : 'none',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.65rem',
-                  cursor: 'pointer',
-                  userSelect: 'none',
-                }}
-              >
-                <div
-                  style={{
-                    width: '34px',
-                    height: '34px',
-                    borderRadius: '10px',
-                    background: 'linear-gradient(135deg, rgba(138,43,226,0.2), rgba(0,198,251,0.15))',
-                    border: '1px solid rgba(138,43,226,0.3)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    boxShadow: '0 0 12px rgba(138,43,226,0.15)',
-                    flexShrink: 0,
-                  }}
-                >
-                  <Radio size={16} style={{ color: 'var(--cyan)' }} />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--text-primary)' }}>
-                    Онлайн (KinoBox · Kodik)
-                  </div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 500 }}>
-                    Бесплатные потоки без TorrServer · 1080p
-                  </div>
-                </div>
-                {onlineStreams.length > 0 && (
-                  <span
-                    style={{
-                      padding: '2px 8px',
-                      borderRadius: '999px',
-                      background: 'rgba(138,43,226,0.12)',
-                      border: '1px solid rgba(138,43,226,0.35)',
-                      color: 'var(--cyan)',
-                      fontSize: '0.7rem',
-                      fontWeight: 800,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {onlineStreams.length}
-                  </span>
-                )}
-                <span style={{ flexShrink: 0, color: 'var(--text-muted)', display: 'flex' }}>
-                  {isOnlineOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                </span>
-              </div>
-
-              {isOnlineOpen && (
-                <div style={{ padding: '0.8rem 1.4rem 1.1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                  {isSearchingOnline ? (
-                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                      {[1, 2, 3].map((n) => (
-                        <div key={n} className="skeleton" style={{ width: '180px', height: '40px', borderRadius: '10px' }} />
-                      ))}
-                    </div>
-                  ) : onlineStreams.length === 0 ? (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                      <Radio size={14} />
-                      Онлайн-потоки не найдены — используйте торренты
-                    </div>
-                  ) : (
-                    onlineStreams.map((stream) => (
-                      <button
-                        key={stream.id}
-                        onClick={() => handlePlayOnline(stream)}
-                        title={
-                          stream.m3u8Url
-                            ? `Воспроизвести в плеере Luminary: ${stream.source} · ${stream.translation}`
-                            : `Открыть плеер ${stream.source} в браузере`
-                        }
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '0.6rem',
-                          padding: '0.55rem 0.9rem',
-                          borderRadius: '12px',
-                          background: 'rgba(255,255,255,0.025)',
-                          border: '1px solid rgba(255,255,255,0.06)',
-                          color: 'var(--text-primary)',
-                          fontFamily: 'inherit',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s ease',
-                          textAlign: 'left',
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.background = 'rgba(138,43,226,0.08)';
-                          e.currentTarget.style.borderColor = 'rgba(138,43,226,0.3)';
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.background = 'rgba(255,255,255,0.025)';
-                          e.currentTarget.style.borderColor = 'rgba(255,255,255,0.06)';
-                        }}
-                      >
-                        {/* Балансер */}
-                        <span
-                          style={{
-                            flexShrink: 0,
-                            padding: '2px 8px',
-                            borderRadius: '6px',
-                            fontSize: '0.64rem',
-                            fontWeight: 900,
-                            letterSpacing: '0.05em',
-                            background: 'rgba(138,43,226,0.14)',
-                            color: '#C9A2FF',
-                            border: '1px solid rgba(138,43,226,0.4)',
-                            maxWidth: '110px',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {stream.source}
-                        </span>
-                        {/* Качество */}
-                        <span
-                          style={{
-                            flexShrink: 0,
-                            padding: '2px 7px',
-                            borderRadius: '6px',
-                            fontSize: '0.64rem',
-                            fontWeight: 900,
-                            letterSpacing: '0.05em',
-                            background: stream.quality === '4K'
-                              ? 'rgba(255,184,0,0.14)'
-                              : stream.quality === '1080p'
-                              ? 'rgba(0,242,254,0.12)'
-                              : stream.quality === '720p'
-                              ? 'rgba(16,245,172,0.12)'
-                              : 'rgba(255,255,255,0.07)',
-                            color: stream.quality === '4K' ? '#FFB800' : stream.quality === '1080p' ? '#00F2FE' : stream.quality === '720p' ? '#10F5AC' : 'rgba(240,242,248,0.55)',
-                            border: `1px solid ${stream.quality === '4K' ? 'rgba(255,184,0,0.4)' : stream.quality === '1080p' ? 'rgba(0,242,254,0.35)' : stream.quality === '720p' ? 'rgba(16,245,172,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                          }}
-                        >
-                          {stream.quality}
-                        </span>
-                        {/* Перевод / озвучка */}
-                        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', fontWeight: 600 }}>
-                          {stream.translation}
-                        </span>
-                        <span
-                          style={{
-                            flexShrink: 0,
-                            width: '34px',
-                            height: '34px',
-                            borderRadius: '10px',
-                            background: stream.m3u8Url
-                              ? 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(138,43,226,0.2))'
-                              : 'rgba(255,255,255,0.05)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                          }}
-                        >
-                          {stream.m3u8Url ? (
-                            <Play size={13} fill="white" style={{ color: '#fff', marginLeft: '1px' }} />
-                          ) : (
-                            <ExternalLink size={13} style={{ color: 'var(--text-muted)' }} />
-                          )}
-                        </span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-            )}
           </div>
         </div>
       </div>
+      {pendingStream && (
+        <div
+          onClick={() => setPendingStream(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 70,
+            background: 'rgba(0,0,0,0.72)',
+            backdropFilter: 'blur(6px)',
+            WebkitBackdropFilter: 'blur(6px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '1.5rem',
+            animation: 'fadeIn 0.15s ease',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: '100%',
+              maxWidth: '460px',
+              background: 'rgba(16,18,26,0.98)',
+              border: '1px solid rgba(255,255,255,0.1)',
+              borderRadius: '20px',
+              overflow: 'hidden',
+              boxShadow: '0 24px 70px rgba(0,0,0,0.7)',
+            }}
+          >
+            <div style={{ padding: '1.1rem 1.3rem 0.9rem', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'flex-start', gap: '0.6rem' }}>
+              <span
+                style={{
+                  flexShrink: 0,
+                  padding: '2px 8px',
+                  borderRadius: '6px',
+                  fontSize: '0.64rem',
+                  fontWeight: 900,
+                  letterSpacing: '0.05em',
+                  marginTop: '2px',
+                  ...(pendingStream.sourceTone === 'vk'
+                    ? { background: 'rgba(0,242,254,0.12)', color: '#00F2FE', border: '1px solid rgba(0,242,254,0.3)' }
+                    : { background: 'rgba(138,43,226,0.12)', color: '#C9A2FF', border: '1px solid rgba(138,43,226,0.35)' }),
+                }}
+              >
+                {pendingStream.sourceLabel}
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--text-primary)', lineHeight: 1.3 }}>{pendingStream.title}</div>
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '2px' }}>Выберите озвучку</div>
+              </div>
+              <button
+                onClick={() => setPendingStream(null)}
+                aria-label="Закрыть"
+                style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px', flexShrink: 0 }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div style={{ padding: '0.8rem 1.3rem 1.2rem', display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+              {pendingStream.variants.map((v) => (
+                <button
+                  key={v.key}
+                  onClick={() => playVariant(v, pendingStream)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.6rem',
+                    padding: '0.6rem 0.9rem',
+                    borderRadius: '12px',
+                    background: 'rgba(255,255,255,0.03)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    color: 'var(--text-primary)',
+                    fontFamily: 'inherit',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                    textAlign: 'left',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'rgba(0,242,254,0.08)';
+                    e.currentTarget.style.borderColor = 'rgba(0,242,254,0.3)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+                    e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)';
+                  }}
+                >
+                  <span style={{ padding: '1px 8px', borderRadius: '999px', fontSize: '0.64rem', fontWeight: 800, background: 'rgba(76,195,138,0.12)', color: '#6FD6A2', border: '1px solid rgba(76,195,138,0.3)', flexShrink: 0 }}>
+                    {v.dubbing || 'Оригинал'}
+                  </span>
+                  <span style={{ padding: '1px 7px', borderRadius: '6px', fontSize: '0.64rem', fontWeight: 900, background: 'rgba(255,255,255,0.07)', color: 'rgba(240,242,248,0.6)', border: '1px solid rgba(255,255,255,0.1)', flexShrink: 0 }}>
+                    {v.quality}
+                  </span>
+                  {v.duration ? (
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, marginLeft: 'auto' }}>{formatClock(v.duration)}</span>
+                  ) : (
+                    <span style={{ marginLeft: 'auto' }} />
+                  )}
+                  <Play size={14} fill="white" style={{ color: '#fff', flexShrink: 0 }} />
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       {episodeUi && (
         <EpisodeResumeDialog
           movie={movie}

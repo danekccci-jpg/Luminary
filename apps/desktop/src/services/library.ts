@@ -9,6 +9,12 @@ export interface LibraryItem {
   poster?: string | null;
   year?: string;
   mediaType?: 'movie' | 'tv';
+  /** Рейтинг (TMDB), если был известен при сохранении — для карточек/модалки. */
+  rating?: number;
+  /** Описание (TMDB), если было известно — иначе «Описание недоступно». */
+  overview?: string;
+  /** Фоновая картинка (backdrop) для hero-шапки модалки. */
+  backdrop?: string | null;
   /** Прогресс просмотра (сек) */
   position?: number;
   duration?: number;

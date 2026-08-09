@@ -46,6 +46,11 @@ export class TMDBService {
     size: 'w185' | 'w300' | 'w500' | 'w780' | 'w1280' | 'original' = 'w500'
   ): string {
     if (!path) return '';
+    // Уже готовый URL (CDN, data-URI, luminary-img:// из каталога/истории) —
+    // не пересобираем, иначе получится битый https://…/w500/https://…
+    if (/^(https?:)?\/\//i.test(path) || path.startsWith('data:') || path.startsWith('luminary-img://')) {
+      return path;
+    }
     const normalized = path.startsWith('/') ? path : `/${path}`;
     return `${IMAGE_BASE_URL}/${size}${normalized}`;
   }

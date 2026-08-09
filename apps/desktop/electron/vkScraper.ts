@@ -29,6 +29,23 @@ const UA_DESKTOP =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 const REQUEST_TIMEOUT_MS = 4000;
 
+// ── Фильтр «только фильмы» ──
+// Отбрасываем записи эфиров/трансляций, стримы, трейлеры и клипы — они не
+// являются кино, но агрегатор охотно подтягивает их в результаты поиска.
+const NON_MOVIE_RE =
+  /прямой\s*эфир|прямая\s*трансляция|\bтрансляция\b|запись\s*эфира|в\s*эфире|\bэфир\b|\bстрим\b|\bлетсплей\b|gameplay|играет|смотрит|презентация|промо|трейлер|тизер/i;
+/** Ролики короче 10 минут (трейлеры/клипы) и «вечные» записи эфира (>6 ч). */
+const MIN_DURATION_S = 10 * 60;
+const MAX_DURATION_S = 6 * 60 * 60;
+
+function isNonMovie(title: string | undefined, duration: number | undefined): boolean {
+  if (duration != null) {
+    if (duration < MIN_DURATION_S || duration > MAX_DURATION_S) return true;
+  }
+  if (title && NON_MOVIE_RE.test(title)) return true;
+  return false;
+}
+
 /** net.fetch с жёстким таймаутом — блокировка источника не вешает поиск. */
 function fetchWithTimeout(
   url: string,
@@ -173,6 +190,7 @@ export class VkScraper {
     return settled
       .filter((x): x is PromiseFulfilledResult<VkScrapeItem | null> => x.status === 'fulfilled')
       .map((x) => x.value)
-      .filter((x): x is VkScrapeItem => x !== null);
+      .filter((x): x is VkScrapeItem => x !== null)
+      .filter((x) => !isNonMovie(x.title, x.duration));
   }
 }

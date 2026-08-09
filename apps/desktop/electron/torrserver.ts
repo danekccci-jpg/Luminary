@@ -345,12 +345,19 @@ export class TorrServerManager {
       return;
     }
 
-    // 2.5) BT-клиент не инициализировался / таймаут метаданных → полный
-    //    перезапуск сервера. Возникает при старте с сохранённым в settings.json
-    //    PeersListenPort или после зависания клиента; рестарт со сбросом
-    //    настроек лечит. Cooldown/лимит защищают от лавины перезапусков.
-    if (/bt client not connected|timeout connection get torrent info/i.test(lower)) {
-      this.scheduleRestart('bt-client-not-ready');
+    // 2.5) BT-клиент временно не готов / метаданные качаются долго — НЕ рестарт!
+    //    «error add torrent: BT client not connected» пишется сервером при add
+    //    в момент, когда клиент переподключается (старт/rem/drop торрентов).
+    //    Перезапуск сервера здесь обрывает просмотр («зависает каждые 3-5
+    //    минут») — повтор add делает сам PlayerModal (addWithRetry 6×3с).
+    //    Полный перезапуск — только по решению плеера или heartbeat (3 тика
+    //    подряд без /echo = сервер реально умер).
+    if (/bt client not connected/i.test(lower)) {
+      console.warn('[TorrServer] BT client not ready during add — retry handled by Player');
+      return;
+    }
+    if (/timeout connection get torrent info/i.test(lower)) {
+      console.warn('[TorrServer] Torrent info timeout (slow metadata) — not fatal, no restart');
       return;
     }
 
@@ -866,10 +873,12 @@ export class TorrServerManager {
     }
   }
 
-  /** Health probe: GET http://127.0.0.1:8090/echo */
+  /** Health probe: GET http://127.0.0.1:8090/echo.
+   *  Таймаут 3с: при активном gst-транскоде (CPU-heavy) сервер может отвечать
+   *  медленнее 1с — жёсткий 1с давал ложные рестарты во время просмотра. */
   public async checkHealth(): Promise<boolean> {
     return new Promise((resolve) => {
-      const req = http.get(`http://${this.host}:${this.port}/echo`, { timeout: 1000 }, (res) => {
+      const req = http.get(`http://${this.host}:${this.port}/echo`, { timeout: 3000 }, (res) => {
         // Drain response so the socket can close cleanly
         res.resume();
         resolve(res.statusCode === 200);

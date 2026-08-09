@@ -94,6 +94,48 @@ function sortStreams(streams: OnlineBalancerStream[]): OnlineBalancerStream[] {
   );
 }
 
+// ── Анти-спам: оставляем только самые надёжные источники ──
+// Рейтинг надёжности: топ балансеров KinoBox (Collaps/Videocdn) + Kodik —
+// именно их пользователь ожидает увидеть; остальные — по убыванию.
+const SOURCE_RANK: Record<string, number> = {
+  Collaps: 0,
+  Videocdn: 1,
+  Kodik: 2,
+  Alloha: 3,
+  Hdvb: 4,
+  Cdnmovies: 5,
+  Ashdi: 6,
+  Kodikstudio: 6,
+};
+
+/**
+ * Из полного списка (много балансеров × переводов) оставляем топ-N источников
+ * и в каждом — топ-M потоков (качество уже отсортировано sortStreams).
+ * Иначе онлайн-секция превращается в простыню из десятка одинаковых карточек.
+ */
+function topReliableStreams(
+  streams: OnlineBalancerStream[],
+  maxSources = 2,
+  maxPerSource = 2
+): OnlineBalancerStream[] {
+  const bySource = new Map<string, OnlineBalancerStream[]>();
+  for (const s of streams) {
+    const list = bySource.get(s.source) || [];
+    list.push(s);
+    bySource.set(s.source, list);
+  }
+  const ordered = [...bySource.entries()].sort((a, b) => {
+    const ra = SOURCE_RANK[a[0]] ?? 99;
+    const rb = SOURCE_RANK[b[0]] ?? 99;
+    return ra - rb;
+  });
+  const out: OnlineBalancerStream[] = [];
+  for (const [, list] of ordered.slice(0, maxSources)) {
+    out.push(...list.slice(0, maxPerSource));
+  }
+  return out;
+}
+
 function safeId(...parts: Array<string | undefined>): string {
   return parts.filter(Boolean).join('-').toLowerCase().replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '') || 'stream';
 }
@@ -390,6 +432,11 @@ export class OnlineBalancers {
         if (!error) error = `Kodik: ${err?.message || String(err)}`;
       }
     }
+
+    // 2.5) Анти-спам: из всех балансеров × переводов оставляем топ-2 источника
+    // по надёжности, в каждом — топ-2 потока (4K/1080p в первую очередь).
+    // Резолв .m3u8 ниже прогоняем уже только по этому срезу — экономим запросы.
+    streams = topReliableStreams(sortStreams(dedupeStreams(streams)));
 
     // 3) Резолв прямых .m3u8 из iframe-плееров (параллельно, каждый ≤6с)
     if (streams.length > 0) {

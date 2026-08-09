@@ -33,6 +33,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [jackettUrl,    setJackettUrl]    = useState(settings.jackettUrl || '');
   const [jackettApiKey, setJackettApiKey] = useState(settings.jackettApiKey || '');
   const [jacredUrl,     setJacredUrl]     = useState(settings.jacredUrl || '');
+  const [kodikToken,    setKodikToken]    = useState(settings.kodikToken || '');
   const [transcodeAudio, setTranscodeAudio] = useState(settings.transcodeAudioToAac ?? true);
   const [platformInfo,  setPlatformInfo]  = useState({ platform: 'desktop', arch: 'x64' });
   const [isToggling,    setIsToggling]    = useState(false);
@@ -152,6 +153,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       jackettUrl,
       jackettApiKey,
       jacredUrl,
+      kodikToken,
       transcodeAudioToAac: transcodeAudio,
       tvMode,
     });
@@ -807,7 +809,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
               <p style={{ fontSize: '0.68rem', color: 'var(--text-muted)', lineHeight: 1.45, margin: '0' }}>
                 VK Video работает без авторизации: публичный поиск по названию +
-                прямые HLS-потоки (блок «Онлайн / VK» в карточке фильма).
+                прямые HLS-потоки (блок «Онлайн» в карточке фильма).
+              </p>
+              <input
+                type="password"
+                value={kodikToken}
+                onChange={e => setKodikToken(e.target.value)}
+                placeholder="Kodik API-токен (опционально)"
+                className="input-glass"
+                style={{ height: '38px', fontSize: '0.82rem' }}
+              />
+              <p style={{ fontSize: '0.68rem', color: 'var(--text-muted)', lineHeight: 1.45, margin: '-0.2rem 0 0' }}>
+                Kodik API-токен (бесплатно на kodikapi.com) — второй надёжный источник
+                онлайн-потоков помимо VK. Пусто = источник пропускается.
               </p>
               <input
                 type="text"

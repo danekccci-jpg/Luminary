@@ -1,12 +1,10 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import {
-  Play, Download, Search,
+  Download, Search,
   Volume2, Loader2,
 } from 'lucide-react';
-import { TorrentRelease, DubbingType } from '../types';
+import { TorrentRelease } from '../types';
 import { parseTorrentMeta, russianPriority } from '../utils/torrentMeta';
-import { sanitizeTrackerName } from '../utils/trackerName';
-import { keyActivate } from '../utils/focus';
 import { TorrentCard } from './TorrentCard';
 
 interface TorrentSelectorProps {
@@ -26,92 +24,6 @@ interface TorrentSelectorProps {
   onSeasonFilterChange?: (season: number) => void;
 }
 
-// ── Circular Health Indicator SVG ──────────────
-const HealthRing: React.FC<{ score: number; label: string }> = ({ score, label }) => {
-  const r = 20;
-  const circ = 2 * Math.PI * r;
-  const dashOffset = circ - (circ * score) / 100;
-
-  const color =
-    score >= 80 ? '#10F5AC'
-    : score >= 55 ? '#00F2FE'
-    : score >= 35 ? '#FFB800'
-    : '#FF5470';
-
-  return (
-    <div
-      title={`Индекс стабильности: ${score}%`}
-      style={{
-        position: 'relative',
-        width: '54px',
-        height: '54px',
-        flexShrink: 0,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-      }}
-    >
-      <svg width="54" height="54" style={{ transform: 'rotate(-90deg)', position: 'absolute' }}>
-        {/* Track */}
-        <circle
-          cx="27" cy="27" r={r}
-          fill="none"
-          stroke="rgba(255,255,255,0.07)"
-          strokeWidth="3"
-        />
-        {/* Progress Arc */}
-        <circle
-          cx="27" cy="27" r={r}
-          fill="none"
-          stroke={color}
-          strokeWidth="3"
-          strokeDasharray={circ}
-          strokeDashoffset={dashOffset}
-          strokeLinecap="round"
-          style={{
-            filter: `drop-shadow(0 0 4px ${color})`,
-            transition: 'stroke-dashoffset 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
-          }}
-        />
-      </svg>
-      {/* Score Text */}
-      <div
-        style={{
-          position: 'relative',
-          textAlign: 'center',
-          lineHeight: 1,
-        }}
-      >
-        <div style={{ fontSize: '0.72rem', fontWeight: 900, color }}>{score}</div>
-        <div style={{ fontSize: '0.52rem', color: 'rgba(240,242,248,0.35)', fontWeight: 700, marginTop: '1px' }}>HealthID</div>
-      </div>
-    </div>
-  );
-};
-
-// ── Dubbing Chip Styling ───────────────────────
-const getDubbingStyle = (dub: string) => {
-  switch (dub) {
-    case 'Дубляж':        return { bg: 'rgba(16,245,172,0.1)',  color: '#10F5AC', border: 'rgba(16,245,172,0.35)',  glow: 'rgba(16,245,172,0.2)' };
-    case 'RHS':           return { bg: 'rgba(16,245,172,0.1)',  color: '#10F5AC', border: 'rgba(16,245,172,0.35)',  glow: 'rgba(16,245,172,0.2)' };
-    case 'HDRezka':       return { bg: 'rgba(138,43,226,0.12)', color: '#B57BFF', border: 'rgba(138,43,226,0.4)',   glow: 'rgba(138,43,226,0.25)' };
-    case 'LostFilm':      return { bg: 'rgba(138,43,226,0.1)',  color: '#c084fc', border: 'rgba(192,132,252,0.35)', glow: 'rgba(192,132,252,0.2)' };
-    case 'TVShows':       return { bg: 'rgba(138,43,226,0.1)',  color: '#c084fc', border: 'rgba(192,132,252,0.35)', glow: 'rgba(192,132,252,0.2)' };
-    case 'Кубик в Кубе':  return { bg: 'rgba(217,70,239,0.1)',  color: '#D946EF', border: 'rgba(217,70,239,0.35)',  glow: 'rgba(217,70,239,0.2)' };
-    default:              return { bg: 'rgba(0,242,254,0.08)',   color: '#00F2FE', border: 'rgba(0,242,254,0.3)',    glow: 'rgba(0,242,254,0.15)' };
-  }
-};
-
-// ── Quality Badge Styles ───────────────────────
-const getQualityStyle = (q: string) => {
-  switch (q) {
-    case '4K':    return { bg: 'rgba(255,184,0,0.14)',   color: '#FFB800', border: 'rgba(255,184,0,0.45)',   glow: 'rgba(255,184,0,0.25)' };
-    case '1080p': return { bg: 'rgba(0,242,254,0.1)',    color: '#00F2FE', border: 'rgba(0,242,254,0.35)',   glow: 'rgba(0,242,254,0.2)' };
-    case '720p':  return { bg: 'rgba(16,245,172,0.1)',   color: '#10F5AC', border: 'rgba(16,245,172,0.3)',   glow: '' };
-    default:      return { bg: 'rgba(255,255,255,0.06)', color: 'rgba(240,242,248,0.5)', border: 'rgba(255,255,255,0.1)', glow: '' };
-  }
-};
-
 export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
   releases,
   isLoading,
@@ -129,6 +41,7 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
   const [keyword, setKeyword]               = useState('');
 
   const dubbingOptions = ['ALL', 'Дубляж', 'HDRezka', 'LostFilm', 'Оригинал + Субтитры', 'RHS'];
+  const qualityOptions = ['ALL', '4K', '1080p', '720p'];
 
   /** Сезоны раздачи: {from, to} из названия (S01, S01-S03, «сезон 2»), null — без маркера. */
   const seasonsOf = (title: string): { from: number; to: number } | null => {
@@ -150,7 +63,6 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
     if (!s) return true;
     return seasonFilter >= s.from && seasonFilter <= s.to;
   };
-  const qualityOptions = ['ALL', '4K', '1080p', '720p'];
 
   const filtered = releases.filter((r) => {
     if (qualityFilter !== 'ALL' && r.quality !== qualityFilter) return false;
@@ -178,117 +90,52 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
     return 0;
   });
 
-  // Кэш разбора метаданных (озвучки/серии/аудио) — избегаем повторного
-  // parseTorrentMeta на каждый рендер карточки (до 13 вызовов на раздачу).
-  const metaCache = useMemo(() => {
-    const m = new Map<string, ReturnType<typeof parseTorrentMeta>>();
-    for (const r of releases) m.set(r.id, parseTorrentMeta(r.title));
-    return m;
-  }, [releases]);
-  const metaOf = (r: TorrentRelease) => metaCache.get(r.id) || parseTorrentMeta(r.title);
-
   return (
-    <div
-      style={{
-        marginTop: '2rem',
-        background: 'rgba(14,15,21,0.93)',
-        border: '1px solid rgba(255,255,255,0.07)',
-        borderRadius: '22px',
-        overflow: 'hidden',
-      }}
-    >
+    <div className="torrent-panel">
       {/* ── Header ── */}
-      <div
-        style={{
-          padding: '1.2rem 1.4rem 1rem',
-          borderBottom: '1px solid rgba(255,255,255,0.05)',
-          background: 'linear-gradient(135deg, rgba(0,242,254,0.04), rgba(138,43,226,0.03))',
-          display: 'flex',
-          flexWrap: 'wrap',
-          gap: '0.75rem',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
-          <div
-            style={{
-              width: '34px',
-              height: '34px',
-              borderRadius: '10px',
-              background: 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(138,43,226,0.2))',
-              border: '1px solid rgba(0,242,254,0.2)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 0 12px rgba(0,242,254,0.15)',
-            }}
-          >
-            <Download size={16} style={{ color: 'var(--cyan)' }} />
+      <div className="torrent-panel-header">
+        <div className="torrent-panel-heading">
+          <div className="torrent-panel-icon">
+            <Download size={15} />
           </div>
           <div>
-            <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <div className="torrent-panel-title">
               <span>Доступные раздачи</span>
-              <span style={{
-                padding: '1px 8px',
-                borderRadius: '999px',
-                background: 'rgba(0,242,254,0.12)',
-                border: '1px solid rgba(0,242,254,0.3)',
-                color: 'var(--cyan)',
-                fontSize: '0.72rem',
-                fontWeight: 900,
-              }}>
-                {filtered.length}
-              </span>
+              <span className="torrent-panel-count">{filtered.length}</span>
             </div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 500 }}>
+            <div className="torrent-panel-sub">
               Мульти-парсер: JacRed · Torrentio · Rutor · Jackett
             </div>
           </div>
         </div>
 
         {/* Keyword Search */}
-        <div style={{ position: 'relative', width: '220px' }}>
-          <Search size={13} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'rgba(240,242,248,0.3)', pointerEvents: 'none' }} />
+        <div className="torrent-search">
+          <Search size={13} className="torrent-search-icon" />
           <input
             type="text"
             value={keyword}
             onChange={e => setKeyword(e.target.value)}
             placeholder="RHS, REMUX, DV..."
-            className="input-glass"
-            style={{ paddingLeft: '30px', height: '34px', fontSize: '0.78rem', borderRadius: '10px' }}
+            className="torrent-search-input"
           />
         </div>
       </div>
 
       {/* ── Filter Chips Panel ── */}
-      <div
-        style={{
-          padding: '0.85rem 1.4rem',
-          borderBottom: '1px solid rgba(255,255,255,0.05)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '0.55rem',
-        }}
-      >
+      <div className="torrent-filters">
         {/* Quality */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', minWidth: '68px' }}>Качество</span>
-          <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+        <div className="torrent-filter-row">
+          <span className="torrent-filter-label">Качество</span>
+          <div className="torrent-filter-chips">
             {qualityOptions.map(q => {
-              const qs = q !== 'ALL' ? getQualityStyle(q) : null;
               const isActive = qualityFilter === q;
+              const tierActive = q === '4K' && isActive;
               return (
                 <button
                   key={q}
                   onClick={() => setQualityFilter(q)}
-                  className={`filter-chip ${isActive ? 'active-cyan' : ''}`}
-                  style={isActive && qs ? {
-                    background: qs.bg,
-                    color: qs.color,
-                    borderColor: qs.border,
-                    boxShadow: `0 0 10px ${qs.glow}`,
-                  } : {}}
+                  className={`filter-chip${isActive ? ' active' : ''}${tierActive ? ' active-amber' : ''}`}
                 >
                   {q === 'ALL' ? 'Все' : q}
                 </button>
@@ -298,26 +145,19 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
         </div>
 
         {/* Dubbing */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'flex', alignItems: 'center', gap: '0.3rem', minWidth: '68px' }}>
-            <Volume2 size={11} style={{ color: 'var(--text-purple)' }} />
+        <div className="torrent-filter-row">
+          <span className="torrent-filter-label">
+            <Volume2 size={11} aria-hidden="true" />
             Озвучка
           </span>
-          <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+          <div className="torrent-filter-chips">
             {dubbingOptions.map(d => {
-              const ds = d !== 'ALL' ? getDubbingStyle(d) : null;
               const isActive = dubbingFilter === d;
               return (
                 <button
                   key={d}
                   onClick={() => setDubbingFilter(d)}
-                  className={`filter-chip ${isActive ? 'active-purple' : ''}`}
-                  style={isActive && ds ? {
-                    background: ds.bg,
-                    color: ds.color,
-                    borderColor: ds.border,
-                    boxShadow: `0 0 10px ${ds.glow}`,
-                  } : {}}
+                  className={`filter-chip${isActive ? ' active' : ''}`}
                 >
                   {d === 'ALL' ? 'Все студии' : d}
                 </button>
@@ -327,106 +167,70 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
         </div>
 
         {/* Sort Selector (RU-first по умолчанию) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600 }}>Сортировать:</span>
-          {[
-            { id: 'russian',   label: 'RU + Сиды' },
-            { id: 'seeders',   label: 'По сидам' },
-            { id: 'stability', label: 'Smart Choice' },
-            { id: 'size',      label: 'Размер' },
-          ].map(opt => (
-            <button
-              key={opt.id}
-              onClick={() => setSortBy(opt.id as any)}
-              className={`filter-chip ${sortBy === opt.id ? 'active-cyan' : ''}`}
-              style={{ fontSize: '0.7rem' }}
-            >
-              {opt.label}
-            </button>
-          ))}
+        <div className="torrent-filter-row">
+          <span className="torrent-filter-label">Сортировка</span>
+          <div className="torrent-filter-chips">
+            {[
+              { id: 'russian',   label: 'RU + Сиды' },
+              { id: 'seeders',   label: 'По сидам' },
+              { id: 'stability', label: 'Smart Choice' },
+              { id: 'size',      label: 'Размер' },
+            ].map(opt => (
+              <button
+                key={opt.id}
+                onClick={() => setSortBy(opt.id as any)}
+                className={`filter-chip${sortBy === opt.id ? ' active' : ''}`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
       {/* ── Сезоны (для сериалов): фильтрует раздачи по S01/S02… ── */}
       {tvSeasons > 1 && onSeasonFilterChange && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap', padding: '0.2rem 0.8rem 0.4rem' }}>
-          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 700, marginRight: '0.2rem' }}>Сезон:</span>
-          {[0, ...Array.from({ length: tvSeasons }, (_, i) => i + 1)].map((s) => (
-            <button
-              key={s}
-              onClick={() => onSeasonFilterChange(s)}
-              style={{
-                padding: '0.28rem 0.65rem',
-                borderRadius: '8px',
-                fontSize: '0.72rem',
-                fontWeight: 700,
-                fontFamily: 'inherit',
-                border: 'none',
-                cursor: 'pointer',
-                transition: 'all 0.2s ease',
-                background:
-                  seasonFilter === s
-                    ? 'linear-gradient(135deg, rgba(0,198,251,0.2), rgba(138,43,226,0.15))'
-                    : 'rgba(255,255,255,0.04)',
-                color: seasonFilter === s ? '#00F2FE' : 'rgba(240,242,248,0.55)',
-                boxShadow:
-                  seasonFilter === s ? '0 0 8px rgba(0,242,254,0.2), inset 0 0 0 1px rgba(0,242,254,0.2)' : 'none',
-              }}
-            >
-              {s === 0 ? 'Все' : `S${String(s).padStart(2, '0')}`}
-            </button>
-          ))}
+        <div className="torrent-season-row">
+          <span className="torrent-filter-label">Сезон</span>
+          <div className="torrent-filter-chips">
+            {[0, ...Array.from({ length: tvSeasons }, (_, i) => i + 1)].map((s) => (
+              <button
+                key={s}
+                onClick={() => onSeasonFilterChange(s)}
+                className={`filter-chip${seasonFilter === s ? ' active' : ''}`}
+              >
+                {s === 0 ? 'Все' : `S${String(s).padStart(2, '0')}`}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
       {/* ── RuTracker ищет раздачи (фоновый поиск, догонят список) ── */}
       {isRutrackerSearching && releases.length > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.45rem',
-            padding: '0.45rem 0.8rem',
-            margin: '0 0.8rem 0.4rem',
-            borderRadius: '10px',
-            background: 'rgba(0,242,254,0.05)',
-            border: '1px solid rgba(0,242,254,0.15)',
-            color: 'rgba(0,242,254,0.75)',
-            fontSize: '0.75rem',
-            fontWeight: 600,
-          }}
-        >
-          <Loader2 size={13} style={{ animation: 'spin 1.2s linear infinite', flexShrink: 0 }} />
+        <div className="torrent-note">
+          <Loader2 size={13} className="animate-spin" />
           RuTracker: ищем раздачи…
         </div>
       )}
 
       {/* ── Release List ── */}
-      <div
-        style={{
-          padding: '0.6rem 0.8rem',
-          maxHeight: '480px',
-          overflowY: 'auto',
-          // GPU-композитинг скролл-контейнера (микро-фризы на M1 при repaint)
-          transform: 'translateZ(0)',
-          willChange: 'transform',
-        }}
-      >
+      <div className="torrent-list">
         {isLoading ? (
-          <div style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             {[1, 2, 3].map(n => (
               <div key={n} className="torrent-card-skeleton" />
             ))}
           </div>
         ) : sorted.length === 0 ? (
-          <div style={{ padding: '3rem', textAlign: 'center' }}>
-            <div style={{ width: '48px', height: '48px', borderRadius: '50%', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 0.75rem' }}>
-              <Download size={20} style={{ color: 'var(--text-muted)' }} />
+          <div className="torrent-empty">
+            <div className="torrent-empty-icon">
+              <Download size={20} />
             </div>
-            <p style={{ color: 'var(--text-secondary)', fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.25rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.45rem' }}>
+            <p className="torrent-empty-title">
               {isRutrackerSearching ? (
                 <>
-                  <Loader2 size={14} style={{ animation: 'spin 1.2s linear infinite' }} />
+                  <Loader2 size={14} className="animate-spin" style={{ verticalAlign: '-2px', marginRight: '6px' }} />
                   RuTracker: ищем раздачи…
                 </>
               ) : (
@@ -434,34 +238,14 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
               )}
             </p>
             {!isRutrackerSearching && (
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginBottom: '1rem' }}>
+              <p className="torrent-empty-sub">
                 {error || 'Попробуйте повторить поиск — часть источников могла временно отвалиться'}
               </p>
             )}
-            {onRetry && (
+            {onRetry && !isRutrackerSearching && (
               <button
                 onClick={onRetry}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '0.4rem',
-                  padding: '0.5rem 1.2rem',
-                  borderRadius: '12px',
-                  border: '1px solid rgba(0,242,254,0.35)',
-                  background: 'rgba(0,242,254,0.08)',
-                  color: 'var(--cyan)',
-                  fontSize: '0.82rem',
-                  fontWeight: 700,
-                  fontFamily: 'inherit',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease',
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLButtonElement).style.background = 'rgba(0,242,254,0.16)';
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLButtonElement).style.background = 'rgba(0,242,254,0.08)';
-                }}
+                className="btn-accent"
               >
                 <Search size={14} />
                 Повторить поиск
@@ -469,7 +253,7 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
             )}
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             {sorted.map((release, idx) => (
               <TorrentCard
                 key={release.id}
