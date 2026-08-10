@@ -1,16 +1,56 @@
-# ── Монорепо Luminary: корневые игноры ──
-# Детальные правила для десктопа — в apps/desktop/.gitignore
+# ══════════════════════════════════════════════════════════════
+# Luminary — Монорепо: корневой .gitignore
+# ══════════════════════════════════════════════════════════════
 
-# Сессионные файлы ZCode (не часть проекта)
+# ── macOS ──
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# ── Windows ──
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ── Linux ──
+*~
+.directory
+
+# ── IDE / Editor ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# ── Environment / Secrets ──
+.env
+.env.local
+.env.*.local
+*.pem
+*.p12
+*.pfx
+*.jks
+
+# ── ZCode session (не часть проекта) ──
 .zcode/
 
-# Локальные артефакты
-.DS_Store
-Thumbs.db
-
-# Сборки Android (Capacitor) — появятся с этапом apps/android
+# ── Android / Capacitor (будущий apps/android) ──
 apps/android/android/.gradle/
 apps/android/android/local.properties
 apps/android/node_modules/
 *.apk
 *.aab
+
+# ── Build artifacts (root level) ──
+*.tgz
+coverage/

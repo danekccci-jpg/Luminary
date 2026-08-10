@@ -1,5 +1,10 @@
+# ══════════════════════════════════════════════════════════════
+# Luminary Desktop — apps/desktop/.gitignore
+# ══════════════════════════════════════════════════════════════
+
 # ── Dependencies ──
 node_modules/
+.pnpm-store/
 
 # ── Build outputs ──
 dist/
@@ -7,34 +12,44 @@ dist-electron/
 release/
 out/
 *.asar
+*.blockmap
 
 # ── Logs ──
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-*.log
+lerna-debug.log*
 
 # ── Environment / Secrets ──
 .env
 .env.local
 .env.*.local
 *.local
+*.pem
 
 # ── Editor / OS ──
 .vscode/
 .idea/
+*.swp
+*.swo
 .DS_Store
 Thumbs.db
 
-# ── Runtime data (TorrServer binary, cache) ──
+# ── TorrServer binaries (скачиваются scripts/fetch-torrserver.js) ──
+resources/torrserver/TorrServer-*
+
+# ── Release artifacts (собираются локально/CI) ──
 *.dmg
 *.exe
 *.zip
 
-# ── TorrServer binaries: скачиваются scripts/fetch-torrserver.js
-#    (не коммитим 60MB-бинарники; CI качает их перед сборкой) ──
-resources/torrserver/TorrServer-*
+# ── Runtime data (TorrServer/JacRed cache — создаются при запуске) ──
+Data/
+
+# ── Electron unpacked (временные сборки) ──
+*-unpacked/
 
 # ── Helper scripts (local only) ──
 verify-zip.ps1
