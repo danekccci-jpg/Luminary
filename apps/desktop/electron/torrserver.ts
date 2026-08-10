@@ -651,21 +651,23 @@ export class TorrServerManager {
         console.warn(`[TorrServer] Port ${this.port} cleanup warning (non-fatal):`, err?.message);
       }
 
-      // ── Сброс настроек TorrServer (BT-клиент fix) ──
-      // Сохранённый в settings.json PeersListenPort=43211 применяется сервером
-      // СРАЗУ при старте и ломает инициализацию BT-клиента
-      // («BT client not connected» → 500 на add). Удаляем файл настроек —
-      // сервер пересоздаст дефолтный (порт random autoselect 0), а полная
-      // конфигурация (включая порт 43211) применяется нами через API
-      // после инициализации клиента.
+      // ── Сброс настроек TorrServer (BT-клиент fix + TorrentDisconnectTimeout) ──
+      // Сохранённый в settings.db TorrentDisconnectTimeout:30 перезаписывает
+      // нашу установку (0). Удаляем settings.db + settings.json — сервер
+      // пересоздаст дефолтные, а полная конфигурация применяется через API.
       try {
         const settingsFile = path.join(this.dataDir, 'settings.json');
         if (fs.existsSync(settingsFile)) {
           fs.unlinkSync(settingsFile);
-          console.log('[TorrServer] Reset settings.json (stale PeersListenPort cleared)');
+          console.log('[TorrServer] Reset settings.json');
+        }
+        const settingsDb = path.join(this.dataDir, 'settings.db');
+        if (fs.existsSync(settingsDb)) {
+          fs.unlinkSync(settingsDb);
+          console.log('[TorrServer] Reset settings.db (stale TorrentDisconnectTimeout cleared)');
         }
       } catch {
-        /* файла может не быть — ок */
+        /* файлов может не быть — ок */
       }
 
       // Explicitly re-assert exec permissions right before spawn (macOS/Linux)
@@ -813,6 +815,8 @@ export class TorrServerManager {
         RemoveCacheOnDrop: true,
         ConnectionsLimit: 120,
         ClientsStatLimit: 30,
+        TorrentDisconnectTimeout: 86400,     // 24 часа (TorrServer НЕ принимает 0 —
+        //   приводит к дефолту30; 86400 = бесконечность на практике для десктопа)
         DownloadRateLimit: 0,               // без лимитов скорости
         UploadRateLimit: 0,
         DisableUPNP: false,                 // UPNP/NAT-PMP проброс портов
@@ -859,6 +863,39 @@ export class TorrServerManager {
       console.log(`[TorrServer] Torrent ${hash} re-added — DHT/trackers reconnected`);
     } catch (e: any) {
       console.warn('[TorrServer] Reconnect add warning:', e.message);
+    }
+  }
+
+  /**
+   * Полный сброс сети TorrServer: вызывается при смене IP/WiFi.
+   * 1) Пере-анонс активного торрента (reconnectTorrent) — принудительно
+   *    обновляет DHT-таблицу и переподключает пиры к новому интерфейсу.
+   * 2) Повторное применение конфигурации — DHT/UPnP/PeersListenPort
+   *    могут быть сброшены при смене сетевого стека.
+   */
+  public async resetNetwork(): Promise<void> {
+    console.log('[TorrServer] Network reset: re-announcing torrents + reconfiguring...');
+    // 1) Пере-анонс: получаем список активных торрентов и reconnect
+    try {
+      const list = await this.apiRequest('list', {});
+      const torrents: any[] = Array.isArray(list) ? list : [];
+      for (const t of torrents) {
+        const hash = t.Hash || t.hash;
+        const link = t.Link || t.link || t.magnet || '';
+        if (hash) {
+          await this.reconnectTorrent(hash, link);
+          console.log(`[TorrServer] Network reset: re-announced ${hash.slice(0, 12)}`);
+        }
+      }
+    } catch (e: any) {
+      console.warn('[TorrServer] Network reset list warning:', e.message);
+    }
+    // 2) Повторная конфигурация — DHT/UPnP/PeersListenPort
+    try {
+      await this.configureServer(512, true);
+      console.log('[TorrServer] Network reset: configuration reapplied');
+    } catch (e: any) {
+      console.warn('[TorrServer] Network reset reconfigure warning:', e.message);
     }
   }
 

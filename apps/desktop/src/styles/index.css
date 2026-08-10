@@ -815,15 +815,20 @@ body {
   transition: box-shadow 0.18s ease;
 }
 
-.torrent-card.q-4k .torrent-card-rail    { background: var(--amber); }
-.torrent-card.q-1080 .torrent-card-rail  { background: var(--tint); }
-.torrent-card.q-720 .torrent-card-rail   { background: var(--steel); }
-.torrent-card.q-sd .torrent-card-rail    { background: rgba(255, 255, 255, 0.14); }
+/* Рельса — цвет по ПЛАТФОРМЕ (трекеру) */
+.torrent-card.plat-ru .torrent-card-rail    { background: #E5A54B; }
+.torrent-card.plat-jac .torrent-card-rail   { background: #6EA8FE; }
+.torrent-card.plat-tio .torrent-card-rail   { background: #9D8CFF; }
+.torrent-card.plat-nnm .torrent-card-rail   { background: #4CC38A; }
+.torrent-card.plat-rutor .torrent-card-rail { background: #7F93B8; }
+.torrent-card.plat-other .torrent-card-rail { background: rgba(255, 255, 255, 0.14); }
 
-.torrent-card.q-4k:hover .torrent-card-rail    { box-shadow: 0 0 12px -1px rgba(229, 165, 75, 0.55); }
-.torrent-card.q-1080:hover .torrent-card-rail  { box-shadow: 0 0 12px -1px rgba(110, 168, 254, 0.55); }
-.torrent-card.q-720:hover .torrent-card-rail   { box-shadow: 0 0 12px -1px rgba(127, 147, 184, 0.55); }
-.torrent-card.q-sd:hover .torrent-card-rail    { box-shadow: 0 0 12px -1px rgba(255, 255, 255, 0.25); }
+.torrent-card.plat-ru:hover .torrent-card-rail    { box-shadow: 0 0 12px -1px rgba(229,165,75,0.55); }
+.torrent-card.plat-jac:hover .torrent-card-rail   { box-shadow: 0 0 12px -1px rgba(110,168,254,0.55); }
+.torrent-card.plat-tio:hover .torrent-card-rail   { box-shadow: 0 0 12px -1px rgba(157,140,255,0.55); }
+.torrent-card.plat-nnm:hover .torrent-card-rail   { box-shadow: 0 0 12px -1px rgba(76,195,138,0.55); }
+.torrent-card.plat-rutor:hover .torrent-card-rail { box-shadow: 0 0 12px -1px rgba(127,147,184,0.55); }
+.torrent-card.plat-other:hover .torrent-card-rail { box-shadow: 0 0 12px -1px rgba(255,255,255,0.25); }
 
 /* Оригинальное полное имя раздачи — максимум 2 строки */
 .torrent-card-title {
@@ -869,30 +874,13 @@ body {
   white-space: nowrap;
 }
 
-/* Качество — акцентный чип, резонирует с рельсой */
-.torrent-tag-quality.q-4k {
-  background: var(--amber-dim);
-  color: var(--amber-strong);
-  border: 1px solid rgba(229, 165, 75, 0.4);
-}
-
-.torrent-tag-quality.q-1080 {
-  background: var(--tint-dim);
-  color: var(--tint-strong);
-  border: 1px solid rgba(110, 168, 254, 0.38);
-}
-
-.torrent-tag-quality.q-720 {
-  background: var(--steel-dim);
-  color: var(--steel-strong);
-  border: 1px solid rgba(127, 147, 184, 0.34);
-}
-
-.torrent-tag-quality.q-sd {
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(237, 241, 247, 0.6);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
+/* Quality badge — цвет чипа по ПЛАТФОРМЕ (текст остаётся качеством: 4K/1080p…) */
+.torrent-tag-quality.plat-ru    { background: var(--amber-dim);  color: var(--amber-strong);  border: 1px solid rgba(229,165,75,0.4); }
+.torrent-tag-quality.plat-jac   { background: var(--tint-dim);   color: var(--tint-strong);   border: 1px solid rgba(110,168,254,0.38); }
+.torrent-tag-quality.plat-tio   { background: var(--violet-dim); color: var(--violet-strong); border: 1px solid rgba(157,140,255,0.34); }
+.torrent-tag-quality.plat-nnm   { background: var(--green-dim);  color: var(--green-strong);  border: 1px solid rgba(76,195,138,0.3); }
+.torrent-tag-quality.plat-rutor { background: var(--steel-dim);  color: var(--steel-strong);  border: 1px solid rgba(127,147,184,0.34); }
+.torrent-tag-quality.plat-other { background: rgba(255,255,255,0.05); color: rgba(237,241,247,0.6); border: 1px solid rgba(255,255,255,0.1); }
 
 /* Кодеки/контейнеры — острые, нейтральные, микро-типографика */
 .torrent-tag-spec {

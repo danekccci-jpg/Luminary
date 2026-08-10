@@ -305,6 +305,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const progressRef  = useRef<HTMLDivElement>(null);
   const controlsTimerRef = useRef<NodeJS.Timeout | null>(null);
   const preloadRef   = useRef<{ controller: AbortController | null }>({ controller: null });
+  /** Последний preload URL — нужен для перезапуска preload при смене сети. */
+  const preloadUrlRef = useRef<string>('');
 
   const [streamUrl, setStreamUrl]       = useState('');
   const [hash, setHash]                 = useState('');
@@ -903,6 +905,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
         // ── Сразу открываем непрерывный поток: TorrServer начинает качать
         //    незамедлительно, экран буферизации показывает реальную скорость ──
+        preloadUrlRef.current = preloadUrl;
         startPreload(preloadUrl);
 
         // ── 1) Статистика торрента: кольцо буфера, скорость, пиры, контейнер ──
@@ -1012,6 +1015,61 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [magnet, title, poster, transcodeAudioToAac, directUrl, torrentFile]);
+
+  // ── Network resilience: смена IP/списке сети → восстановление плеера ──
+  useEffect(() => {
+    if (!hash) return;
+    const unsub = torrServerService.onNetworkChanged(() => {
+      console.log('[Player] Network changed — resetting connections');
+      // 1) Пере-анонс DHT/трекеров через TorrServer (rem+add активного торрента)
+      torrServerService.resetNetwork().catch(() => {});
+      // 2) Перезапуск preload через4с (даём DHT пересобраться)
+      setTimeout(() => {
+        const url = preloadUrlRef.current;
+        if (url) restartPreload(url);
+      }, 4000);
+      // 3)navigator.onLine: мгновенное обнаружение offline/online
+      const goOnline = () => {
+        console.log('[Player] Network back online — reconnecting');
+        torrServerService.resetNetwork().catch(() => {});
+        setTimeout(() => {
+          const url = preloadUrlRef.current;
+          if (url) restartPreload(url);
+        }, 2000);
+      };
+      window.addEventListener('online', goOnline, { once: true });
+      // cleanup отписки navigator.onLine
+      return () => window.removeEventListener('online', goOnline);
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hash]);
+
+  // ── navigator.onLine/offline: моментальная реакция на потерю сети ──
+  useEffect(() => {
+    let recovered = false;
+    const goOffline = () => {
+      console.warn('[Player] Network offline detected');
+      // при offline — ничего не делаем (ждём), но ставим флаг
+      recovered = false;
+    };
+    const goOnline = () => {
+      if (recovered) return;
+      recovered = true;
+      console.log('[Player] Network back online — resetting TorrServer');
+      torrServerService.resetNetwork().catch(() => {});
+      setTimeout(() => {
+        const url = preloadUrlRef.current;
+        if (url) restartPreload(url);
+      }, 2000);
+    };
+    window.addEventListener('offline', goOffline);
+    window.addEventListener('online', goOnline);
+    return () => {
+      window.removeEventListener('offline', goOffline);
+      window.removeEventListener('online', goOnline);
+    };
+  }, []);
 
   /** «Пропустить буферизацию»: НЕ монтируем пустой <video> мгновенно —
    *  продолжаем ждать валидный HTTP 200 от потока, но без ожидания порога предзагрузки. */
@@ -1219,11 +1277,14 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         if (!data.fatal) return;
         console.warn('[Player] Hls fatal error:', data.type, data.details);
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          // Сетевая ошибка (gst недоступен/404 на обычном бинарнике) — до 3 авто-retry,
-          // затем авто-откат на нативный /stream, и только потом оверлей VLC.
+          // Сетевая ошибка (gst недоступен/404/потеря соединения) —
+          // экспоненциальный backoff: 1.2 → 2.4 → 4.8с, затем авто-откат
+          // на нативный /stream, и только потом оверлей VLC.
           if (netRetries < 3) {
             netRetries++;
-            setTimeout(() => hls.startLoad(), 1200);
+            const delay = 1200 * Math.pow(2, netRetries - 1);
+            console.warn(`[Player] HLS network retry ${netRetries}/3 in ${delay}ms`);
+            setTimeout(() => hls.startLoad(), delay);
             return;
           }
           if (fallbackToNativeStream()) return;

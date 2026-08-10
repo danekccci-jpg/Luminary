@@ -91,9 +91,12 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
     return true;
   });
 
-  // RU-first: приоритет русской озвучки и флагманских студий (Lampa-style),
+  // RuTracker всегда вверху + приоритет русской озвучки (Lampa-style),
   // внутри группы — по количеству сидов.
   const sorted = [...filtered].sort((a, b) => {
+    const aRt = /rutracker/i.test(a.source) ? 1 : 0;
+    const bRt = /rutracker/i.test(b.source) ? 1 : 0;
+    if (aRt !== bRt) return bRt - aRt;
     if (sortBy === 'russian') {
       const pa = russianPriority(a);
       const pb = russianPriority(b);

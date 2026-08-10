@@ -14,6 +14,8 @@ export interface ElectronAPI {
   removeTorrServerTorrent: (hash: string) => Promise<any>;
   dropTorrServerCache: (hash: string) => Promise<any>;
   reconnectTorrServer: (hash: string, magnet: string) => Promise<{ success: boolean; error?: string }>;
+  resetTorrServerNetwork: () => Promise<{ success: boolean; error?: string }>;
+  onNetworkChanged: (callback: (data: { newIp: string }) => void) => () => void;
   getTorrServerLogs: (lines?: number) => Promise<{ success: boolean; logs: string[]; error?: string }>;
   getStreamUrl: (hash: string, fileIndex?: number, transcodeAudio?: boolean, audioIndex?: number) => Promise<string>;
   searchTorrents: (
@@ -124,6 +126,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   removeTorrServerTorrent: (hash: string) => ipcRenderer.invoke('torrserver:remove', { hash }),
   dropTorrServerCache: (hash: string) => ipcRenderer.invoke('torrserver:dropCache', { hash }),
   reconnectTorrServer: (hash: string, magnet: string) => ipcRenderer.invoke('torrserver:reconnect', { hash, magnet }),
+  resetTorrServerNetwork: () => ipcRenderer.invoke('torrserver:reset-network'),
+  onNetworkChanged: (callback: (data: { newIp: string }) => void) => {
+    const listener = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('network-changed', listener);
+    return () => ipcRenderer.removeListener('network-changed', listener);
+  },
   getTorrServerLogs: (lines?: number) => ipcRenderer.invoke('torrserver:get-logs', lines),
   getStreamUrl: (hash: string, fileIndex?: number, transcodeAudio?: boolean, audioIndex?: number) =>
     ipcRenderer.invoke('torrserver:streamUrl', { hash, fileIndex, transcodeAudio, audioIndex }),

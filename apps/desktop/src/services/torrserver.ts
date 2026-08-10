@@ -57,6 +57,23 @@ export class TorrServerService {
     this.prefetchMap.delete(magnet);
     return hit.hash;
   }
+
+  /** Полный сброс сети: пере-анонс DHT/трекеров + reconfigure.
+   *  Вызывается при смене IP/списке сети. */
+  public async resetNetwork(): Promise<void> {
+    if (window.electronAPI?.resetTorrServerNetwork) {
+      await window.electronAPI.resetTorrServerNetwork();
+    }
+  }
+
+  /**
+   * Подписка на событие смены сети (IP изменился).
+   * Вызывает callback с { newIp }. Возвращает функцию отписки.
+   */
+  public onNetworkChanged(callback: (data: { newIp: string }) => void): () => void {
+    return window.electronAPI?.onNetworkChanged?.(callback) ?? (() => {});
+  }
+
   public async getStatus(): Promise<TorrServerStatusInfo> {
     if (window.electronAPI?.getTorrServerStatus) {
       return await window.electronAPI.getTorrServerStatus();

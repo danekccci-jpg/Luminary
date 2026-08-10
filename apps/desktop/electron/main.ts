@@ -409,6 +409,47 @@ function startHeartbeat() {
   }, HEARTBEAT_INTERVAL_MS);
 }
 
+// ═══════════════════════════════════════════════════════════
+//  Мониторинг IP-адреса: обнаружение смены сети (WiFi→WiFi, WiFi→cellular)
+//  При изменении IP: переконфигурация TorrServer + push в renderer
+// ═══════════════════════════════════════════════════════════
+let networkMonitorTimer: NodeJS.Timeout | null = null;
+let lastKnownIp: string | null = null;
+const NETWORK_CHECK_INTERVAL_MS = 10000;
+
+async function checkIpChange(): Promise<void> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await net.fetch('https://api.ipify.org', { signal: controller.signal });
+    clearTimeout(timeout);
+    const ip = (await res.text()).trim();
+    if (!ip || lastKnownIp === null) {
+      lastKnownIp = ip;
+      return;
+    }
+    if (ip !== lastKnownIp) {
+      console.warn(`[Network] IP changed: ${lastKnownIp} → ${ip}`);
+      lastKnownIp = ip;
+      // Push в renderer
+      mainWindow?.webContents.send('network-changed', { oldIp: null, newIp: ip });
+      // Сброс TorrServer: пере-анонс DHT/трекеров для новой сети
+      torrServer.resetNetwork().catch((err) => console.warn('[Network] resetNetwork warning:', err.message));
+    }
+  } catch {
+    // Сеть недоступна или таймаут — проверим через 10с снова
+  }
+}
+
+function startNetworkMonitor(): void {
+  if (networkMonitorTimer) return;
+  console.log(`[Network] Monitor started (every ${NETWORK_CHECK_INTERVAL_MS / 1000}s)`);
+  checkIpChange().catch(() => {});
+  networkMonitorTimer = setInterval(() => {
+    checkIpChange().catch(() => {});
+  }, NETWORK_CHECK_INTERVAL_MS);
+}
+
 function setupIPC() {
   // ── Локальный JacRed (Zero-Config) ──
   ipcMain.handle('jacred:status', async () => {
@@ -622,6 +663,15 @@ function setupIPC() {
   ipcMain.handle('torrserver:reconnect', async (_, { hash, magnet }) => {
     try {
       await torrServer.reconnectTorrent(hash, magnet || '');
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('torrserver:reset-network', async () => {
+    try {
+      await torrServer.resetNetwork();
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message };
@@ -844,9 +894,15 @@ app.whenReady().then(async () => {
     // 4. macOS resume (выход из сна): немедленно проверить реальный статус /echo
     //    (после сна сеть/процессы могли умереть — UI должен это увидеть сразу)
     powerMonitor.on('resume', () => {
-      console.log('[Main] System resumed from sleep — refreshing TorrServer status');
+      console.log('[Main] System resumed from sleep — resetting network + refreshing status');
       heartbeatTick().catch((err) => console.warn('[KeepAlive] resume check warning:', err.message));
+      startNetworkMonitor(); // перезапустить IP-монитор после сна (IP мог измениться)
+      torrServer.resetNetwork().catch((err) => console.warn('[Main] Resume resetNetwork warning:', err.message));
     });
+
+    // 5. Мониторинг IP-адреса: обнаружение смены сети (WiFi → cellular / WiFi → WiFi)
+    //    При смене IP → переконфигурация TorrServer (DHT/трекеры) + push в renderer
+    startNetworkMonitor();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

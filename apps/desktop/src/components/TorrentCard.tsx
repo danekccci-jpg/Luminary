@@ -7,8 +7,9 @@
  *   · Ряд «аудио/языки»: дорожки (violet), озвучки (зелёные, с точкой), субтитры (пунктир)
  *   · Футер: год · трекер · индикатор здоровья слева; битрейт / сиды / пиры / размер справа
  *
- * Сигнатура компонента — цветная «рельса» качества слева (толщина 2px),
- * она подсвечивается при hover/focus и даёт оценку раздачи с одного взгляда.
+ * Цвета карточки привязаны к ПЛАТФОРМЕ (трекеру), а не к качеству файла:
+ *   RuTracker=amber, JacRed=ice, Torrentio=violet, NNM=emerald, Rutor=steel, other=neutral.
+ * Сигнатура — цветная «рельса» платформы слева (2px), подсвечивается при hover/focus.
  * Вся карточка кликабельна (role=button, Enter/Space через keyActivate).
  */
 import React, { useState } from 'react';
@@ -45,13 +46,18 @@ function normalizeQuality(tagsQuality: string, releaseQuality: string): string {
   return 'SD';
 }
 
-/** Класс уровня качества — цвет рельсы и бейджа. */
-const TIER_CLASS: Record<string, string> = {
-  '4K': 'q-4k',
-  '1080p': 'q-1080',
-  '720p': 'q-720',
-  SD: 'q-sd',
+/** Класс цвета карточки по платформе (трекеру). */
+const PLATFORM_CLASS: Record<string, string> = {
+  'RuTracker': 'plat-ru',
+  'JacRed':    'plat-jac',
+  'Torrentio': 'plat-tio',
+  'NNM-Club':  'plat-nnm',
+  'Rutor':     'plat-rutor',
 };
+
+function platformClass(source: string): string {
+  return PLATFORM_CLASS[sanitizeTrackerName(source)] || 'plat-other';
+}
 
 /** Класс здоровья раздачи по индексу стабильности. */
 function healthClass(score: number): string {
@@ -67,7 +73,7 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({ release, onPlay, index
   const [focused, setFocused] = useState(false);
 
   const quality = normalizeQuality(tags.quality, release.quality);
-  const tier = TIER_CLASS[quality] || 'q-sd';
+  const platform = platformClass(release.source);
 
   // Аудио: дорожки из названия (Atmos, 5.1) + кодек из метаданных раздачи
   const audioTags = [
@@ -86,7 +92,7 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({ release, onPlay, index
 
   return (
     <div
-      className={`torrent-card ${tier}${focused ? ' torrent-card-focused' : ''}`}
+      className={`torrent-card ${platform}${focused ? ' torrent-card-focused' : ''}`}
       tabIndex={0}
       role="button"
       aria-label={`Смотреть: ${release.title}`}
@@ -105,7 +111,7 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({ release, onPlay, index
 
         {/* Техническая спека: качество → кодек/контейнер → сезон/серии */}
         <div className="torrent-card-specs">
-          <span className={`torrent-tag torrent-tag-quality ${tier}`}>{quality}</span>
+          <span className={`torrent-tag torrent-tag-quality ${platform}`}>{quality}</span>
           {tags.formats.map((f) => (
             <span key={f} className="torrent-tag torrent-tag-spec">{f}</span>
           ))}

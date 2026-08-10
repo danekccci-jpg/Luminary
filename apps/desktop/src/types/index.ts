@@ -176,6 +176,8 @@ declare global {
       removeTorrServerTorrent: (hash: string) => Promise<{ success: boolean; data?: any; error?: string }>;
       dropTorrServerCache: (hash: string) => Promise<{ success: boolean }>;
       reconnectTorrServer: (hash: string, magnet: string) => Promise<{ success: boolean; error?: string }>;
+      resetTorrServerNetwork: () => Promise<{ success: boolean; error?: string }>;
+      onNetworkChanged: (callback: (data: { newIp: string }) => void) => () => void;
       getTorrServerLogs: (lines?: number) => Promise<{ success: boolean; logs: string[]; error?: string }>;
       getStreamUrl: (hash: string, fileIndex?: number, transcodeAudio?: boolean, audioIndex?: number) => Promise<string>;
       searchTorrents: (
