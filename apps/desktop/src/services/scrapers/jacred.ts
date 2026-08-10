@@ -98,8 +98,9 @@ export function resetRemoteInstancePool() {
   remotePoolLoadedAt = 0;
 }
 
-/** Трекеры, по которым фильтруем выдачу (имена модулей JacRed). */
-export const JACRED_TRACKERS = ['RuTracker.org', 'NNM-Club', 'Rutor'] as const;
+/** Трекеры, по которым фильтруем выдачу (имена модулей JacRed).
+ *  1337x и NYAA — публичные, без логина; RuTracker/NNM-Club — при наличии кредов. */
+export const JACRED_TRACKERS = ['RuTracker.org', 'NNM-Club', 'Rutor', '1337x', 'NYAA'] as const;
 
 /** Переопределение пула пользователем: JSON-массив base-URL в localStorage. */
 const OVERRIDE_KEY = 'luminary_jacred_instances';
@@ -220,7 +221,7 @@ function detectDubbing(title: string): DubbingType {
   return 'Прочее';
 }
 
-/** Короткое имя трекера: RuTracker.org → RuTracker, NNM-Club → NNM. */
+/** Короткое имя трекера: RuTracker.org → RuTracker, 1337x → 1337x. */
 function normalizeTracker(tracker: string): string {
   const t = String(tracker || '').trim();
   if (/rutracker/i.test(t)) return 'RuTracker';
@@ -229,6 +230,8 @@ function normalizeTracker(tracker: string): string {
   if (/^bitru$/i.test(t)) return 'Bitru';
   if (/torrentby|torrent\.by/i.test(t)) return 'TorrentBy';
   if (/kinozal/i.test(t)) return 'Kinozal';
+  if (/1337x/i.test(t)) return '1337x';
+  if (/nyaa/i.test(t)) return 'NYAA';
   return t || 'JacRed';
 }
 

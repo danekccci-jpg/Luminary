@@ -314,6 +314,11 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
         if (error) {
           toastBus.push(error, 'error');
         }
+        // Префетч: тихо добавляем лучшую раздачу в TorrServer, чтобы «Смотреть»
+        // было мгновенным (метаданные + кэш буфера уже готовы при клике).
+        if (releases.length > 0 && !cancelled) {
+          torrServerService.prefetch(releases[0]).catch(() => {});
+        }
       })
       .catch((err: any) => {
         if (cancelled) return;

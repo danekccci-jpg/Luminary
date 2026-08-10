@@ -14,6 +14,7 @@
 import React, { useState } from 'react';
 import { TorrentRelease } from '../types';
 import { parseTorrentTags } from '../utils/torrentParser';
+import { parseTorrentMeta } from '../utils/torrentMeta';
 import { sanitizeTrackerName } from '../utils/trackerName';
 import { keyActivate } from '../utils/focus';
 import { Activity, ArrowDown, ArrowUp } from 'lucide-react';
@@ -62,6 +63,7 @@ function healthClass(score: number): string {
 
 export const TorrentCard: React.FC<TorrentCardProps> = ({ release, onPlay, index = 0 }) => {
   const tags = parseTorrentTags(release.title);
+  const meta = parseTorrentMeta(release.title);
   const [focused, setFocused] = useState(false);
 
   const quality = normalizeQuality(tags.quality, release.quality);
@@ -101,12 +103,22 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({ release, onPlay, index
         {/* Оригинальное полное имя раздачи (2 строки) */}
         <div className="torrent-card-title">{release.title}</div>
 
-        {/* Техническая спека: качество → кодек/контейнер */}
+        {/* Техническая спека: качество → кодек/контейнер → сезон/серии */}
         <div className="torrent-card-specs">
           <span className={`torrent-tag torrent-tag-quality ${tier}`}>{quality}</span>
           {tags.formats.map((f) => (
             <span key={f} className="torrent-tag torrent-tag-spec">{f}</span>
           ))}
+          {meta.seasons != null && (
+            <span className="torrent-tag torrent-tag-spec" title={meta.seasons > 0 ? `${meta.seasons} сезон` : undefined}>
+              {meta.seasons > 0 ? `S${String(meta.seasons).padStart(2, '0')}` : 'Сериал'}
+            </span>
+          )}
+          {meta.episodes != null && meta.episodes > 0 && (
+            <span className="torrent-tag torrent-tag-spec">
+              {meta.seasons != null ? `${meta.episodes} серий` : `E${meta.episodes}`}
+            </span>
+          )}
         </div>
 
         {/* Аудио и языки: дорожки → озвучки → субтитры */}

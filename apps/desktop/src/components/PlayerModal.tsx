@@ -830,32 +830,41 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         // ── Ретрай добавления: /echo отвечает сразу, но внутренний BT-клиент
         //    TorrServer инициализируется ~20-30 сек после старта. В это время
         //    add возвращает 500 «BT client not connected» — повторяем с паузой.
-        const addWithRetry = async (attempts: number, retryDelayMs: number): Promise<any> => {
-          for (let attempt = 0; attempt < attempts; attempt++) {
-            // rutracker: .torrent-файл надёжнее магнета (метаданные локально)
-            const res = torrentFile
-              ? await torrServerService.addTorrentFile(torrentFile, title)
-              : await torrServerService.addMagnet(magnet, title, poster);
-            if (res.success || res.data) return res;
-            const errText = String(res.error || '');
-            const isBtNotReady = /BT client not connected|500|TorrServer API returned/i.test(errText);
-            if (!isBtNotReady) return res; // другие ошибки — не ретраим
-            if (!cancelled && attempt < attempts - 1) {
-              console.warn(`[Player] TorrServer BT client not ready (attempt ${attempt + 1}) — retrying in ${retryDelayMs / 1000}s`);
-              await new Promise((r) => setTimeout(r, retryDelayMs));
+        //    ОПТИМИЗАЦИЯ: MovieDetailsModal мог префетчить этот торрент (add в
+        //    фоне) — тогда hash уже в TorrServer, повторный add не нужен.
+        const prefetchedHash = torrServerService.consumePrefetch(magnet);
+        let addRes: any;
+        if (prefetchedHash) {
+          console.log(`[Player] Using prefetched hash: ${prefetchedHash.slice(0,12)} — skipping add`);
+          addRes = { success: true, data: { hash: prefetchedHash } };
+        } else {
+          const addWithRetry = async (attempts: number, retryDelayMs: number): Promise<any> => {
+            for (let attempt = 0; attempt < attempts; attempt++) {
+              // rutracker: .torrent-файл надёжнее магнета (метаданные локально)
+              const res = torrentFile
+                ? await torrServerService.addTorrentFile(torrentFile, title)
+                : await torrServerService.addMagnet(magnet, title, poster);
+              if (res.success || res.data) return res;
+              const errText = String(res.error || '');
+              const isBtNotReady = /BT client not connected|500|TorrServer API returned/i.test(errText);
+              if (!isBtNotReady) return res; // другие ошибки — не ретраим
+              if (!cancelled && attempt < attempts - 1) {
+                console.warn(`[Player] TorrServer BT client not ready (attempt ${attempt + 1}) — retrying in ${retryDelayMs / 1000}s`);
+                await new Promise((r) => setTimeout(r, retryDelayMs));
+              }
             }
-          }
-          return { success: false, error: 'TorrServer: BT-клиент не готов', btNotReady: true };
-        };
+            return { success: false, error: 'TorrServer: BT-клиент не готов', btNotReady: true };
+          };
 
-        let addRes = await addWithRetry(6, 3000);
-        if (!addRes.success && !addRes.data && addRes.btNotReady) {
-          // Последний рубеж: BT-клиент завис — полный перезапуск TorrServer
-          // (main-процесс сбрасывает settings.json → чистый старт) и повтор.
-          console.warn('[Player] BT client stuck — restarting TorrServer (self-heal)');
-          await torrServerService.restartServer().catch(() => {});
-          if (!cancelled) await new Promise((r) => setTimeout(r, 25000)); // старт + инициализация клиента
           addRes = await addWithRetry(6, 3000);
+          if (!addRes.success && !addRes.data && addRes.btNotReady) {
+            // Последний рубеж: BT-клиент завис — полный перезапуск TorrServer
+            // (main-процесс сбрасывает settings.json → чистый старт) и повтор.
+            console.warn('[Player] BT client stuck — restarting TorrServer (self-heal)');
+            await torrServerService.restartServer().catch(() => {});
+            if (!cancelled) await new Promise((r) => setTimeout(r, 25000)); // старт + инициализация клиента
+            addRes = await addWithRetry(6, 3000);
+          }
         }
         if (!addRes.success && !addRes.data) throw new Error(addRes.error || 'Ошибка добавления торрента');
 
@@ -1314,7 +1323,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       onProgressSave(videoRef.current.currentTime || 0, videoRef.current.duration || 0);
     }
     destroyHls();
-    if (hash) torrServerService.dropCache(hash);
+    // НЕ дропаем кэш торрента: при повторном открытии этого фильма TorrServer
+    // уже содержит метаданные/буфер — «Смотреть» станет мгновенным.
+    // Кэш управляется RemoveCacheOnDrop:true в TorrServer и не растёт бесконечно.
     onClose();
   };
 

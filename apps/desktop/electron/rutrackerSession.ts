@@ -23,7 +23,11 @@ import { createHash } from 'crypto';
 import { TorrentScraper, TorrentRelease } from './scraper.js';
 
 const PARTITION = 'persist:rutracker';
-const SITE = 'https://rutracker.org';
+/** Fallback-цепочка доменов RuTracker: основной org + зеркала. Если один домен
+ *  недоступен/заблокирован (CF-челлендж не проходит, DNS мёртв) — поиск
+ *  автоматически пробует следующий. Проверено live: .net живой (CF), .nl живой
+ *  (JS-редирект на рабочий домен — браузер окна проходит его сам). */
+const SITES = ['https://rutracker.org', 'https://rutracker.net', 'https://rutracker.nl'];
 /** Сколько результатов отдаём за один поиск. */
 const MAX_RESULTS = 12;
 /** Время жизни кэша раздач (повторные открытия фильма — без навигации). */
@@ -62,6 +66,16 @@ export interface RutrackerSessionStatus {
 export class RutrackerSessionManager {
   /** Кэш найденных раздач по запросу — стабильность при перезаходах в список. */
   private searchCache = new Map<string, { releases: TorrentRelease[]; at: number }>();
+  /** Активный домен из fallback-цепочки SITES (переключается при недоступности). */
+  private siteIndex = 0;
+  private site(): string {
+    return SITES[this.siteIndex % SITES.length];
+  }
+  /** Переключиться на следующий домен (fallback при провале навигации). */
+  private nextSite(): void {
+    this.siteIndex = (this.siteIndex + 1) % SITES.length;
+    console.log(`[RutrackerSession] Переключение на зеркало: ${this.site()}`);
+  }
   /** Последовательная очередь поисков: одно окно, навигации не конфликтуют. */
   private searchChain: Promise<unknown> = Promise.resolve();
   private win: BrowserWindow | null = null;
@@ -122,7 +136,7 @@ export class RutrackerSessionManager {
   public async ensureSession(): Promise<void> {
     try {
       const win = await this.ensureWindow(false);
-      await this.loadWithTimeout(win, `${SITE}/forum/index.php`);
+      await this.loadWithTimeout(win, `${this.site()}/forum/index.php`);
       // Ждём завершения загрузки (до 5 с) — executeJavaScript на ещё грузящемся
       // окне висит ВЕЧНО (проверено live), а это блокирует поиск.
       for (let i = 0; i < 10 && win.webContents.isLoading(); i++) {
@@ -160,7 +174,7 @@ export class RutrackerSessionManager {
   public async openLoginWindow(): Promise<RutrackerSessionStatus> {
     const win = await this.ensureWindow(true);
     try {
-      await this.loadWithTimeout(win, `${SITE}/forum/login.php`);
+      await this.loadWithTimeout(win, `${this.site()}/forum/login.php`);
     } catch { /* сеть может быть недоступна */ }
     this.startWatcher();
     return this.getStatus();
@@ -275,7 +289,19 @@ export class RutrackerSessionManager {
           console.warn(`[RutrackerSession] попытка ${attempt + 1}: повторная навигация на поиск`);
           await new Promise((r) => setTimeout(r, 2000));
         }
-        okSearch = await this.navigate(win, `${SITE}/forum/tracker.php?nm=${q}`, attempt === 0 ? 25000 : 12000);
+        okSearch = await this.navigate(win, `${this.site()}/forum/tracker.php?nm=${q}`, attempt === 0 ? 25000 : 12000);
+      }
+      // Fallback-цепочка: домен не отвечает (CF-блокировка/DNS) — пробуем
+      // следующее зеркало из SITES (org → net → nl) ещё парой попыток.
+      if (!okSearch && SITES.length > 1) {
+        this.nextSite();
+        for (let attempt = 0; attempt < 2 && !okSearch; attempt++) {
+          if (attempt > 0) {
+            console.warn('[RutrackerSession] повторная навигация на зеркале');
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+          okSearch = await this.navigate(win, `${this.site()}/forum/tracker.php?nm=${q}`, 12000);
+        }
       }
       console.log(`[RutrackerSession] t+${((Date.now() - tStart) / 1000).toFixed(1)}с: поиск ок=${okSearch}`);
       if (!okSearch) {
@@ -293,7 +319,7 @@ export class RutrackerSessionManager {
         console.log(`[RutrackerSession] проход по оригиналу: "${fallbackQuery}"`);
         const okEn = await this.navigate(
           win,
-          `${SITE}/forum/tracker.php?nm=${encodeURIComponent(fallbackQuery)}`,
+          `${this.site()}/forum/tracker.php?nm=${encodeURIComponent(fallbackQuery)}`,
           10000
         );
         if (okEn) {

@@ -2,6 +2,61 @@ import { TorrServerStatusInfo, TorrentRelease, TorrServerStats } from '../types'
 import { searchJacRed, mergeReleasesByHash, getJacredStatus } from './scrapers/jacred';
 
 export class TorrServerService {
+  /** Кэш префетча: magnet → { hash, at }. При открытии фильма тихо add
+   *  лучшей раздачи, чтобы «Смотреть» стало мгновенным. hash берётся из
+   *  addTorrentFile/addMagnet ответа и переиспользуется в PlayerModal. */
+  private prefetchMap = new Map<string, { hash: string; at: number }>();
+  /** Время жизни кэша префетча (15 мин — хватает на «порядок чтения» фильма). */
+  private static PREFETCH_TTL_MS = 15 * 60 * 1000;
+
+  /** Проверить, не устарел ли кэш префетча (очистка при превышении TTL). */
+  private cleanPrefetch(): void {
+    if (this.prefetchMap.size <= 10) return;
+    const now = Date.now();
+    for (const [k, v] of this.prefetchMap) {
+      if (now - v.at > TorrServerService.PREFETCH_TTL_MS) this.prefetchMap.delete(k);
+    }
+  }
+
+  /**
+   * Префетч раздачи: тихо добавить в TorrServer (addTorrentFile или addMagnet),
+   * запомнить hash. Вызывается из MovieDetailsModal после получения списка
+   * раздач — чтобы «Смотреть» было мгновенным при клике.
+   * Ошибки игнорируются (сервер может быть не запущен).
+   */
+  public async prefetch(release: TorrentRelease): Promise<void> {
+    if (this.prefetchMap.has(release.magnet)) return; // уже префетчено
+    this.cleanPrefetch();
+    try {
+      const res = release.torrentFile
+        ? await this.addTorrentFile(release.torrentFile, release.title)
+        : await this.addMagnet(release.magnet, release.title);
+      if (res?.success || res?.data) {
+        const hash = res.data?.hash;
+        if (hash) {
+          this.prefetchMap.set(release.magnet, { hash, at: Date.now() });
+          console.log(`[TorrServerService] prefetch ok: hash=${hash.slice(0,12)} (${release.title.slice(0,40)})`);
+        }
+      }
+    } catch (err: any) {
+      console.warn('[TorrServerService] prefetch failed:', err?.message);
+    }
+  }
+
+  /**
+   * Взять и удалить из кэша префетча hash для данного magnet (single-use).
+   * Если magnet не в кэше или устарел — null (нужен обычный add).
+   */
+  public consumePrefetch(magnet: string): string | null {
+    const hit = this.prefetchMap.get(magnet);
+    if (!hit) return null;
+    if (Date.now() - hit.at > TorrServerService.PREFETCH_TTL_MS) {
+      this.prefetchMap.delete(magnet);
+      return null;
+    }
+    this.prefetchMap.delete(magnet);
+    return hit.hash;
+  }
   public async getStatus(): Promise<TorrServerStatusInfo> {
     if (window.electronAPI?.getTorrServerStatus) {
       return await window.electronAPI.getTorrServerStatus();

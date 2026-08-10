@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Download, Search,
   Volume2, Loader2,
 } from 'lucide-react';
 import { TorrentRelease } from '../types';
 import { parseTorrentMeta, russianPriority } from '../utils/torrentMeta';
+import { parseTorrentTags } from '../utils/torrentParser';
 import { TorrentCard } from './TorrentCard';
 
 interface TorrentSelectorProps {
@@ -37,11 +38,25 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
 }) => {
   const [qualityFilter, setQualityFilter]   = useState('ALL');
   const [dubbingFilter, setDubbingFilter]   = useState('ALL');
+  const [formatFilter, setFormatFilter]     = useState('ALL');
   const [sortBy, setSortBy]                 = useState<'russian' | 'seeders' | 'size' | 'stability'>('russian');
   const [keyword, setKeyword]               = useState('');
 
   const dubbingOptions = ['ALL', 'Дубляж', 'HDRezka', 'LostFilm', 'Оригинал + Субтитры', 'RHS'];
   const qualityOptions = ['ALL', '4K', '1080p', '720p'];
+
+  /** Кэш форматов (HDR/DV/HEVC/…) из названия каждой раздачи — без повторного парсинга при фильтрации. */
+  const formatMap = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const r of releases) m.set(r.id, parseTorrentTags(r.title).formats);
+    return m;
+  }, [releases]);
+  /** Уникальные форматы, которые реально есть в выдаче (для опций фильтра). */
+  const formatOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const f of formatMap.values()) f.forEach((x) => set.add(x));
+    return ['ALL', ...set];
+  }, [formatMap]);
 
   /** Сезоны раздачи: {from, to} из названия (S01, S01-S03, «сезон 2»), null — без маркера. */
   const seasonsOf = (title: string): { from: number; to: number } | null => {
@@ -67,6 +82,7 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
   const filtered = releases.filter((r) => {
     if (qualityFilter !== 'ALL' && r.quality !== qualityFilter) return false;
     if (dubbingFilter !== 'ALL' && r.dubbing !== dubbingFilter) return false;
+    if (formatFilter !== 'ALL' && !formatMap.get(r.id)?.includes(formatFilter)) return false;
     if (seasonFilter > 0 && !matchesSeason(r.title)) return false;
     if (keyword.trim()) {
       const kw = keyword.toLowerCase();
@@ -165,6 +181,27 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
             })}
           </div>
         </div>
+
+        {/* Format / codec filter —_HDR, DV, HEVC, WEB-DL, BDRip…_ */}
+        {formatOptions.length > 2 && (
+          <div className="torrent-filter-row">
+            <span className="torrent-filter-label">Формат</span>
+            <div className="torrent-filter-chips">
+              {formatOptions.map(f => {
+                const isActive = formatFilter === f;
+                return (
+                  <button
+                    key={f}
+                    onClick={() => setFormatFilter(f)}
+                    className={`filter-chip${isActive ? ' active' : ''}`}
+                  >
+                    {f === 'ALL' ? 'Все' : f}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Sort Selector (RU-first по умолчанию) */}
         <div className="torrent-filter-row">

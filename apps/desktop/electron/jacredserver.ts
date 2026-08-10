@@ -246,12 +246,12 @@ export class JacredManager {
   }
 
   /** Разгон базы: триггер парсинга трекеров (не блокирует старт).
-   *  Публичные (rutor/bitru/torrentby/kinozal) — всегда; приватные
-   *  (rutracker/nnmclub) — автоматически, если в конфиге есть креды. */
+   *  Публичные (rutor/bitru/torrentby/kinozal/1337x/nyaa) — всегда;
+   *  приватные (rutracker/nnmclub) — автоматически, если в конфиге есть креды. */
   private async triggerInitialCrawl() {
     if (this.crawlTriggered) return;
     this.crawlTriggered = true;
-    const trackers = ['rutor', 'bitru', 'torrentby', 'kinozal'];
+    const trackers = ['rutor', 'bitru', 'torrentby', 'kinozal', '1337x', 'nyaa'];
     const auth = this.readAuthFromFile();
     if (auth.rutracker) trackers.push('rutracker');
     if (auth.nnmClub) trackers.push('nnmclub');
