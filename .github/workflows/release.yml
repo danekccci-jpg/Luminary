@@ -1,8 +1,7 @@
 name: Release
 
-# Сборка десктопных релизов (macOS .dmg + Windows .exe) и публикация в GitHub Releases.
-# Запуск: пуш тега v* (например v1.0.0) — соберёт всё и создаст Release с артефактами.
-# Вручную (workflow_dispatch) — соберёт и зальёт артефакты в draft-релиз.
+# Сборка ВСЕХ платформ (macOS + Windows + Android) и публикация в GitHub Releases.
+# Запуск: пуш тега v* — соберёт всё и создаст Release с артефактами.
 
 on:
   push:
@@ -13,8 +12,6 @@ permissions:
   contents: write
 
 env:
-  # Без подписи: у приложения нет Apple Developer / Windows сертификатов.
-  # Пользователям macOS нужно «Правая кнопка → Открыть», Windows — «Подробнее → Выполнить в любом случае».
   CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
 jobs:
@@ -26,36 +23,22 @@ jobs:
         working-directory: apps/desktop
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run selftest
-
-      - name: Build renderer + main process
-        run: npm run build
-
-      - name: Fetch TorrServer binaries (arm64 + x64, std + gst)
-        run: node scripts/fetch-torrserver.js --platform darwin
-
-      - name: Package .dmg + .zip (x64 + arm64)
-        run: npx electron-builder --mac --x64 --arm64
-
+      - run: npm ci
+      - run: npm run selftest
+      - run: npm run build
+      - run: node scripts/fetch-torrserver.js --platform darwin
+      - run: npx electron-builder --mac --x64 --arm64
       - uses: actions/upload-artifact@v4
         with:
           name: mac
           path: |
-            apps/desktop/release/*.dmg
-            apps/desktop/release/*.zip
-            apps/desktop/release/*.blockmap
-            apps/desktop/release/latest-mac.yml
+            apps/desktop/release/Luminary-*.dmg
+            apps/desktop/release/Luminary-*.zip
 
   windows:
     name: 'Windows (.exe)'
@@ -66,59 +49,96 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run selftest
-
-      - name: Build renderer + main process
-        run: npm run build
-
-      - name: Fetch TorrServer binary (x64)
-        run: node scripts/fetch-torrserver.js --platform win32
-
-      - name: Package NSIS + portable .exe
-        run: npx electron-builder --win nsis portable
-
+      - run: npm ci
+      - run: npm run selftest
+      - run: npm run build
+      - run: node scripts/fetch-torrserver.js --platform win32
+      - run: npx electron-builder --win nsis portable
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
-            apps/desktop/release/*.exe
-            apps/desktop/release/*.blockmap
-            apps/desktop/release/latest.yml
+            apps/desktop/release/Luminary-*.exe
+
+  android:
+    name: 'Android (phone + TV APK)'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+      - uses: android-actions/setup-android@v3
+      - run: npm ci
+      - run: npm run selftest
+      - run: npm run build
+      - run: node scripts/fetch-torrserver.js --platform android
+      - run: npx cap sync android
+      - name: Build phone APK
+        run: cd android && ./gradlew assemblePhoneRelease
+      - name: Build TV APK
+        run: cd android && ./gradlew assembleTvRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: |
+            apps/desktop/android/app/build/outputs/apk/phone/release/*.apk
+            apps/desktop/android/app/build/outputs/apk/tv/release/*.apk
 
   release:
     name: 'Publish GitHub Release'
-    needs: [mac, windows]
+    needs: [mac, windows, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          # macOS
+          find artifacts/mac -name '*.dmg' -exec cp {} release/ \;
+          # Windows
+          find artifacts/windows -name '*.exe' -exec cp {} release/ \;
+          # Android — переименовываем для ясности
+          find artifacts/android -name '*.apk' | while read f; do
+            bn=$(basename "$f")
+            if [[ "$bn" == *"phone"* ]]; then
+              cp "$f" "release/Luminary-${GITHUB_REF_NAME:-dev}-android.apk"
+            elif [[ "$bn" == *"tv"* ]]; then
+              cp "$f" "release/Luminary-${GITHUB_REF_NAME:-dev}-android-tv.apk"
+            fi
+          done
+          echo "Release artifacts:"
+          ls -lh release/
+
       - name: Create release (tag) or draft (manual run)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          FILES=$(find artifacts -type f)
-          if [[ "$GITHUB_REF_NAME" == v* ]]; then
-            echo "::notice::Creating release $GITHUB_REF_NAME"
-            gh release create "$GITHUB_REF_NAME" $FILES \
-              --title "Luminary $GITHUB_REF_NAME" \
+          TAG="${GITHUB_REF_NAME:-}"
+          if [[ "$TAG" == v* ]]; then
+            gh release create "$TAG" release/* \
+              --title "Luminary $TAG" \
               --generate-notes
           else
-            echo "::notice::Manual run — creating draft release"
-            gh release create "draft-$(date +%s)" $FILES \
+            gh release create "draft-$(date +%s)" release/* \
               --draft \
               --title "Luminary manual build"
           fi
