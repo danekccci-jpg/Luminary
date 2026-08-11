@@ -226,22 +226,16 @@ public class TorrServerPlugin extends Plugin {
             .setOngoing(true)
             .build();
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            // Android 14+: нужен foreground service type
-            getContext().startForegroundService(new Intent(getContext(), TorrServerService.class));
-        }
-
-        // Используем Activity для startForeground (проще, чем отдельный Service)
-        if (getActivity() != null) {
-            getActivity().startForeground(NOTIFICATION_ID, notification);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager nm = getContext().getSystemService(NotificationManager.class);
+            if (nm != null) nm.notify(NOTIFICATION_ID, notification);
         }
     }
 
     private void stopForeground() {
-        if (getActivity() != null) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                getActivity().stopForeground(true);
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager nm = getContext().getSystemService(NotificationManager.class);
+            if (nm != null) nm.cancel(NOTIFICATION_ID);
         }
     }
 
