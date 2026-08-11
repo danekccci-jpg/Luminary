@@ -38,7 +38,6 @@ jobs:
           name: mac
           path: |
             apps/desktop/release/Luminary-*.dmg
-            apps/desktop/release/Luminary-*.zip
 
   windows:
     name: 'Windows (.exe)'
@@ -58,12 +57,12 @@ jobs:
       - run: npm run selftest
       - run: npm run build
       - run: node scripts/fetch-torrserver.js --platform win32
-      - run: npx electron-builder --win nsis portable
+      - run: npx electron-builder --win nsis
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
-            apps/desktop/release/Luminary-*.exe
+            apps/desktop/release/Luminary-*-Setup.exe
 
   android:
     name: 'Android (phone + TV APK)'
@@ -113,11 +112,8 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          # macOS
           find artifacts/mac -name '*.dmg' -exec cp {} release/ \;
-          # Windows
-          find artifacts/windows -name '*.exe' -exec cp {} release/ \;
-          # Android — переименовываем для ясности
+          find artifacts/windows -name '*-Setup.exe' -exec cp {} release/ \;
           find artifacts/android -name '*.apk' | while read f; do
             bn=$(basename "$f")
             if [[ "$bn" == *"phone"* ]]; then

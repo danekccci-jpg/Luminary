@@ -36,10 +36,6 @@
       {
         "target": "dmg",
         "arch": ["x64", "arm64"]
-      },
-      {
-        "target": "zip",
-        "arch": ["x64", "arm64"]
       }
     ],
     "artifactName": "${productName}-${version}-${arch}.${ext}",
@@ -66,16 +62,9 @@
       {
         "target": "nsis",
         "arch": ["x64"]
-      },
-      {
-        "target": "portable",
-        "arch": ["x64"]
       }
     ],
     "artifactName": "${productName}-${version}-${arch}-Setup.${ext}"
-  },
-  "portable": {
-    "artifactName": "${productName}-${version}-${arch}-Portable.${ext}"
   },
   "nsis": {
     "oneClick": false,
