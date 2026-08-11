@@ -4,12 +4,23 @@ import { App } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import './styles/index.css';
 
-// Render immediately — ErrorBoundary catches any fatal render error
-// and shows a readable recovery UI instead of a black screen.
-ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  </React.StrictMode>
-);
+// ── Capacitor shim: подменяем window.electronAPI на HTTP-адаптер
+//    чтобы ВЕСЬ существующий код (сервисы + компоненты) работал без правок ──
+if ((window as any).Capacitor && !window.electronAPI) {
+  import('./utils/bridge').then(({ getBridge }) => {
+    (window as any).electronAPI = getBridge();
+    render();
+  });
+} else {
+  render();
+}
+
+function render() {
+  ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </React.StrictMode>
+  );
+}

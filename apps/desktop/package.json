@@ -16,6 +16,9 @@
     "selftest": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
     "axios": "^1.7.9",
     "cheerio": "^1.0.0",
     "hls.js": "^1.6.17",

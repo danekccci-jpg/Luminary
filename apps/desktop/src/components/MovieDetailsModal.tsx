@@ -169,10 +169,22 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     }
     for (const r of releases) {
       const meta = parseTorrentMeta(r.title);
-      if (meta.seasons != null && meta.seasons > max) max = meta.seasons;
+      // seasonsTo = конец диапазона (S01-S03 → 3); seasons = начало
+      const maxSeason = meta.seasonsTo != null && meta.seasonsTo > (meta.seasons ?? 0) ? meta.seasonsTo : meta.seasons;
+      if (maxSeason != null && maxSeason > max) max = maxSeason;
     }
     return max;
   }, [movie, details, releases]);
+
+  /** Данные TMDB о сезонах (season_number + episode_count) — для пикера серий. */
+  const tmdbSeasons = useMemo(() => {
+    const raw = (details as any)?.seasons;
+    if (!Array.isArray(raw)) return undefined;
+    return raw
+      .filter((s: any) => s && typeof s === 'object' && Number(s.season_number) > 0)
+      .map((s: any) => ({ season_number: Number(s.season_number), episode_count: Number(s.episode_count) || 0 }))
+      .sort((a: any, b: any) => a.season_number - b.season_number);
+  }, [details]);
 
   /** Счётчик «Повторить поиск» — инкремент перезапускает поиск раздач. */
   const [searchNonce, setSearchNonce] = useState(0);
@@ -1191,6 +1203,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
           release={episodeUi.release}
           historyItem={episodeUi.historyItem}
           releases={releases}
+          tmdbSeasons={tmdbSeasons}
           onPlay={(rel, opts) => {
             setEpisodeUi(null);
             playRelease(rel, opts);

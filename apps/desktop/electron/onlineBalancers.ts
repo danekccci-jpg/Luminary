@@ -1,251 +1,253 @@
 /**
- * onlineBalancers.ts — бесплатные онлайн-потоки (KinoBox + Kodik) как альтернатива торрентам.
+ * onlineBalancers.ts — бесплатные онлайн-потоки (CDNvideohub + Collaps + Kodik).
  *
- * Идея (Lampa-style): по Кинопоиск-ID/названию получить список «балансеров»
- * (Collaps, Alloha, Hdvb, Videocdn, Ashdi, Cdnmovies…) с качеством и переводами,
- * затем из iframe-плеера балансера извлечь ПРЯМОЙ HLS-манифест (.m3u8),
- * который отдаётся в существующий Hls.js-плеер (без TorrServer и GStreamer).
+ * Аналог торрентов: по Кинопоиск-ID / TMDB-ID / названию получить список
+ * балансеров с озвучкой/качеством и прямым HLS (.m3u8) для Hls.js-плеера.
  *
- * Источники (пул, первый живой — достаточен):
- *  1) KinoBox public API — https://kinobox.tv/api/players?kinopoisk=<id>
- *     (зеркала kinobox.me и старый эндпоинт /api/players/main — как fallback).
- *     ⚠️ Домен kinobox.tv сейчас может быть недоступен/продан (301 → speedtest) —
- *        модуль тихо деградирует: пустой список, UI показывает торренты.
- *  2) Kodik API (ОПЦИОНАЛЬНО) — https://kodikapi.com, нужен токен
- *     (передаётся из настроек; без токена источник пропускается).
+ * Источники (порядок приоритета):
+ *  1) CDNvideohub (primary) — plapi.cdnvideohub.com — без токена.
+ *     Принимает Кинопоиск-ID. Для сериалов: isSerial + items[] с vkId.
+ *     Для фильмов: один vkId → прямой .m3u8.
+ *  2) Collaps Embed (secondary) — api.luxembd.ws/embed/kp/{id} — без токена.
+ *     HTML-страница с makePlayer({hls: "url"}). Извлекаем .m3u8 regex.
+ *     Поиск по названию: api.bhcesh.me/list — возвращает KP-ID.
+ *  3) Kodik (fallback) — kodikapi.com — нужен токен (опционально).
  *
- * Все запросы в жёстких таймаутах (6с) — при блокировке/смерти источника
- * возвращается пустой список, поиск торрентов не затрагивается.
+ * Все запросы: жёсткие таймауты (6–8с), никогда не бросаем исключение —
+ * пустой список с ошибкой для UI (торренты остаются главным источником).
  */
 
 import { net } from 'electron';
 
 // ── Публичный тип потока (для IPC / renderer) ──
 export interface OnlineBalancerStream {
-  /** Уникальный id потока (source + translation + quality). */
   id: string;
-  /** Название балансера: Collaps, Alloha, Hdvb, Videocdn, Kodik… */
+  /** Название балансера: CDNvideohub, Collaps, Kodik… */
   source: string;
   /** Нормализованное качество: 4K / 1080p / 720p / SD. */
   quality: string;
   /** Перевод / озвучка: Дубляж, RHS, LostFilm, Оригинал… */
   translation: string;
-  /** Прямой HLS-манифест (.m3u8), если извлёкся из iframe-плеера. */
+  /** Прямой HLS-манифест (.m3u8) — основной вариант для Hls.js. */
   m3u8Url?: string;
-  /** iframe-ссылка плеера балансера (fallback: внешний плеер / страница). */
+  /** iframe-ссылка плеера балансера (fallback: внешний плеер). */
   iframeUrl?: string;
-  /** Origin, который нужно слать как Referer при воспроизведении. */
+  /** Origin для заголовка Referer при воспроизведении. */
   referer?: string;
+  /** Сериал ли это (для пикера серий). */
+  isSerial?: boolean;
 }
 
 const UA_DESKTOP =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
-const REQUEST_TIMEOUT_MS = 6000;
-/** Сколько iframe-плееров резолвим в .m3u8 за один поиск (параллельно). */
-const MAX_RESOLVE = 8;
+const TIMEOUT_MS = 8000;
 
-/** net.fetch с жёстким таймаутом — мёртвый источник не вешает поиск. */
-function fetchWithTimeout(
-  url: string,
-  headers: Record<string, string>,
-  ms: number = REQUEST_TIMEOUT_MS
-): Promise<Response> {
+function fetchWithTimeout(url: string, headers: Record<string, string>, ms = TIMEOUT_MS): Promise<Response> {
   return Promise.race([
     net.fetch(url, { headers }),
-    new Promise<Response>((_, reject) =>
-      setTimeout(() => reject(new Error(`timeout ${ms}ms`)), ms)
-    ),
+    new Promise<Response>((_, reject) => setTimeout(() => reject(new Error(`timeout ${ms}ms`)), ms)),
   ]);
 }
 
-// ═══════════════════════════════════════════════════════
-//  Нормализация качества (raw → 4K / 1080p / 720p / SD)
-// ═══════════════════════════════════════════════════════
 function normalizeQuality(raw?: string | null): string {
   const q = String(raw || '').toLowerCase();
   if (/2160|4k|uhd/.test(q)) return '4K';
   if (/1080|fhd|full ?hd|blu-?ray|bdrip|web-?dl|web-?rip|hdrip/.test(q)) return '1080p';
   if (/720/.test(q)) return '720p';
-  if (/480|sd|dvdrip|dvd|tsrip|hq/.test(q)) return 'SD';
-  // Без явного разрешения (BDRip/WEBRip…) — балансеры обычно отдают 1080p
+  if (/480|sd|dvdrip/.test(q)) return 'SD';
   return '1080p';
 }
 
-/** Дедупликация по (source, translation, quality). */
-function dedupeStreams(streams: OnlineBalancerStream[]): OnlineBalancerStream[] {
+function dedupe(streams: OnlineBalancerStream[]): OnlineBalancerStream[] {
   const seen = new Set<string>();
-  const out: OnlineBalancerStream[] = [];
-  for (const s of streams) {
-    const key = `${s.source}||${s.translation}||${s.quality}`.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(s);
-  }
-  return out;
+  return streams.filter((s) => {
+    const k = `${s.source}||${s.translation}||${s.quality}`.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
-/** 1080p/4K — в начало списка, затем по имени балансера. */
 function sortStreams(streams: OnlineBalancerStream[]): OnlineBalancerStream[] {
   const order: Record<string, number> = { '4K': 0, '1080p': 1, '720p': 2, SD: 3 };
-  return [...streams].sort(
-    (a, b) =>
-      (order[a.quality] ?? 9) - (order[b.quality] ?? 9) ||
-      a.source.localeCompare(b.source)
-  );
-}
-
-// ── Анти-спам: оставляем только самые надёжные источники ──
-// Рейтинг надёжности: топ балансеров KinoBox (Collaps/Videocdn) + Kodik —
-// именно их пользователь ожидает увидеть; остальные — по убыванию.
-const SOURCE_RANK: Record<string, number> = {
-  Collaps: 0,
-  Videocdn: 1,
-  Kodik: 2,
-  Alloha: 3,
-  Hdvb: 4,
-  Cdnmovies: 5,
-  Ashdi: 6,
-  Kodikstudio: 6,
-};
-
-/**
- * Из полного списка (много балансеров × переводов) оставляем топ-N источников
- * и в каждом — топ-M потоков (качество уже отсортировано sortStreams).
- * Иначе онлайн-секция превращается в простыню из десятка одинаковых карточек.
- */
-function topReliableStreams(
-  streams: OnlineBalancerStream[],
-  maxSources = 2,
-  maxPerSource = 2
-): OnlineBalancerStream[] {
-  const bySource = new Map<string, OnlineBalancerStream[]>();
-  for (const s of streams) {
-    const list = bySource.get(s.source) || [];
-    list.push(s);
-    bySource.set(s.source, list);
-  }
-  const ordered = [...bySource.entries()].sort((a, b) => {
-    const ra = SOURCE_RANK[a[0]] ?? 99;
-    const rb = SOURCE_RANK[b[0]] ?? 99;
-    return ra - rb;
-  });
-  const out: OnlineBalancerStream[] = [];
-  for (const [, list] of ordered.slice(0, maxSources)) {
-    out.push(...list.slice(0, maxPerSource));
-  }
-  return out;
+  return [...streams].sort((a, b) => (order[a.quality] ?? 9) - (order[b.quality] ?? 9));
 }
 
 function safeId(...parts: Array<string | undefined>): string {
   return parts.filter(Boolean).join('-').toLowerCase().replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '') || 'stream';
 }
 
-// ═══════════════════════════════════════════════════════
-//  1) KinoBox — public API (пул эндпоинтов + зеркала)
-// ═══════════════════════════════════════════════════════
-
-/** Сырой объект плеера из ответа KinoBox (поддерживаем v1 и v2 форматы). */
-interface KinoboxRawPlayer {
-  source?: string;
-  name?: string;
-  quality?: string | null;
-  translation?: string;
-  translations?: Array<{ id?: string | number; name?: string }>;
-  iframeUrl?: string;
-  updatedAt?: string;
+/** Декодировать JSON-строку из HTML-ответа (\/ → /, \\u0026 → &). */
+function unescapeJson(s: string): string {
+  return s.replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/\\u002F/g, '/');
 }
 
-const KINOBOX_ENDPOINTS: Array<(kp: string) => string> = [
-  (kp) => `https://kinobox.tv/api/players?kinopoisk=${kp}`,
-  (kp) => `https://kinobox.tv/api/players/main?kinopoisk=${kp}`,
-  (kp) => `https://kinobox.me/api/players?kinopoisk=${kp}`,
-];
+// ═══════════════════════════════════════════════════════
+//  1) CDNvideohub — primary (без токена, по Кинопоиск-ID)
+// ═══════════════════════════════════════════════════════
 
-/** v1 (плоский массив) и v2 (сгруппированный) → единый список потоков. */
-function kinoboxToStreams(players: KinoboxRawPlayer[]): OnlineBalancerStream[] {
-  const out: OnlineBalancerStream[] = [];
-  for (const p of players) {
-    // v2: source — технический id («collaps»), name — человекочитаемый («Collaps»)
-    const source = String(p.name || p.source || 'Плеер').trim() || 'Плеер';
-    const iframe = String(p.iframeUrl || '').trim();
-    const quality = normalizeQuality(p.quality);
-    // v1: одна запись = один перевод
-    if (p.translation != null || !Array.isArray(p.translations)) {
-      const translation = String(p.translation || 'Не указано').trim() || 'Не указано';
-      out.push({
-        id: safeId(source, translation, quality),
-        source,
-        quality,
-        translation,
-        iframeUrl: iframe || undefined,
-      });
+interface CdhItem {
+  cvhId?: string;
+  vkId?: string;
+  voiceStudio?: string;
+  voiceType?: string;
+}
+
+interface CdhPlaylist {
+  titleName?: string;
+  isSerial?: boolean;
+  items?: CdhItem[];
+}
+
+async function fetchCdhVideo(vkId: string): Promise<{ hlsUrl?: string }> {
+  try {
+    const res = await fetchWithTimeout(
+      `https://plapi.cdnvideohub.com/api/v1/player/sv/video/${encodeURIComponent(vkId)}`,
+      {
+        'User-Agent': UA_DESKTOP,
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://player.cdnvideohub.com/',
+      },
+      TIMEOUT_MS
+    );
+    if (!res.ok) return {};
+    const text = await res.text();
+    const un = unescapeJson(text);
+    // hlsUrl в JSON-подобном ответе: "hlsUrl":"https://...m3u8..."
+    const m = un.match(/"hlsUrl"\s*:\s*"([^"]+)"/i);
+    if (m && m[1]) {
+      const url = m[1].replace(/\\u0026/g, '&');
+      console.log(`[OnlineBalancers] CDNvideohub HLS: ${url.slice(0, 80)}…`);
+      return { hlsUrl: url };
     }
-    // v2: translations[] — отдельный поток на каждый перевод
-    if (Array.isArray(p.translations) && p.translations.length > 0) {
-      for (const t of p.translations) {
-        const translation = String(t?.name || 'Не указано').trim() || 'Не указано';
-        out.push({
-          id: safeId(source, translation, quality),
-          source,
-          quality,
-          translation,
-          iframeUrl: iframe || undefined,
-        });
-      }
-    }
+    return {};
+  } catch {
+    return {};
   }
-  return dedupeStreams(out);
 }
 
-/** KinoBox: первый живой эндпоинт из пула, вернувший JSON-массив. */
-async function searchKinobox(kinopoiskId: string): Promise<OnlineBalancerStream[]> {
-  const headers = {
+async function searchCdnvideohub(kpId: string): Promise<OnlineBalancerStream[]> {
+  const playlistUrl = `https://plapi.cdnvideohub.com/api/v1/player/sv/playlist?pub=12&aggr=kp&id=${encodeURIComponent(kpId)}`;
+  const res = await fetchWithTimeout(playlistUrl, {
     'User-Agent': UA_DESKTOP,
     'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'ru-RU,ru;q=0.9',
-    'Referer': 'https://kinobox.tv/',
-  };
-  let lastErr: Error | null = null;
-  for (const build of KINOBOX_ENDPOINTS) {
-    const url = build(kinopoiskId);
-    try {
-      const res = await fetchWithTimeout(url, headers);
-      if (!res.ok) {
-        lastErr = new Error(`HTTP ${res.status} @ ${new URL(url).host}`);
-        continue;
-      }
-      const raw = await res.text();
-      if (!raw || raw.length < 4) {
-        lastErr = new Error(`empty body @ ${new URL(url).host}`);
-        continue;
-      }
-      let json: any;
-      try {
-        json = JSON.parse(raw);
-      } catch {
-        // Некоторые зеркала отдают gzip/HTML на JSON-эндпоинте — пропускаем
-        lastErr = new Error(`invalid JSON @ ${new URL(url).host}`);
-        continue;
-      }
-      const players: KinoboxRawPlayer[] = Array.isArray(json)
-        ? json.filter((x): x is KinoboxRawPlayer => x && typeof x === 'object')
-        : [];
-      if (players.length > 0) {
-        console.log(`[OnlineBalancers] KinoBox OK: ${url} → ${players.length} плееров`);
-        return kinoboxToStreams(players);
-      }
-      lastErr = new Error(`no players @ ${new URL(url).host}`);
-    } catch (err: any) {
-      lastErr = err instanceof Error ? err : new Error(String(err));
-      console.warn(`[OnlineBalancers] KinoBox endpoint failed: ${url} — ${lastErr.message}`);
-    }
+    'Referer': 'https://player.cdnvideohub.com/',
+  }, TIMEOUT_MS);
+  if (!res.ok) throw new Error(`CDNvideohub HTTP ${res.status}`);
+
+  const text = await res.text();
+  let json: CdhPlaylist;
+  try { json = JSON.parse(text); } catch { throw new Error('CDNvideohub: invalid JSON'); }
+
+  const items = Array.isArray(json.items) ? json.items : [];
+  if (items.length === 0) throw new Error('CDNvideohub: нет озвучек');
+
+  const isSerial = !!json.isSerial;
+  const streams: OnlineBalancerStream[] = [];
+
+  // Резолвим vkId → hlsUrl параллельно (макс 8)
+  const settled = await Promise.allSettled(
+    items.slice(0, 8).map(async (item) => {
+      if (!item.vkId) return null;
+      const { hlsUrl } = await fetchCdhVideo(item.vkId);
+      const voice = item.voiceType || item.voiceStudio || 'Озвучка';
+      const studio = item.voiceStudio && item.voiceType ? ` (${item.voiceStudio})` : '';
+      return {
+        id: safeId('cdnvideohub', voice, kpId, item.vkId),
+        source: 'CDNvideohub',
+        quality: '1080p',
+        translation: `${voice}${studio}`,
+        m3u8Url: hlsUrl || undefined,
+        isSerial,
+        referer: hlsUrl ? 'https://player.cdnvideohub.com/' : undefined,
+      } as OnlineBalancerStream;
+    })
+  );
+
+  for (const s of settled) {
+    if (s.status === 'fulfilled' && s.value) streams.push(s.value);
   }
-  if (lastErr) throw lastErr;
-  return [];
+
+  console.log(`[OnlineBalancers] CDNvideohub OK: ${kpId} → ${streams.length} озвучек (serial=${isSerial})`);
+  return dedupe(streams);
 }
 
 // ═══════════════════════════════════════════════════════
-//  2) Kodik API (опционально, нужен токен)
+//  2) Collaps Embed — secondary (без токена, embed → .m3u8)
+// ═══════════════════════════════════════════════════════
+
+async function searchCollapsEmbed(kpId: string): Promise<OnlineBalancerStream[]> {
+  const embedUrl = `https://api.luxembd.ws/embed/kp/${encodeURIComponent(kpId)}`;
+  const res = await fetchWithTimeout(embedUrl, {
+    'User-Agent': UA_DESKTOP,
+    'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+    'Referer': 'https://api.luxembd.ws/',
+  }, TIMEOUT_MS);
+  if (!res.ok) throw new Error(`Collaps embed HTTP ${res.status}`);
+
+  const html = await res.text();
+  const un = unescapeJson(html);
+
+  // makePlayer({...hls: "url"...}) или прямой hls: "url" в <script>
+  const hlsMatch = un.match(/hls\s*:\s*"([^"]+\.m3u8[^"]*)"/i);
+  if (!hlsMatch?.[1]) throw new Error('Collaps: .m3u8 не найден в embed');
+
+  const hlsUrl = hlsMatch[1].replace(/\\u0026/g, '&');
+  console.log(`[OnlineBalancers] Collaps embed HLS: ${hlsUrl.slice(0, 80)}…`);
+
+  return [{
+    id: safeId('collaps', 'Дубляж', kpId),
+    source: 'Collaps',
+    quality: '1080p',
+    translation: 'Дубляж',
+    m3u8Url: hlsUrl,
+    isSerial: /season|seria|episod/i.test(html),
+    referer: 'https://api.luxembd.ws/',
+  }];
+}
+
+// ═══════════════════════════════════════════════════════
+//  Collaps Search — получить KP-ID по названию
+// ═══════════════════════════════════════════════════════
+
+interface CollapsSearchResult {
+  kinopoisk_id?: string | number;
+  name?: string;
+  year?: string;
+  iframe_url?: string;
+}
+
+async function searchCollapsByTitle(title: string, year?: string): Promise<string | null> {
+  if (!title) return null;
+  const token = 'eedefb541aeba871dcfc756e6b31c02e';
+  const url = `https://api.bhcesh.me/list?token=${token}&name=${encodeURIComponent(title)}&limit=5`;
+  try {
+    const res = await fetchWithTimeout(url, {
+      'User-Agent': UA_DESKTOP,
+      'Accept': 'application/json',
+    }, TIMEOUT_MS);
+    if (!res.ok) return null;
+    const json: any = await res.json();
+    const results: CollapsSearchResult[] = Array.isArray(json?.results) ? json.results : [];
+    // Ищем точное совпадение по названию + году
+    const exact = results.find((r) => {
+      const name = String(r.name || '').toLowerCase();
+      const q = title.toLowerCase();
+      const y = year ? String(r.year) === year : true;
+      return name.includes(q) || q.includes(name);
+    }) || results[0];
+    if (exact?.kinopoisk_id) {
+      console.log(`[OnlineBalancers] Collaps search: "${title}" → KP ${exact.kinopoisk_id}`);
+      return String(exact.kinopoisk_id);
+    }
+  } catch (err: any) {
+    console.warn('[OnlineBalancers] Collaps search failed:', err?.message || err);
+  }
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════
+//  3) Kodik — fallback (нужен токен, по TMDB-ID)
 // ═══════════════════════════════════════════════════════
 
 interface KodikResult {
@@ -257,7 +259,6 @@ interface KodikResult {
   kinopoisk_id?: string | number;
 }
 
-/** Kodik: /list по id (kinopoisk/tmdb/imdb) или /search по названию + году. */
 async function searchKodik(opts: {
   token: string;
   kinopoiskId?: string;
@@ -268,105 +269,36 @@ async function searchKodik(opts: {
   if (!opts.token) return [];
   const base = 'https://kodikapi.com';
   const common = `token=${encodeURIComponent(opts.token)}&limit=100&with_episodes=false&with_seasons=false`;
-  // Kodik принимает любой из id: kinopoisk_id / tmdb_id / imdb_id / shikimori_id
   const url = opts.kinopoiskId
     ? `${base}/list?${common}&kinopoisk_id=${encodeURIComponent(opts.kinopoiskId)}`
     : opts.tmdbId
     ? `${base}/list?${common}&tmdb_id=${encodeURIComponent(opts.tmdbId)}`
-    : `${base}/search?${common}&title=${encodeURIComponent(String(opts.title || '').trim())}${
-        opts.year ? `&year=${encodeURIComponent(opts.year)}` : ''
-      }`;
-  const res = await fetchWithTimeout(url, {
-    'User-Agent': UA_DESKTOP,
-    'Accept': 'application/json, text/plain, */*',
-  });
+    : `${base}/search?${common}&title=${encodeURIComponent(String(opts.title || '').trim())}${opts.year ? `&year=${encodeURIComponent(opts.year)}` : ''}`;
+
+  const res = await fetchWithTimeout(url, { 'User-Agent': UA_DESKTOP, 'Accept': 'application/json' }, TIMEOUT_MS);
   if (!res.ok) throw new Error(`Kodik HTTP ${res.status}`);
   const json: any = await res.json();
   const results: KodikResult[] = Array.isArray(json?.results) ? json.results : [];
+
   const streams: OnlineBalancerStream[] = [];
   for (const r of results) {
     const link = String(r.link || '').trim();
     const translation = String(r.translation?.title || 'Не указано').trim() || 'Не указано';
-    const quality = normalizeQuality(r.quality);
     streams.push({
-      id: safeId('kodik', translation, quality, String(r.id ?? '')),
+      id: safeId('kodik', translation, normalizeQuality(r.quality), String(r.id ?? '')),
       source: 'Kodik',
-      quality,
+      quality: normalizeQuality(r.quality),
       translation,
       iframeUrl: link || undefined,
       referer: link ? new URL(link).origin : undefined,
     });
   }
   console.log(`[OnlineBalancers] Kodik OK: ${results.length} результатов`);
-  return dedupeStreams(streams);
+  return dedupe(streams);
 }
 
 // ═══════════════════════════════════════════════════════
-//  Извлечение прямого .m3u8 из iframe-плеера балансера
-// ═══════════════════════════════════════════════════════
-
-/** Все .m3u8-URL из HTML/JS (с учётом экранирования \/ и \u0026). */
-function extractM3u8Urls(text: string): string[] {
-  const un = text
-    .replace(/\\\//g, '/')
-    .replace(/\\u0026/g, '&')
-    .replace(/\\u002F/g, '/');
-  const urls = new Set<string>();
-  // https://…index.m3u8?query — любые варианты
-  const re = /https?:\/\/[^"'\s<>\\]+?\.m3u8[^"'\s<>\\]*/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(un))) {
-    // отрезаем хвостовые кавычки/скобки, попавшие в совпадение
-    const clean = (m[0] as string).replace(/[),;'"\s]+$/, '');
-    if (/^https?:\/\//i.test(clean)) urls.add(clean);
-  }
-  return [...urls];
-}
-
-/** Лучший кандидат: мастера/master/index/hls предпочтительнее сегментных. */
-function pickBestM3u8(urls: string[]): string | undefined {
-  if (urls.length === 0) return undefined;
-  const score = (u: string) => {
-    let s = 0;
-    if (/master\.m3u8|index\.m3u8|playlist\.m3u8/i.test(u)) s += 4;
-    if (/\/hls\//i.test(u)) s += 2;
-    if (/adaptive|abr/i.test(u)) s += 1;
-    return s;
-  };
-  return [...urls].sort((a, b) => score(b) - score(a))[0];
-}
-
-/** Скачать iframe-страницу и достать прямой .m3u8 (+ Referer = origin). */
-async function resolveHlsFromIframe(iframeUrl: string): Promise<{ m3u8Url?: string; referer?: string }> {
-  let origin = '';
-  try {
-    origin = new URL(iframeUrl).origin;
-  } catch {
-    return {};
-  }
-  try {
-    const res = await fetchWithTimeout(
-      iframeUrl,
-      {
-        'User-Agent': UA_DESKTOP,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'ru-RU,ru;q=0.9',
-        'Referer': 'https://kinobox.tv/',
-      },
-      REQUEST_TIMEOUT_MS
-    );
-    if (!res.ok) return { referer: origin };
-    const text = await res.text();
-    const m3u8 = pickBestM3u8(extractM3u8Urls(text));
-    if (m3u8) console.log(`[OnlineBalancers] m3u8 извлечён: ${m3u8.slice(0, 90)}…`);
-    return { m3u8Url: m3u8 || undefined, referer: origin };
-  } catch {
-    return { referer: origin };
-  }
-}
-
-// ═══════════════════════════════════════════════════════
-//  Кэш (TTL 10 мин) — повторное открытие фильма не дёргает API
+//  Кэш (TTL 10 мин)
 // ═══════════════════════════════════════════════════════
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const cache = new Map<string, { at: number; streams: OnlineBalancerStream[] }>();
@@ -379,14 +311,9 @@ function cacheGet(key: string): OnlineBalancerStream[] | undefined {
 }
 
 // ═══════════════════════════════════════════════════════
-//  Публичный API модуля
+//  Публичный API
 // ═══════════════════════════════════════════════════════
 export class OnlineBalancers {
-  /**
-   * Поиск онлайн-потоков: KinoBox (по Кинопоиск-ID) + Kodik (опционально).
-   * Никогда не бросает исключение — при сбоях возвращает пустой список
-   * с error-сообщением для UI (торренты остаются главным источником).
-   */
   async searchOnlineStreams(args: {
     kinopoiskId?: number | string;
     tmdbId?: number | string;
@@ -394,11 +321,11 @@ export class OnlineBalancers {
     year?: string;
     kodikToken?: string;
   }): Promise<{ success: boolean; streams: OnlineBalancerStream[]; error?: string }> {
-    const kinopoiskId = args.kinopoiskId != null ? String(args.kinopoiskId).trim() : '';
+    const kpId = args.kinopoiskId != null ? String(args.kinopoiskId).trim() : '';
     const tmdbId = args.tmdbId != null ? String(args.tmdbId).trim() : '';
     const title = String(args.title || '').trim();
     const year = String(args.year || '').trim();
-    const cacheKey = `${kinopoiskId}|${tmdbId}|${title}|${year}`;
+    const cacheKey = `${kpId}|${tmdbId}|${title}|${year}`;
 
     const cached = cacheGet(cacheKey);
     if (cached) return { success: true, streams: cached };
@@ -406,53 +333,53 @@ export class OnlineBalancers {
     let streams: OnlineBalancerStream[] = [];
     let error: string | undefined;
 
-    // 1) KinoBox — по Кинопоиск-ID
-    if (kinopoiskId) {
+    // ── Resolve KP-ID: если не передан, ищем через Collaps search ──
+    let resolvedKpId = kpId;
+    if (!resolvedKpId && title) {
       try {
-        streams = await searchKinobox(kinopoiskId);
+        const found = await searchCollapsByTitle(title, year || undefined);
+        if (found) resolvedKpId = found;
+      } catch { /* не критично — Collaps embed тоже может сработать */ }
+    }
+
+    // ── 1) CDNvideohub (primary, по KP-ID) ──
+    if (resolvedKpId) {
+      try {
+        streams = await searchCdnvideohub(resolvedKpId);
       } catch (err: any) {
-        error = `KinoBox: ${err?.message || String(err)}`;
-        console.warn('[OnlineBalancers] KinoBox недоступен:', error);
+        error = `CDNvideohub: ${err?.message || String(err)}`;
+        console.warn('[OnlineBalancers] CDNvideohub:', error);
       }
     }
 
-    // 2) Kodik — опционально (аниме/сериалы по id или названию), нужен токен
+    // ── 2) Collaps Embed (secondary, по KP-ID → прямой .m3u8) ──
+    if (resolvedKpId && streams.length === 0) {
+      try {
+        streams = await searchCollapsEmbed(resolvedKpId);
+      } catch (err: any) {
+        console.warn('[OnlineBalancers] Collaps embed:', err?.message || err);
+        if (!error) error = `Collaps: ${err?.message || String(err)}`;
+      }
+    }
+
+    // ── 3) Kodik (fallback, нужен токен) ──
     if (args.kodikToken) {
       try {
         const kodik = await searchKodik({
           token: args.kodikToken,
-          kinopoiskId: kinopoiskId || undefined,
+          kinopoiskId: resolvedKpId || undefined,
           tmdbId: tmdbId || undefined,
           title: title || undefined,
           year: year || undefined,
         });
-        streams = dedupeStreams([...streams, ...kodik]);
+        streams = dedupe([...streams, ...kodik]);
       } catch (err: any) {
-        console.warn('[OnlineBalancers] Kodik недоступен:', err?.message || err);
+        console.warn('[OnlineBalancers] Kodik:', err?.message || err);
         if (!error) error = `Kodik: ${err?.message || String(err)}`;
       }
     }
 
-    // 2.5) Анти-спам: из всех балансеров × переводов оставляем топ-2 источника
-    // по надёжности, в каждом — топ-2 потока (4K/1080p в первую очередь).
-    // Резолв .m3u8 ниже прогоняем уже только по этому срезу — экономим запросы.
-    streams = topReliableStreams(sortStreams(dedupeStreams(streams)));
-
-    // 3) Резолв прямых .m3u8 из iframe-плееров (параллельно, каждый ≤6с)
-    if (streams.length > 0) {
-      const settled = await Promise.allSettled(
-        streams.slice(0, MAX_RESOLVE).map(async (s) => {
-          if (!s.iframeUrl || s.m3u8Url) return s;
-          const r = await resolveHlsFromIframe(s.iframeUrl);
-          return { ...s, m3u8Url: r.m3u8Url || s.m3u8Url, referer: r.referer || s.referer };
-        })
-      );
-      streams = settled
-        .filter((x): x is PromiseFulfilledResult<OnlineBalancerStream> => x.status === 'fulfilled')
-        .map((x) => x.value);
-    }
-
-    streams = sortStreams(dedupeStreams(streams));
+    streams = sortStreams(dedupe(streams));
     cache.set(cacheKey, { at: Date.now(), streams });
     return { success: true, streams, error };
   }

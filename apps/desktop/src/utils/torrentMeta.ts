@@ -23,6 +23,8 @@ const RU_STUDIOS = [
   'ViruseProject',
   'LakeFilms',
   'Amazing Dubbing',
+  'Гоблин',
+  'Переозвучка',
   'Оригинал + Субтитры',
   'Оригинал',
   'Субтитры',
@@ -36,6 +38,7 @@ const RU_HINTS = [
   /\bru\b/i, /\brus\b/i, /\brussian\b/i,
   /русск/i, /русский/i, /русская/i, /русские/i,
   /дубляж/i, /многоголос/i, /профессиональн/i, /закадров/i,
+  /гоблин/i, /переозвучк/i,
 ];
 
 export interface TorrentMeta {
@@ -43,9 +46,12 @@ export interface TorrentMeta {
   dubbings: string[];      // найденные озвучки/студии
   isRussian: boolean;      // есть русская озвучка
   seasons: number | null;  // сезон (S01 / «1 сезон»)
+  seasonsTo: number | null; // конец диапазона (S01-S03 → seasonsTo=3)
   episodes: number | null; // серии (E01 / «12 серий» / E01-E12)
   audioTracks: string[];   // AC3, EAC3, DTS, TrueHD, AAC, MP3…
   studioScore: number;     // очки за флагманские студии
+  /** Год версии озвучки, извлечённый из контекста («Гоблин 2020»). */
+  dubbingYear?: string;
 }
 
 export function parseTorrentMeta(title: string): TorrentMeta {
@@ -64,26 +70,51 @@ export function parseTorrentMeta(title: string): TorrentMeta {
     if (i2 > -1) dubbings.splice(i2, 1);
   }
 
+  // Год версии озвучки: «Гоблин 2020», «Переозвучка 2024», «Дубляж 2019»
+  let dubbingYear: string | undefined;
+  const yearMatch = t.match(/(дубляж|гоблин|переозвучк|lost\s?film|hdrezka|rhs)\s+(\d{4})/i);
+  if (yearMatch) dubbingYear = yearMatch[2];
+
   // Качество
   let quality = 'SD';
   if (/2160p|4k|uhd|ultra ?hd/i.test(t)) quality = '4K';
   else if (/1080p|full ?hd|fhd/i.test(t)) quality = '1080p';
   else if (/720p|hdrip|hdtv/i.test(t)) quality = '720p';
 
-  // Серии / сезоны (S01E01-E12, «сезон 1», «1 сезон», «12 серий»)
+  // Серии / сезоны (S01E01-E12, S01-S03, «сезон 1», «1 сезон», «12 серий»)
   let seasons: number | null = null;
+  let seasonsTo: number | null = null;
   let episodes: number | null = null;
-  const sMatch =
-    t.match(/s(\d{1,2})\s*e\d{1,3}/i) ||
-    t.match(/s(\d{1,2})(?:\s*[-–]\s*\d{1,2})?/i) ||
-    t.match(/сезон\s*(\d{1,2})/i) ||
-    t.match(/(\d{1,2})\s*сезон/i);
-  const eMatch =
-    t.match(/e(\d{1,3})(?:\s*[-–]\s*(\d{1,3}))?/i) ||
-    t.match(/(\d{1,3})\s*сери[ияй]/i) ||
-    t.match(/сери[ияй]\s*(\d{1,3})/i);
-  if (sMatch) seasons = parseInt(sMatch[1], 10);
-  if (eMatch) episodes = parseInt(eMatch[1], 10);
+
+  // 1) S01E01-E12 → seasons=1, episodes=1-12
+  const sxeMatch = t.match(/s(\d{1,2})\s*e(\d{1,3})(?:\s*[-–]\s*(\d{1,3}))?/i);
+  if (sxeMatch) {
+    seasons = parseInt(sxeMatch[1], 10);
+    episodes = parseInt(sxeMatch[2], 10);
+    if (sxeMatch[3]) episodes = parseInt(sxeMatch[3], 10); // берём конец диапазона серий
+  }
+  // 2) S01-S03 (сезон-пак без серий) → seasons=1, seasonsTo=3
+  if (seasons === null) {
+    const rangeMatch = t.match(/s(\d{1,2})\s*[-–—]\s*s?(\d{1,2})/i);
+    if (rangeMatch) {
+      seasons = Math.min(parseInt(rangeMatch[1], 10), parseInt(rangeMatch[2], 10));
+      seasonsTo = Math.max(parseInt(rangeMatch[1], 10), parseInt(rangeMatch[2], 10));
+    }
+  }
+  // 3) S01 (одиночный сезон)
+  if (seasons === null) {
+    const sOnlyMatch = t.match(/\bs(\d{1,2})\b/i);
+    if (sOnlyMatch) seasons = parseInt(sOnlyMatch[1], 10);
+  }
+  // 4) Русские: «сезон 1», «1 сезон», «12 серий»
+  if (seasons === null) {
+    const ruSeasonMatch = t.match(/сезон\s*(\d{1,2})/i) || t.match(/(\d{1,2})\s*сезон/i);
+    if (ruSeasonMatch) seasons = parseInt(ruSeasonMatch[1], 10);
+  }
+  if (episodes === null) {
+    const ruEpMatch = t.match(/(\d{1,3})\s*сери[ияй]/i) || t.match(/сери[ияй]\s*(\d{1,3})/i);
+    if (ruEpMatch) episodes = parseInt(ruEpMatch[1], 10);
+  }
 
   // Аудиодорожки
   const audioTracks: string[] = [];
@@ -96,11 +127,11 @@ export function parseTorrentMeta(title: string): TorrentMeta {
   const isRussian = ruStudios.length > 0 || RU_HINTS.some((re) => re.test(lower));
   const studioScore = dubbings.reduce((acc, d) => {
     if (d === 'Дубляж') return acc + 10;
-    if (['HDRezka', 'LostFilm', 'RHS', 'Пифагор', 'Кубик в Кубе'].includes(d)) return acc + 8;
+    if (['HDRezka', 'LostFilm', 'RHS', 'Пифагор', 'Кубик в Кубе', 'Гоблин'].includes(d)) return acc + 8;
     return acc + 5;
   }, 0);
 
-  return { quality, dubbings, isRussian, seasons, episodes, audioTracks, studioScore };
+  return { quality, dubbings, isRussian, seasons, seasonsTo, episodes, audioTracks, studioScore, dubbingYear };
 }
 
 /**
@@ -113,7 +144,7 @@ export function russianPriority(r: { title?: string; dubbing?: string }): number
   if (meta.isRussian) score += 50;
   score += meta.studioScore;
   const d = r.dubbing || '';
-  if (/Дубляж|RHS|HDRezka|LostFilm/i.test(d)) score += 40;
+  if (/Дубляж|RHS|HDRezka|LostFilm|Гоблин/i.test(d)) score += 40;
   else if (/Оригинал|EN\b|English|Torrentio/i.test(d)) score -= 25;
   return score;
 }

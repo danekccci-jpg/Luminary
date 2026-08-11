@@ -35,10 +35,10 @@ export interface OnlineStream {
   type?: 'movie' | 'tv';
 }
 
-/** Бесплатный онлайн-поток (KinoBox / Kodik) — прямая альтернатива торрентам. */
+/** Бесплатный онлайн-поток (CDNvideohub / Collaps / Kodik) — прямая альтернатива торрентам. */
 export interface OnlineBalancerStream {
   id: string;
-  /** Название балансера: Collaps, Alloha, Hdvb, Videocdn, Kodik… */
+  /** Название балансера: CDNvideohub, Collaps, Kodik… */
   source: string;
   /** Нормализованное качество: 4K / 1080p / 720p / SD. */
   quality: string;
@@ -50,6 +50,8 @@ export interface OnlineBalancerStream {
   iframeUrl?: string;
   /** Origin для заголовка Referer при воспроизведении (CDN балансеров). */
   referer?: string;
+  /** Сериал ли это (для пикера серий). */
+  isSerial?: boolean;
 }
 
 /** Unified catalog item from HDRezka / Filmix */

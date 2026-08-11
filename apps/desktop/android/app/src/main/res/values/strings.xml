@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Luminary</string>
+    <string name="title_activity_main">Luminary</string>
+    <string name="package_name">com.luminary.torrentcinema</string>
+    <string name="custom_url_scheme">com.luminary.torrentcinema</string>
+</resources>

@@ -51,6 +51,9 @@ apps/android/node_modules/
 *.apk
 *.aab
 
+# ── TorrServer binaries в Android assets (скачиваются fetch-torrserver.js) ──
+apps/desktop/android/app/src/main/assets/torrserver/TorrServer-*
+
 # ── Build artifacts (root level) ──
 *.tgz
 coverage/

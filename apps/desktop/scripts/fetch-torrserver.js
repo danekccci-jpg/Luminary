@@ -47,6 +47,10 @@ const PLATFORMS = {
     'TorrServer-gst-linux-amd64',
     'TorrServer-gst-linux-arm64',
   ],
+  android: [
+    'TorrServer-android-arm64',
+    'TorrServer-android-amd64',
+  ],
 };
 
 const args = process.argv.slice(2);
@@ -61,11 +65,15 @@ if (all) {
 } else if (platformArg && PLATFORMS[platformArg]) {
   targets = PLATFORMS[platformArg];
 } else {
-  console.error('❌ Укажи --platform <darwin|win32|linux> или --all');
+  console.error('❌ Укажи --platform <darwin|win32|linux|android> или --all');
   process.exit(1);
 }
 
-const destDir = path.join(__dirname, '..', 'resources', 'torrserver');
+// Android-бинарники идут в assets/ (для Capacitor APK), остальные — в resources/torrserver/
+const isAndroid = platformArg === 'android' || targets.some(t => t.includes('android'));
+const destDir = isAndroid
+  ? path.join(__dirname, '..', 'android', 'app', 'src', 'main', 'assets', 'torrserver')
+  : path.join(__dirname, '..', 'resources', 'torrserver');
 fs.mkdirSync(destDir, { recursive: true });
 
 let failed = false;

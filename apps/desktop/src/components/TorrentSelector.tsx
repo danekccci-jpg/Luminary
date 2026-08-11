@@ -42,7 +42,6 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
   const [sortBy, setSortBy]                 = useState<'russian' | 'seeders' | 'size' | 'stability'>('russian');
   const [keyword, setKeyword]               = useState('');
 
-  const dubbingOptions = ['ALL', 'Дубляж', 'HDRezka', 'LostFilm', 'Оригинал + Субтитры', 'RHS'];
   const qualityOptions = ['ALL', '4K', '1080p', '720p'];
 
   /** Кэш форматов (HDR/DV/HEVC/…) из названия каждой раздачи — без повторного парсинга при фильтрации. */
@@ -58,6 +57,21 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
     return ['ALL', ...set];
   }, [formatMap]);
 
+  /** Авто-генерация чипов озвучки из реальных dubbing-значений раздач. */
+  const dubbingOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of releases) {
+      if (r.dubbing && r.dubbing !== 'ALL') set.add(r.dubbing);
+    }
+    const order = ['Дубляж', 'LostFilm', 'RHS', 'HDRezka', 'Гоблин', 'Пифагор', 'Сыендук', 'TVShows', 'Переозвучка', 'Кубик в Кубе', 'Оригинал + Субтитры', 'Прочее'];
+    const sorted = [...set].sort((a, b) => {
+      const ia = order.indexOf(a);
+      const ib = order.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+    return ['ALL', ...sorted];
+  }, [releases]);
+
   /** Сезоны раздачи: {from, to} из названия (S01, S01-S03, «сезон 2»), null — без маркера. */
   const seasonsOf = (title: string): { from: number; to: number } | null => {
     const range = String(title).match(/s(\d{1,2})\s*[-–—]\s*(\d{1,2})/i);
@@ -67,7 +81,11 @@ export const TorrentSelector: React.FC<TorrentSelectorProps> = React.memo(({
       return { from: Math.min(a, b), to: Math.max(a, b) };
     }
     const meta = parseTorrentMeta(title);
-    if (meta.seasons != null) return { from: meta.seasons, to: meta.seasons };
+    if (meta.seasons != null) {
+      // seasonsTo может быть заполнен для диапазонов S01-S03 (parseTorrentMeta → seasons=1, seasonsTo=3)
+      const to = meta.seasonsTo != null && meta.seasonsTo > meta.seasons ? meta.seasonsTo : meta.seasons;
+      return { from: meta.seasons, to };
+    }
     return null;
   };
 

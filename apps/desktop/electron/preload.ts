@@ -98,6 +98,7 @@ export interface ElectronAPI {
       m3u8Url?: string;
       iframeUrl?: string;
       referer?: string;
+      isSerial?: boolean;
     }>;
     error?: string;
   }>;

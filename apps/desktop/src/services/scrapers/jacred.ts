@@ -218,6 +218,7 @@ function detectDubbing(title: string): DubbingType {
   if (/lostfilm|лostfilm/i.test(title)) return 'LostFilm';
   if (/tvshows|твшоу/i.test(title)) return 'TVShows';
   if (/кубик в кубе/i.test(title)) return 'Кубик в Кубе';
+  if (/субтитры|субтитровано|subbed|суб/i.test(title)) return 'Оригинал + Субтитры';
   return 'Прочее';
 }
 

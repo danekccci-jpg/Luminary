@@ -609,7 +609,7 @@ export class TorrServerManager {
       // НЕ запускаем spawn повторно — статус сразу online.
       console.log(`[TorrServer] Already running on http://${this.host}:${this.port} — status online, spawn skipped`);
       this.startingFlag = false;
-      await this.configureServer(512);
+      await this.configureServer(1024);
       return { running: true, port: this.port, version: 'MatriX (Pre-running)' };
     }
 
@@ -750,11 +750,11 @@ export class TorrServerManager {
         this.appendLog('HEALTHCHECK /echo OK — server ready');
         // Сразу: безопасная часть конфига (БЕЗ смены P2P-порта — ранняя смена
         // ломает инициализацию BT-клиента → 500 «BT client not connected»).
-        await this.configureServer(512, false);
+        await this.configureServer(1024, false);
         // Через 20 сек: фиксированный P2P-порт 43211 + полный конфиг,
         // когда BT-клиент полностью инициализирован.
         setTimeout(() => {
-          this.configureServer(512, true).catch(() => {});
+          this.configureServer(1024, true).catch(() => {});
         }, 20000);
         return { running: true, port: this.port, binaryPath: binPath };
       }
@@ -801,10 +801,11 @@ export class TorrServerManager {
       const sets: Record<string, unknown> = {
         ...(current && typeof current === 'object' ? current : {}),
         // ── Критический набор для macOS (P2P-скорость 0.0 MB/s fix) ──
+        //    + оптимизация для быстрых каналов (600+ Мбит)
         CacheSize: cacheSizeBytes,          // буфер в RAM
-        ReaderReadAHead: 95,                // упреждающее чтение
+        ReaderReadAHead: 98,                // упреждающее чтение (было 95)
         PreloadCache: 50,
-        PreloadBufferSize: 10485760,        // минимальный предзагрузочный буфер ~10 MB
+        PreloadBufferSize: 31457280,        // предзагрузочный буфер ~30 MB (было 10 MB)
         // UseDisk:true + TorrentsSavePath — gst-сборка TorrServer требует ФАЙЛ
         // на диске для gst-discoverer-1.0: /gst/master.m3u8 (транскод
         // AC3/DTS/TrueHD/EAC3 → AAC) отвечает «no stream info» в RAM-only
@@ -813,7 +814,7 @@ export class TorrServerManager {
         UseDisk: true,
         TorrentsSavePath: this.diskCacheDir,
         RemoveCacheOnDrop: true,
-        ConnectionsLimit: 120,
+        ConnectionsLimit: 250,              // быстрые каналы: больше пиров = выше агрегат
         ClientsStatLimit: 30,
         TorrentDisconnectTimeout: 86400,     // 24 часа (TorrServer НЕ принимает 0 —
         //   приводит к дефолту30; 86400 = бесконечность на практике для десктопа)
@@ -824,7 +825,7 @@ export class TorrServerManager {
         DisablePEX: false,                  // Peer Exchange
         DisableUTP: false,                  // uTP (за NAT)
         DisableTCP: false,
-        EnableIPv6: false,
+        EnableIPv6: true,                   // IPv6 = доп. пул пиров для быстрых каналов
         // Настройки НЕ пишем в settings.json: сохранённый PeersListenPort
         // ломает BT-клиент при следующем старте. Конфиг применяется через
         // API при каждом запуске, поэтому файл не нужен.
@@ -892,7 +893,7 @@ export class TorrServerManager {
     }
     // 2) Повторная конфигурация — DHT/UPnP/PeersListenPort
     try {
-      await this.configureServer(512, true);
+      await this.configureServer(1024, true);
       console.log('[TorrServer] Network reset: configuration reapplied');
     } catch (e: any) {
       console.warn('[TorrServer] Network reset reconfigure warning:', e.message);
