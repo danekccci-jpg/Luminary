@@ -1,7 +1,7 @@
 name: Release
 
-# Сборка ВСЕХ платформ (macOS + Windows + Android) и публикация в GitHub Releases.
-# Запуск: пуш тега v* — соберёт всё и создаст Release с артефактами.
+# Сборка ВСЕХ платформ и публикация в GitHub Releases.
+# Платформы: macOS (Electron), Windows (Electron), Android Touch, Android TV
 
 on:
   push:
@@ -15,6 +15,7 @@ env:
   CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
 jobs:
+  # ── Desktop: macOS + Windows ──
   mac:
     name: 'macOS (.dmg)'
     runs-on: macos-latest
@@ -36,8 +37,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: mac
-          path: |
-            apps/desktop/release/Luminary-*.dmg
+          path: apps/desktop/release/Luminary-*.dmg
 
   windows:
     name: 'Windows (.exe)'
@@ -61,84 +61,113 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: |
-            apps/desktop/release/Luminary-*-Setup.exe
+          path: apps/desktop/release/Luminary-*-Setup.exe
 
-  android:
-    name: 'Android (phone + TV APK)'
+  # ── Android: Touch + TV APK ──
+  android-touch:
+    name: 'Android Touch (phone/tablet)'
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/desktop
+        working-directory: apps/android
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
+          cache-dependency-path: apps/android/package-lock.json
       - uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: temurin
       - uses: android-actions/setup-android@v3
       - run: npm ci
-      - run: npm run selftest
-      - run: npm run build
-      - run: node scripts/fetch-torrserver.js --platform android
-      - run: node scripts/set-android-icons.js
+      - run: npx tsc --noEmit
+      - run: npx vite build
       - name: Generate signing keystore
         run: |
           keytool -genkeypair -v \
             -keystore android/app/release-key.jks \
-            -storepass luminary123 \
-            -alias luminary \
-            -keypass luminary123 \
+            -storepass luminary123 -alias luminary -keypass luminary123 \
             -keyalg RSA -keysize 2048 -validity 36500 \
             -dname "CN=Luminary, OU=Dev, O=Luminary, L=Unknown, S=Unknown, C=US"
       - run: npx cap sync android
       - name: Build APK
-        run: |
-          cd android && ./gradlew assembleRelease
-      - name: Sign APK with apksigner
+        run: cd android && ./gradlew assembleRelease
+      - name: Sign APK
         run: |
           APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          echo "Signing: $APK"
           $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools/ | sort -V | tail -1)/apksigner sign \
-            --ks android/app/release-key.jks \
-            --ks-pass pass:luminary123 \
-            --key-pass pass:luminary123 \
-            --ks-key-alias luminary \
-            "$APK"
-          echo "Verifying..."
-          $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools/ | sort -V | tail -1)/apksigner verify -v "$APK" 2>&1 | head -5
+            --ks android/app/release-key.jks --ks-pass pass:luminary123 \
+            --key-pass pass:luminary123 --ks-key-alias luminary "$APK"
       - uses: actions/upload-artifact@v4
         with:
-          name: android
-          path: |
-            apps/desktop/android/app/build/outputs/apk/release/*.apk
+          name: android-touch
+          path: apps/android/android/app/build/outputs/apk/release/*.apk
 
+  android-tv:
+    name: 'Android TV'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/android-tv
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/android-tv/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+      - uses: android-actions/setup-android@v3
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vite build
+      - name: Generate signing keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore android/app/release-key.jks \
+            -storepass luminary123 -alias luminary -keypass luminary123 \
+            -keyalg RSA -keysize 2048 -validity 36500 \
+            -dname "CN=Luminary, OU=Dev, O=Luminary, L=Unknown, S=Unknown, C=US"
+      - run: npx cap sync android
+      - name: Build APK
+        run: cd android && ./gradlew assembleRelease
+      - name: Sign APK
+        run: |
+          APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools/ | sort -V | tail -1)/apksigner sign \
+            --ks android/app/release-key.jks --ks-pass pass:luminary123 \
+            --key-pass pass:luminary123 --ks-key-alias luminary "$APK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-tv
+          path: apps/android-tv/android/app/build/outputs/apk/release/*.apk
+
+  # ── Release: собрать все артефакты ──
   release:
     name: 'Publish GitHub Release'
-    needs: [mac, windows, android]
+    needs: [mac, windows, android-touch, android-tv]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-
       - name: Prepare release files
         run: |
           mkdir -p release
           find artifacts/mac -name '*.dmg' -exec cp {} release/ \;
           find artifacts/windows -name '*-Setup.exe' -exec cp {} release/ \;
-          find artifacts/android -name '*.apk' -exec cp {} "release/Luminary-${GITHUB_REF_NAME:-dev}-android.apk" \;
-          echo "Release artifacts:"
+          find artifacts/android-touch -name '*.apk' -exec cp {} "release/Luminary-${GITHUB_REF_NAME:-dev}-android.apk" \;
+          find artifacts/android-tv -name '*.apk' -exec cp {} "release/Luminary-${GITHUB_REF_NAME:-dev}-android-tv.apk" \;
+          echo "=== Release artifacts ==="
           ls -lh release/
-
-      - name: Create release (tag) or draft (manual run)
+      - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -150,6 +179,5 @@ jobs:
               --generate-notes
           else
             gh release create "draft-$(date +%s)" release/* \
-              --draft \
-              --title "Luminary manual build"
+              --draft --title "Luminary manual build"
           fi
