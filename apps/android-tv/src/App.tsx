@@ -10,11 +10,11 @@
  * - Нет hover/cursor
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { torrServerService } from '../services/torrserver';
-import { tmdbService } from '../services/tmdb';
-import { library } from '../services/library';
-import { toastBus } from '../services/toast';
-import { Movie } from '../types';
+import { torrServerService } from './services/torrserver';
+import { tmdbService } from './services/tmdb';
+import { library } from './services/library';
+import { toastBus } from './services/toast';
+import { Movie } from './types';
 import PlayerTV from './components/PlayerTV';
 
 interface CatalogRail {
