@@ -80,7 +80,7 @@ jobs:
           java-version: '21'
           distribution: temurin
       - uses: android-actions/setup-android@v3
-      - run: npm ci
+      - run: npm install
       - run: npx tsc --noEmit
       - run: npx vite build
       - name: Generate signing keystore
@@ -120,7 +120,7 @@ jobs:
           java-version: '21'
           distribution: temurin
       - uses: android-actions/setup-android@v3
-      - run: npm ci
+      - run: npm install
       - run: npx tsc --noEmit
       - run: npx vite build
       - name: Generate signing keystore
