@@ -1,0 +1,131 @@
+/* ══════════════════════════════════════════════════════════════
+   Android TV — оптимизация под пульт (D-pad, 10-foot viewing)
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Глобальные TV-правила ── */
+html, body {
+  cursor: none;
+  overflow-x: hidden;
+  min-height: 100dvh;
+}
+
+/* ── Крупный шрифт для 10-foot viewing ── */
+body {
+  font-size: 22px;
+  line-height: 1.6;
+}
+
+/* ── Фокус-кольца (главное для пульта) ── */
+:focus-visible {
+  outline: 4px solid #00F2FE;
+  outline-offset: 4px;
+  box-shadow: 0 0 24px rgba(0, 242, 254, 0.5);
+  border-radius: inherit;
+}
+
+/* ── Крупные touch-цели (56px минимум) ── */
+button, .btn-primary, .btn-secondary, .btn-icon {
+  min-height: 56px;
+  min-width: 56px;
+}
+
+.btn-primary {
+  padding: 18px 36px;
+  font-size: 1.2rem;
+  border-radius: 16px;
+}
+
+.btn-secondary {
+  padding: 18px 36px;
+  font-size: 1.2rem;
+  border-radius: 16px;
+}
+
+/* ── Карточки — крупнее для 10-foot ── */
+.movie-grid {
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)) !important;
+  gap: 1.5rem !important;
+}
+
+.movie-card {
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.movie-card:focus-visible {
+  transform: translateY(-12px) scale(1.04);
+  box-shadow: 0 0 0 4px #00F2FE, 0 0 40px rgba(0,242,254,0.3);
+}
+
+/* ── Навигация — sidebar слева ── */
+.tv-nav {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: '280px';
+  background: 'rgba(10, 11, 14, 0.95)';
+  borderRight: '1px solid rgba(255,255,255,0.08)';
+  padding: '60px 24px 24px';
+  z-index: 40;
+  display: 'flex';
+  flexDirection: 'column';
+}
+
+.tv-nav-item {
+  padding: '16px 20px';
+  border-radius: '12px';
+  color: rgba(240, 242, 248, 0.6);
+  font-size: '20px';
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  min-height: '56px';
+  display: 'flex';
+  align-items: 'center';
+  gap: '12px';
+}
+
+.tv-nav-item:focus-visible,
+.tv-nav-item.active {
+  background: 'rgba(0, 242, 254, 0.12)';
+  color: '#00F2FE';
+}
+
+/* ── Модалки — полноэкранные ── */
+.modal-overlay {
+  padding: 0 !important;
+}
+
+.modal-sheet {
+  width: 100% !important;
+  max-width: none !important;
+  max-height: 100vh !important;
+  border-radius: 0 !important;
+}
+
+/* ── Списки — крупные строки ── */
+.list-item {
+  min-height: '72px';
+  padding: '16px 24px';
+}
+
+/* ── Скролл-бары — скрыты на TV ── */
+::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Крупные badge/теги ── */
+.badge {
+  font-size: '0.9rem';
+  padding: '4px 12px';
+}
+
+/* ── Сетка — больше отступов ── */
+.movie-grid {
+  padding: '0 40px 40px 320px';
+}
+
+/* ── Header — скрыт на TV (sidebar вместо него) ── */
+.app-header {
+  display: none !important;
+}

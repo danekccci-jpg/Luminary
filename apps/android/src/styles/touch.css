@@ -1,0 +1,108 @@
+/* ══════════════════════════════════════════════════════════════
+   Android Touch — оптимизация под сенсорные экраны
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Глобальные touch-правила ── */
+* {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+}
+
+html, body {
+  touch-action: manipulation;
+  overscroll-behavior: none;
+  overflow-x: hidden;
+}
+
+/* ── Безопасные зоны (notch, rounded corners) ── */
+body {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: 72px; /* место для bottom nav */
+  min-height: 100dvh;
+}
+
+/* ── Крупные touch-цели (48px минимум по Material Design) ── */
+button, .btn-primary, .btn-secondary, .btn-icon, .filter-chip {
+  min-height: 48px;
+  min-width: 48px;
+}
+
+.btn-primary {
+  padding: 14px 28px;
+  font-size: 1rem;
+}
+
+.btn-secondary {
+  padding: 14px 28px;
+  font-size: 1rem;
+}
+
+/* ── Карточки фильмов ── */
+.movie-card {
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+
+.movie-card:active {
+  transform: scale(0.97) !important;
+}
+
+/* ── Сетка карточек ── */
+.movie-grid {
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)) !important;
+  gap: 0.8rem !important;
+}
+
+/* ── Модалки → bottom sheet ── */
+.modal-overlay {
+  align-items: flex-end !important;
+  padding: 0 !important;
+}
+
+.modal-sheet {
+  width: 100% !important;
+  max-width: none !important;
+  max-height: 90vh;
+  border-radius: 24px 24px 0 0 !important;
+  padding-bottom: env(safe-area-inset-bottom, 16px) !important;
+}
+
+/* ── Скролл ── */
+.scrollable {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* ── Настройки ── */
+.settings-toggle {
+  min-height: 52px;
+  padding: 16px;
+}
+
+/* ── Header скрыт (bottom nav вместо него) ── */
+.app-header {
+  display: none !important;
+}
+
+/* ── Larger text for readability ── */
+body {
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+/* ── Input fields — крупнее для touch ── */
+.input-glass {
+  height: 48px;
+  font-size: 16px !important; /* предотвращает zoom на iOS */
+  padding: 12px 16px !important;
+}
+
+/* ── Стрелки навигации (назад) ── */
+.nav-back {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
