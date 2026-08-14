@@ -35,10 +35,43 @@ android {
         }
     }
 
+    signingConfigs {
+        release {
+            def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH") ?: "${projectDir}/release-key.jks"
+            def keystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: "luminary123"
+            def keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: "luminary"
+            def keyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: "luminary123"
+
+            // Auto-generate debug keystore if release keystore doesn't exist
+            if (!file(keystorePath).exists()) {
+                exec {
+                    commandLine 'keytool', '-genkeypair', '-v',
+                        '-keystore', keystorePath,
+                        '-storepass', keystorePassword,
+                        '-alias', keyAlias,
+                        '-keypass', keyPassword,
+                        '-keyalg', 'RSA',
+                        '-keysize', '2048',
+                        '-validity', '36500',
+                        '-dname', 'CN=Luminary, OU=Dev, O=Luminary, L=Unknown, S=Unknown, C=US'
+                }
+            }
+
+            storeFile file(keystorePath)
+            storePassword keystorePassword
+            keyAlias keyAlias
+            keyPassword keyPassword
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            signingConfig signingConfigs.release
         }
     }
 }
