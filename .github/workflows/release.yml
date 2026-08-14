@@ -87,6 +87,15 @@ jobs:
       - run: npm run build
       - run: node scripts/fetch-torrserver.js --platform android
       - run: node scripts/set-android-icons.js
+      - name: Generate signing keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore android/app/release-key.jks \
+            -storepass luminary123 \
+            -alias luminary \
+            -keypass luminary123 \
+            -keyalg RSA -keysize 2048 -validity 36500 \
+            -dname "CN=Luminary, OU=Dev, O=Luminary, L=Unknown, S=Unknown, C=US"
       - run: npx cap sync android
       - name: Build phone APK
         run: cd android && ./gradlew assemblePhoneRelease
