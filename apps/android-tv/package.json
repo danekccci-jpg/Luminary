@@ -9,7 +9,7 @@
     "cap:sync": "npx cap sync android"
   },
   "dependencies": {
-    "@luminary/core": "1.2.0",
+    "@luminary/core": "file:../../packages/core",
     "@capacitor/core": "^7.0.0",
     "@capacitor/cli": "^7.0.0",
     "@capacitor/android": "^7.0.0",
