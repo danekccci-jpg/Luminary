@@ -83,6 +83,7 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npx vite build
+      - run: npx cap add android || true
       - run: npx cap sync android
       - name: Generate signing keystore
         run: |
@@ -123,6 +124,7 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npx vite build
+      - run: npx cap add android || true
       - run: npx cap sync android
       - name: Generate signing keystore
         run: |
