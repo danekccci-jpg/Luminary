@@ -52,10 +52,10 @@ apps/android/node_modules/
 *.aab
 
 # ── TorrServer binaries в Android assets (скачиваются fetch-torrserver.js) ──
-apps/desktop/android/app/src/main/assets/torrserver/TorrServer-*
+**/assets/torrserver/TorrServer-*
 
 # ── Android signing keystore (генерируется автоматически) ──
-apps/desktop/android/app/release-key.jks
+**/release-key.jks
 
 # ── Build artifacts (root level) ──
 *.tgz

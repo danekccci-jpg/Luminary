@@ -38,6 +38,24 @@ export const App: React.FC = () => {
   const [history, setHistory] = useState<any[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
+  // ── Автозапуск TorrServer ──
+  useEffect(() => {
+    const startServer = async () => {
+      try {
+        const status = await torrServerService.getStatus();
+        if (!status.running) {
+          console.log('[App] TorrServer not running, starting...');
+          await torrServerService.startServer();
+        } else {
+          console.log('[App] TorrServer already running');
+        }
+      } catch (err) {
+        console.warn('[App] TorrServer start failed:', err);
+      }
+    };
+    startServer();
+  }, []);
+
   // ── Загрузка каталога ──
   useEffect(() => {
     const load = async () => {

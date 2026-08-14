@@ -32,6 +32,24 @@ export const App: React.FC = () => {
   const [activeStream, setActiveStream] = useState<any>(null);
   const [catalog, setCatalog] = useState<CatalogRail[]>([]);
 
+  // ── Автозапуск TorrServer ──
+  useEffect(() => {
+    const startServer = async () => {
+      try {
+        const status = await torrServerService.getStatus();
+        if (!status.running) {
+          console.log('[App] TorrServer not running, starting...');
+          await torrServerService.startServer();
+        } else {
+          console.log('[App] TorrServer already running');
+        }
+      } catch (err) {
+        console.warn('[App] TorrServer start failed:', err);
+      }
+    };
+    startServer();
+  }, []);
+
   useEffect(() => {
     const load = async () => {
       try {

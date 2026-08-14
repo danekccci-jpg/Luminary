@@ -83,6 +83,12 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npx vite build
+      - name: Fetch TorrServer Android binary
+        run: |
+          mkdir -p android/app/src/main/assets/torrserver
+          curl -sL -o android/app/src/main/assets/torrserver/TorrServer-android-arm64 \
+            "https://github.com/YouROK/TorrServer/releases/latest/download/TorrServer-android-arm64"
+          chmod +x android/app/src/main/assets/torrserver/TorrServer-android-arm64
       - run: npx cap add android || true
       - run: npx cap sync android
       - name: Generate signing keystore
@@ -124,6 +130,12 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npx vite build
+      - name: Fetch TorrServer Android binary
+        run: |
+          mkdir -p android/app/src/main/assets/torrserver
+          curl -sL -o android/app/src/main/assets/torrserver/TorrServer-android-arm64 \
+            "https://github.com/YouROK/TorrServer/releases/latest/download/TorrServer-android-arm64"
+          chmod +x android/app/src/main/assets/torrserver/TorrServer-android-arm64
       - run: npx cap add android || true
       - run: npx cap sync android
       - name: Generate signing keystore
