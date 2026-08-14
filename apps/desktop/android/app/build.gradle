@@ -37,15 +37,10 @@ android {
 
     signingConfigs {
         release {
-            def ksPath = System.getenv("ANDROID_KEYSTORE_PATH") ?: "${projectDir}/release-key.jks"
-            def ksPass = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: "luminary123"
-            def ksAlias = System.getenv("ANDROID_KEY_ALIAS") ?: "luminary"
-            def ksKeyPass = System.getenv("ANDROID_KEY_PASSWORD") ?: "luminary123"
-
-            storeFile file(ksPath)
-            storePassword ksPass
-            keyAlias ksAlias
-            keyPassword ksKeyPass
+            storeFile file("${projectDir}/release-key.jks")
+            storePassword "luminary123"
+            keyAlias "luminary"
+            keyPassword "luminary123"
         }
     }
 
@@ -58,11 +53,6 @@ android {
         debug {
             signingConfig signingConfigs.release
         }
-    }
-
-    // Принудительно применяем signing ко всем вариантам (phoneRelease, tvRelease)
-    applicationVariants.configureEach { variant ->
-        variant.signingConfig = signingConfigs.release
     }
 }
 
