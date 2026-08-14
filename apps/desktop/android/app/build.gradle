@@ -6,7 +6,7 @@ android {
 
     defaultConfig {
         applicationId "com.luminary.torrentcinema"
-        minSdkVersion rootProject.ext.minSdkVersion
+        minSdkVersion 24
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 2
         versionName "1.1.1"
@@ -22,28 +22,6 @@ android {
             storePassword "luminary123"
             keyAlias "luminary"
             keyPassword "luminary123"
-        }
-    }
-
-    flavorDimensions "default"
-    productFlavors {
-        phone {
-            dimension "default"
-            minSdkVersion 24
-            applicationIdSuffix ""
-            signingConfig signingConfigs.release
-        }
-        tv {
-            dimension "default"
-            minSdkVersion 24
-            applicationIdSuffix ".tv"
-            signingConfig signingConfigs.release
-        }
-    }
-
-    sourceSets {
-        tv {
-            manifest.srcFile 'src/tv/AndroidManifest.xml'
         }
     }
 

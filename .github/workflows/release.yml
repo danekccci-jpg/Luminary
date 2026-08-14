@@ -97,16 +97,13 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 36500 \
             -dname "CN=Luminary, OU=Dev, O=Luminary, L=Unknown, S=Unknown, C=US"
       - run: npx cap sync android
-      - name: Build phone APK
-        run: cd android && ./gradlew assemblePhoneRelease
-      - name: Build TV APK
-        run: cd android && ./gradlew assembleTvRelease
+      - name: Build APK
+        run: cd android && ./gradlew assembleRelease
       - uses: actions/upload-artifact@v4
         with:
           name: android
           path: |
-            apps/desktop/android/app/build/outputs/apk/phone/release/*.apk
-            apps/desktop/android/app/build/outputs/apk/tv/release/*.apk
+            apps/desktop/android/app/build/outputs/apk/release/*.apk
 
   release:
     name: 'Publish GitHub Release'
@@ -124,14 +121,7 @@ jobs:
           mkdir -p release
           find artifacts/mac -name '*.dmg' -exec cp {} release/ \;
           find artifacts/windows -name '*-Setup.exe' -exec cp {} release/ \;
-          find artifacts/android -name '*.apk' | while read f; do
-            bn=$(basename "$f")
-            if [[ "$bn" == *"phone"* ]]; then
-              cp "$f" "release/Luminary-${GITHUB_REF_NAME:-dev}-android.apk"
-            elif [[ "$bn" == *"tv"* ]]; then
-              cp "$f" "release/Luminary-${GITHUB_REF_NAME:-dev}-android-tv.apk"
-            fi
-          done
+          find artifacts/android -name '*.apk' -exec cp {} "release/Luminary-${GITHUB_REF_NAME:-dev}-android.apk" \;
           echo "Release artifacts:"
           ls -lh release/
 
