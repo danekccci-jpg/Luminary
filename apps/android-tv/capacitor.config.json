@@ -1,0 +1,8 @@
+{
+  "appId": "com.luminary.torrentcinema",
+  "appName": "Luminary",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}
