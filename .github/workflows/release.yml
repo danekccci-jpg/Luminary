@@ -83,6 +83,7 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npx vite build
+      - run: npx cap sync android
       - name: Generate signing keystore
         run: |
           keytool -genkeypair -v \
@@ -90,7 +91,6 @@ jobs:
             -storepass luminary123 -alias luminary -keypass luminary123 \
             -keyalg RSA -keysize 2048 -validity 36500 \
             -dname "CN=Luminary, OU=Dev, O=Luminary, L=Unknown, S=Unknown, C=US"
-      - run: npx cap sync android
       - name: Build APK
         run: cd android && ./gradlew assembleRelease
       - name: Sign APK
@@ -123,6 +123,7 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npx vite build
+      - run: npx cap sync android
       - name: Generate signing keystore
         run: |
           keytool -genkeypair -v \
@@ -130,7 +131,6 @@ jobs:
             -storepass luminary123 -alias luminary -keypass luminary123 \
             -keyalg RSA -keysize 2048 -validity 36500 \
             -dname "CN=Luminary, OU=Dev, O=Luminary, L=Unknown, S=Unknown, C=US"
-      - run: npx cap sync android
       - name: Build APK
         run: cd android && ./gradlew assembleRelease
       - name: Sign APK
