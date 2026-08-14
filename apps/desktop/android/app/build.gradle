@@ -3,6 +3,7 @@ apply plugin: 'com.android.application'
 android {
     namespace = "com.luminary.torrentcinema"
     compileSdk = rootProject.ext.compileSdkVersion
+
     defaultConfig {
         applicationId "com.luminary.torrentcinema"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -15,26 +16,6 @@ android {
         }
     }
 
-    flavorDimensions "default"
-    productFlavors {
-        phone {
-            dimension "default"
-            minSdkVersion 24
-            applicationIdSuffix ""
-        }
-        tv {
-            dimension "default"
-            minSdkVersion 24
-            applicationIdSuffix ".tv"
-        }
-    }
-
-    sourceSets {
-        tv {
-            manifest.srcFile 'src/tv/AndroidManifest.xml'
-        }
-    }
-
     signingConfigs {
         release {
             storeFile file("${projectDir}/release-key.jks")
@@ -44,14 +25,32 @@ android {
         }
     }
 
+    flavorDimensions "default"
+    productFlavors {
+        phone {
+            dimension "default"
+            minSdkVersion 24
+            applicationIdSuffix ""
+            signingConfig signingConfigs.release
+        }
+        tv {
+            dimension "default"
+            minSdkVersion 24
+            applicationIdSuffix ".tv"
+            signingConfig signingConfigs.release
+        }
+    }
+
+    sourceSets {
+        tv {
+            manifest.srcFile 'src/tv/AndroidManifest.xml'
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-        }
-        debug {
-            signingConfig signingConfigs.release
         }
     }
 }
