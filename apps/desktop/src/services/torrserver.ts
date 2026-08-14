@@ -1,5 +1,6 @@
 import { TorrServerStatusInfo, TorrentRelease, TorrServerStats } from '../types';
 import { searchJacRed, mergeReleasesByHash, getJacredStatus } from './scrapers/jacred';
+import { getBridge } from '../utils/bridge';
 
 export class TorrServerService {
   /** Кэш префетча: magnet → { hash, at }. При открытии фильма тихо add
@@ -61,9 +62,8 @@ export class TorrServerService {
   /** Полный сброс сети: пере-анонс DHT/трекеров + reconfigure.
    *  Вызывается при смене IP/списке сети. */
   public async resetNetwork(): Promise<void> {
-    if (window.electronAPI?.resetTorrServerNetwork) {
-      await window.electronAPI.resetTorrServerNetwork();
-    }
+    // No HTTP equivalent — skip on non-Electron
+    try { await (getBridge() as any).resetTorrServerNetwork?.(); } catch { /* ignore */ }
   }
 
   /**
@@ -71,101 +71,100 @@ export class TorrServerService {
    * Вызывает callback с { newIp }. Возвращает функцию отписки.
    */
   public onNetworkChanged(callback: (data: { newIp: string }) => void): () => void {
-    return window.electronAPI?.onNetworkChanged?.(callback) ?? (() => {});
+    const bridge = getBridge();
+    if ('onNetworkChanged' in bridge && typeof (bridge as any).onNetworkChanged === 'function') {
+      return (bridge as any).onNetworkChanged(callback);
+    }
+    return () => {};
   }
 
   public async getStatus(): Promise<TorrServerStatusInfo> {
-    if (window.electronAPI?.getTorrServerStatus) {
-      return await window.electronAPI.getTorrServerStatus();
+    try {
+      return await getBridge().getTorrServerStatus();
+    } catch {
+      return { running: true, port: 8090, version: 'Demo Browser Mode' };
     }
-    return { running: true, port: 8090, version: 'Demo Browser Mode' };
   }
 
   public async startServer(): Promise<TorrServerStatusInfo> {
-    if (window.electronAPI?.startTorrServer) {
-      return await window.electronAPI.startTorrServer();
+    try {
+      return await getBridge().startTorrServer();
+    } catch {
+      return { running: true, port: 8090 };
     }
-    return { running: true, port: 8090 };
   }
 
   public async stopServer(): Promise<{ running: boolean }> {
-    if (window.electronAPI?.stopTorrServer) {
-      return await window.electronAPI.stopTorrServer();
+    try {
+      return await getBridge().stopTorrServer();
+    } catch {
+      return { running: false };
     }
-    return { running: false };
   }
 
   /** Полный рестарт сервера — самолечение зависшего BT-клиента. */
   public async restartServer(): Promise<TorrServerStatusInfo> {
-    if (window.electronAPI?.restartTorrServer) {
-      return await window.electronAPI.restartTorrServer();
+    try {
+      return await getBridge().restartTorrServer();
+    } catch {
+      return { running: false, port: 8090 };
     }
-    return { running: false, port: 8090 };
   }
 
   public async configureServer(ramCacheMB: number) {
-    if (window.electronAPI?.configureTorrServer) {
-      return await window.electronAPI.configureTorrServer(ramCacheMB);
-    }
+    try { await getBridge().configureTorrServer(ramCacheMB); } catch { /* ignore */ }
   }
 
   public async dropCache(hash: string) {
-    if (window.electronAPI?.dropTorrServerCache) {
-      return await window.electronAPI.dropTorrServerCache(hash);
-    }
+    try { await getBridge().dropTorrServerCache(hash); } catch { /* ignore */ }
   }
 
   /** Переподключение к трекерам/DHT — при пирах>0 и скорости 0.0 MB/s. */
   public async reconnect(hash: string, magnet: string) {
-    if (window.electronAPI?.reconnectTorrServer) {
-      return await window.electronAPI.reconnectTorrServer(hash, magnet);
-    }
-    return { success: true };
+    try { return await getBridge().reconnectTorrServer(hash, magnet); }
+    catch { return { success: true }; }
   }
 
   /** Логи TorrServer (последние N строк) — для панели отладки в настройках. */
   public async getLogs(lines: number = 100): Promise<string[]> {
-    if (window.electronAPI?.getTorrServerLogs) {
-      const res = await window.electronAPI.getTorrServerLogs(lines);
+    try {
+      const res = await getBridge().getTorrServerLogs(lines);
       if (res.success) return res.logs;
-    }
+    } catch { /* ignore */ }
     return [];
   }
 
   /** Добавить раздачу из .torrent-файла (base64) — приоритетно для rutracker. */
   public async addTorrentFile(base64: string, title?: string) {
-    if (window.electronAPI?.addTorrentFileToTorrServer) {
-      return await window.electronAPI.addTorrentFileToTorrServer(base64, title);
-    }
-    return { success: false, error: 'addTorrentFile IPC недоступен' };
+    try { return await getBridge().addTorrentFileToTorrServer(base64, title); }
+    catch { return { success: false, error: 'addTorrentFile недоступен' }; }
   }
 
   public async addMagnet(magnet: string, title?: string, poster?: string) {
-    if (window.electronAPI?.addMagnetToTorrServer) {
-      return await window.electronAPI.addMagnetToTorrServer(magnet, title, poster);
-    }
-    return { success: true, data: { hash: 'demo-hash-12345' } };
+    try { return await getBridge().addMagnetToTorrServer(magnet, title, poster); }
+    catch { return { success: true, data: { hash: 'demo-hash-12345' } }; }
   }
 
   public async getTorrentStats(hash: string): Promise<{ success: boolean; data?: TorrServerStats; error?: string }> {
-    if (window.electronAPI?.getTorrServerTorrent) {
-      return await window.electronAPI.getTorrServerTorrent(hash);
+    try {
+      return await getBridge().getTorrServerTorrent(hash);
+    } catch {
+      return {
+        success: true,
+        data: {
+          hash,
+          title: 'Demo Stream',
+          stat: 2,
+          stat_string: 'Streaming',
+          torrent_size: 4500000000,
+          loaded_size: 4500000000,
+          download_speed: 6200000,
+          upload_speed: 120000,
+          active_peers: 24,
+          total_peers: 89,
+        },
+      };
     }
-    return {
-      success: true,
-      data: {
-        hash,
-        title: 'Demo Stream',
-        stat: 2,
-        stat_string: 'Streaming',
-        torrent_size: 4500000000,
-        loaded_size: 4500000000,
-        download_speed: 6200000,
-        upload_speed: 120000,
-        active_peers: 24,
-        total_peers: 89,
-      },
-    };
   }
 
   public async getStreamUrl(
@@ -174,10 +173,11 @@ export class TorrServerService {
     transcodeAudio?: boolean,
     audioIndex?: number
   ): Promise<string> {
-    if (window.electronAPI?.getStreamUrl) {
-      return await window.electronAPI.getStreamUrl(hash, fileIndex, transcodeAudio, audioIndex);
+    try {
+      return await getBridge().getStreamUrl(hash, fileIndex, transcodeAudio, audioIndex);
+    } catch {
+      return 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4';
     }
-    return 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4';
   }
 
   /**
@@ -249,15 +249,13 @@ export class TorrServerService {
     year?: string,
     fallbackQuery?: string
   ): Promise<{ releases: TorrentRelease[]; applicable: boolean }> {
-    const rutrackerSearch = window.electronAPI?.rutrackerSearch;
+    const bridge = getBridge();
+    const rutrackerSearch = bridge.rutrackerSearch;
     console.log('[TorrServerService] RuTracker late: старт query="' + query + '" (bridge=' + !!rutrackerSearch + ')');
     if (!rutrackerSearch) return { releases: [], applicable: false };
 
-    // Ретраи и гарантии — ВНУТРИ main: rutrackerSession.search сам повторяет
-    // пустой реальный проход (CF-челлендж с нуля, повтор с тёплым клиренсом
-    // быстрый). Renderer просто получает финальный результат.
     const releases = await rutrackerSearch(query, year, fallbackQuery)
-      .then((res) => (res.success && Array.isArray(res.releases) ? res.releases : []))
+      .then((res: any) => (res.success && Array.isArray(res.releases) ? res.releases : []))
       .catch((err: any) => {
         console.warn('[TorrServerService] RuTracker search failed:', err?.message || err);
         return [];
@@ -273,18 +271,13 @@ export class TorrServerService {
     imdbId?: string,
     fallbackQuery?: string
   ): Promise<{ releases: TorrentRelease[]; error?: string; jacredUnreachable?: boolean }> {
-    // Два независимых источника, запрашиваются ПАРАЛЛЕЛЬНО:
-    // 1) Electron-скрапер (Torrentio + Rutor + Jackett при настройке);
-    // 2) JacRed API (RuTracker / NNM-Club / Rutor) — отказоустойчивый клиент
-    //    с пулом инстансов и авто-фолбэком (src/services/scrapers/jacred.ts).
-    // RuTracker (браузерная сессия) — НЕ здесь: см. searchRutrackerLate,
-    // он догоняет раздачи фоном, не блокируя выдачу.
+    const bridge = getBridge();
     let ipcErrorMsg: string | undefined;
-    const ipcPromise: Promise<TorrentRelease[]> = window.electronAPI?.searchTorrents
+    const ipcPromise: Promise<TorrentRelease[]> = bridge.searchTorrents
       ? Promise.race<TorrentRelease[]>([
-          window.electronAPI
+          bridge
             .searchTorrents(query, year, jackettUrl, jackettApiKey, imdbId, fallbackQuery)
-            .then((res) => {
+            .then((res: any) => {
               if (!res.success) ipcErrorMsg = res.error || 'Не удалось найти торренты';
               return res.success && Array.isArray(res.releases) ? res.releases : [];
             })
@@ -303,17 +296,12 @@ export class TorrServerService {
     });
 
     const [ipcReleases, jacredReleases] = await Promise.all([ipcPromise, jacredPromise]);
-
-    // Мёрдж: дедуп по BTIH-хэшу magnet + приоритет 4K/2160p → 1080p (по сидам)
     const merged = mergeReleasesByHash(ipcReleases, jacredReleases);
-    // Все JacRed-зеркала мертвы — UI покажет плашку «RuTracker временно недоступен»
     const jacredUnreachable = getJacredStatus() === 'unreachable';
-    if (merged.length > 0) {
-      return { releases: merged, jacredUnreachable };
-    }
+    if (merged.length > 0) return { releases: merged, jacredUnreachable };
 
     // Browser demo mode — нет Electron-моста: показываем демо-раздачи
-    if (!window.electronAPI?.searchTorrents) {
+    if (!bridge.searchTorrents) {
       return { releases: this.demoReleases(query, year) };
     }
     return { releases: [], error: ipcErrorMsg || 'Не удалось найти торренты', jacredUnreachable };
