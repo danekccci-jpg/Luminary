@@ -59,6 +59,11 @@ android {
             signingConfig signingConfigs.release
         }
     }
+
+    // Принудительно применяем signing ко всем вариантам (phoneRelease, tvRelease)
+    applicationVariants.configureEach { variant ->
+        variant.signingConfig = signingConfigs.release
+    }
 }
 
 repositories {
