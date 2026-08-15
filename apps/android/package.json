@@ -1,26 +1,45 @@
 {
-  "name": "@luminary/android",
-  "version": "1.2.0",
-  "private": true,
-  "description": "Luminary Android Touch — touch-optimized torrent cinema",
+  "name": "luminary",
+  "version": "1.1.1",
+  "description": "Cross-platform Torrent Cinema desktop application powered by TorrServer MatriX & TMDB",
+  "main": "dist-electron/main.js",
+  "author": "Luminary Team",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
-    "cap:sync": "npx cap sync android"
+    "build": "tsc && vite build && tsc -p tsconfig.electron.json",
+    "electron:dev": "concurrently \"vite\" \"wait-on tcp:5173 && electron .\"",
+    "electron:build": "npm run build && electron-builder",
+    "electron:build:mac": "npm run build && electron-builder --mac --x64 --arm64",
+    "electron:build:win": "npm run build && electron-builder --win nsis portable",
+    "pack": "npm run build && electron-builder --dir",
+    "selftest": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {
-    "@luminary/core": "file:../../packages/core",
-    "@capacitor/core": "^7.0.0",
-    "@capacitor/cli": "^7.0.0",
-    "@capacitor/android": "^7.0.0",
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0",
+    "hls.js": "^1.6.17",
+    "lucide-react": "^0.474.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tree-kill": "^1.2.2"
   },
   "devDependencies": {
+    "@types/node": "^22.10.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "png-to-ico": "^3.0.2",
     "typescript": "^5.7.2",
-    "vite": "^6.0.3"
+    "vite": "^6.0.3",
+    "vite-plugin-node-polyfills": "^0.28.0",
+    "wait-on": "^8.0.1"
   }
 }

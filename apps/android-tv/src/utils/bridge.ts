@@ -54,57 +54,21 @@ const TS_BASE = 'http://127.0.0.1:8090';
 
 // ── Capacitor HTTP Bridge ──
 class CapacitorBridge implements BridgeAPI {
-  private plugin: any;
-
-  constructor() {
-    try {
-      const C = (window as any).Capacitor;
-      this.plugin = C?.Plugins?.TorrServer || null;
-    } catch { this.plugin = null; }
-  }
-
   private async tsFetch(path: string, opts?: RequestInit): Promise<any> {
     const res = await fetch(`${TS_BASE}${path}`, { ...opts, headers: { 'Content-Type': 'application/json', ...opts?.headers } });
     return res.json();
   }
 
   async getTorrServerStatus(): Promise<TorrServerStatusInfo> {
-    if (this.plugin) {
-      try {
-        const r = await this.plugin.isRunning();
-        if (r.running) return { running: true, port: 8090, version: 'TorrServer' };
-      } catch { /* plugin unavailable */ }
-    }
     try {
       const r = await this.tsFetch('/settings');
       return { running: true, port: 8090, version: r.Version || 'TorrServer' };
     } catch { return { running: false, port: 8090 }; }
   }
 
-  async startTorrServer(): Promise<TorrServerStatusInfo> {
-    if (this.plugin) {
-      try { await this.plugin.start(); }
-      catch (e) { console.error('[TorrServer] Plugin start failed:', e); }
-      // Poll until ready
-      for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 500));
-        try { await this.tsFetch('/settings'); return { running: true, port: 8090 }; }
-        catch { /* not ready yet */ }
-      }
-    }
-    return this.getTorrServerStatus();
-  }
-
-  async stopTorrServer(): Promise<{ running: boolean }> {
-    if (this.plugin) { try { await this.plugin.stop(); } catch { /* ignore */ } }
-    return { running: false };
-  }
-
-  async restartTorrServer(): Promise<TorrServerStatusInfo> {
-    await this.stopTorrServer();
-    await new Promise(r => setTimeout(r, 1000));
-    return this.startTorrServer();
-  }
+  async startTorrServer() { return this.getTorrServerStatus(); }
+  async stopTorrServer() { return { running: false }; }
+  async restartTorrServer() { return this.getTorrServerStatus(); }
   async configureTorrServer(ramCacheMB: number) {
     return this.tsFetch('/settings', { method: 'POST', body: JSON.stringify({ RamCache: ramCacheMB }) });
   }
