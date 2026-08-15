@@ -4,6 +4,9 @@ import { HeroBanner } from './components/HeroBanner';
 import { MovieGrid } from './components/MovieGrid';
 import { MovieDetailsModal } from './components/MovieDetailsModal';
 import { PlayerModal } from './components/PlayerModal';
+// Platform-specific players (imported conditionally at runtime)
+import PlayerTouch from './components/PlayerTouch';
+import PlayerTV from './components/PlayerTV';
 import { SettingsModal } from './components/SettingsModal';
 import { MagnetInputModal } from './components/MagnetInputModal';
 import { Toaster } from './components/Toaster';
@@ -209,6 +212,16 @@ export const App: React.FC = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
   const [isSettingsOpen, setIsSettingsOpen]   = useState(false);
+
+  // ── Platform detection (runtime) ──
+  const platform = (() => {
+    if ((window as any).Capacitor) {
+      const ua = navigator.userAgent || '';
+      if (/Android\s+TV|CrKey|AFT[BMS]|Leanback|com\.google\.android\.tv|BRAVIA/i.test(ua)) return 'android-tv';
+      return 'android';
+    }
+    return 'desktop';
+  })();
   const [isMagnetModalOpen, setIsMagnetModalOpen] = useState(false);
 
   const [torrServerStatus, setTorrServerStatus] = useState<TorrServerStatusInfo>({ running: false, port: 8090 });
@@ -668,7 +681,47 @@ export const App: React.FC = () => {
         />
       )}
 
-      {activeStream && (
+      {activeStream && platform === 'android' && (
+        <PlayerTouch
+          key={activeStream.nonce}
+          streamUrl={activeStream.directUrl || ''}
+          title={activeStream.title}
+          poster={activeStream.poster}
+          startPosition={activeStream.startPosition}
+          onClose={() => { refreshLibrary(); setActiveStream(null); }}
+          onProgressSave={(cur: number, dur: number) => {
+            if (activeStream.mediaId) {
+              library.saveProgress(
+                { id: activeStream.mediaId, title: activeStream.title, poster: activeStream.poster, year: activeStream.year, mediaType: activeStream.mediaType, season: activeStream.season, episode: activeStream.episode },
+                cur, dur
+              );
+              refreshLibrary();
+            }
+          }}
+        />
+      )}
+
+      {activeStream && platform === 'android-tv' && (
+        <PlayerTV
+          key={activeStream.nonce}
+          streamUrl={activeStream.directUrl || ''}
+          title={activeStream.title}
+          poster={activeStream.poster}
+          startPosition={activeStream.startPosition}
+          onClose={() => { refreshLibrary(); setActiveStream(null); }}
+          onProgressSave={(cur: number, dur: number) => {
+            if (activeStream.mediaId) {
+              library.saveProgress(
+                { id: activeStream.mediaId, title: activeStream.title, poster: activeStream.poster, year: activeStream.year, mediaType: activeStream.mediaType, season: activeStream.season, episode: activeStream.episode },
+                cur, dur
+              );
+              refreshLibrary();
+            }
+          }}
+        />
+      )}
+
+      {activeStream && platform === 'desktop' && (
         <PlayerModal
           key={activeStream.nonce}
           magnet={activeStream.magnet}
