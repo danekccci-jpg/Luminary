@@ -21,6 +21,13 @@ body {
   min-height: 100dvh;
 }
 
+/* ── Контент на всю ширину экрана: карточки от края до края ── */
+main {
+  max-width: 100% !important;
+  padding-left: 12px !important;
+  padding-right: 12px !important;
+}
+
 /* ── Крупные touch-цели (48px минимум по Material Design) ── */
 button, .btn-primary, .btn-secondary, .btn-icon, .filter-chip {
   min-height: 48px;

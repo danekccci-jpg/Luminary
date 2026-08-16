@@ -678,6 +678,7 @@ export const App: React.FC = () => {
           movie={selectedMovie}
           onClose={() => setSelectedMovie(null)}
           onOpenSettings={() => setIsSettingsOpen(true)}
+          onSelectMovie={(m) => setSelectedMovie(m)}
           onPlayTorrent={(torrent) => {
             // Прогресс по конкретному эпизоду сериала (или фильму)
             const prog = selectedMovie

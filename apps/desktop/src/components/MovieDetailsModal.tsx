@@ -12,6 +12,9 @@ import { searchVkVideo, VkVideoItem, normalizeVkTitle } from '../services/vkVide
 import { searchOnlineStreams } from '../services/onlineBalancers';
 import { TorrentSelector } from './TorrentSelector';
 import { EpisodeResumeDialog, findRelease } from './EpisodeResumeDialog';
+import { PersonModal } from './PersonModal';
+import { MovieCard } from './MovieCard';
+import { getTimelineForMovie, TimelineResult } from '../services/timeline';
 import { useFocusTrap, keyActivate } from '../utils/focus';
 import { registerBackHandler } from '../utils/tv';
 
@@ -20,6 +23,8 @@ interface MovieDetailsModalProps {
   onClose: () => void;
   /** Открыть окно настроек (для получения VK-токена). */
   onOpenSettings?: () => void;
+  /** Переключить детали на другой фильм (актёр/хронология/похожие). */
+  onSelectMovie?: (movie: Movie) => void;
   onPlayTorrent: (torrent: {
     magnet: string;
     title: string;
@@ -80,6 +85,72 @@ function qualityRank(q: string): number {
   return QUALITY_ORDER[q] ?? 9;
 }
 
+/** Плитка соседней части франшизы (предыдущая/следующая) для секции «По хронологии». */
+const TimelineTile: React.FC<{ label: string; movie: Movie; onClick: () => void }> = ({ label, movie, onClick }) => (
+  <button
+    onClick={onClick}
+    title={`${label}: ${movie.title}`}
+    style={{
+      flexShrink: 0,
+      width: '170px',
+      background: 'transparent',
+      border: 'none',
+      padding: 0,
+      cursor: 'pointer',
+      fontFamily: 'inherit',
+      textAlign: 'left',
+    }}
+  >
+    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.5rem' }}>
+      <span style={{ fontSize: '0.6rem', fontWeight: 800, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'rgba(237,241,247,0.45)' }}>{label}</span>
+      <span style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.08)' }} />
+    </div>
+    <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
+      <div
+        style={{
+          width: '58px',
+          height: '87px',
+          borderRadius: '8px',
+          overflow: 'hidden',
+          flexShrink: 0,
+          background: 'rgba(255,255,255,0.035)',
+          border: '1px solid rgba(255,255,255,0.08)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          transition: 'border-color 0.15s ease, transform 0.15s ease',
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.borderColor = 'rgba(110,168,254,0.45)';
+          e.currentTarget.style.transform = 'translateY(-2px)';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)';
+          e.currentTarget.style.transform = 'translateY(0)';
+        }}
+      >
+        {movie.poster_path ? (
+          <img
+            src={tmdbService.getImageUrl(movie.poster_path, 'w185')}
+            alt=""
+            loading="lazy"
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+          />
+        ) : null}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: '0.74rem', fontWeight: 700, color: '#E9EDF4', lineHeight: 1.3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+          {movie.title}
+        </div>
+        <div style={{ fontSize: '0.66rem', color: 'rgba(237,241,247,0.45)', marginTop: '3px' }}>
+          {extractYear(movie.release_date) || ''}
+        </div>
+      </div>
+    </div>
+  </button>
+);
+
 /** Заголовок карточки VK: без «смотреть онлайн»/качества/студии на конце. */
 function cleanStreamTitle(title: string): string {
   return (
@@ -95,11 +166,18 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
   movie,
   onClose,
   onOpenSettings,
+  onSelectMovie,
   onPlayTorrent,
 }) => {
   const [details, setDetails] = useState<Movie | null>(null);
   const [isFav, setIsFav] = useState(() => library.isFavorite(String(movie.id)));
   const [isLater, setIsLater] = useState(() => library.isInLater(String(movie.id)));
+  /** Открытая страница актёра (personId) — оверлей поверх деталей. */
+  const [activePerson, setActivePerson] = useState<number | null>(null);
+  /** Хронология франшизы: предыдущая/следующая части. */
+  const [timeline, setTimeline] = useState<TimelineResult | null>(null);
+  /** Похожие фильмы (TMDB /similar). */
+  const [similar, setSimilar] = useState<Movie[]>([]);
 
   const libItem = (): Omit<LibraryItem, 'updatedAt'> => {
     // Обогащённые TMDB-данные (details ?? movie) сохраняем в библиотеку,
@@ -375,6 +453,34 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
       clearTimeout(skeletonTimer);
     };
   }, [movie, searchNonce]);
+
+  // ── Хронология франшизы: предыдущая/следующая части (MCU-датасет или коллекция) ──
+  useEffect(() => {
+    let cancelled = false;
+    setTimeline(null);
+    const btc = details?.belongs_to_collection ?? null;
+    getTimelineForMovie(movie.id, btc)
+      .then((t) => {
+        if (!cancelled) setTimeline(t);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [movie.id, details?.belongs_to_collection]);
+
+  // ── Похожие фильмы (TMDB /similar, только для числовых TMDB id) ──
+  useEffect(() => {
+    let cancelled = false;
+    setSimilar([]);
+    const tmdbId = typeof movie.id === 'number' ? movie.id : Number(movie.id);
+    if (!Number.isFinite(tmdbId)) return;
+    tmdbService
+      .getSimilar(tmdbId)
+      .then((items) => {
+        if (!cancelled) setSimilar(items);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [movie.id]);
 
   /** Воспроизвести раздачу (с опциональным сезоном/серией/таймкодом). */
   const playRelease = useCallback((
@@ -760,16 +866,19 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
               </div>
             )}
 
-            {/* ── Cast ── */}
+            {/* ── Cast (клик по актёру → страница актёра) ── */}
             {details?.cast && details.cast.length > 0 && (
-              <div style={{ marginBottom: '1rem' }}>
+              <div style={{ marginBottom: '1.5rem' }}>
                 <div style={{ fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'rgba(240,242,248,0.3)', marginBottom: '0.7rem' }}>
                   В главных ролях
                 </div>
                 <div style={{ display: 'flex', gap: '0.5rem', overflowX: 'auto', paddingBottom: '0.3rem' }} className="scrollbar-none">
                   {details.cast.map(actor => (
-                    <div
+                    <button
                       key={actor.id}
+                      onClick={() => setActivePerson(actor.id)}
+                      onKeyDown={(e) => keyActivate(e, () => setActivePerson(actor.id))}
+                      title={`Открыть страницу актёра: ${actor.name}`}
                       style={{
                         display: 'flex',
                         alignItems: 'center',
@@ -779,16 +888,18 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                         background: 'rgba(255,255,255,0.04)',
                         border: '1px solid rgba(255,255,255,0.07)',
                         flexShrink: 0,
+                        fontFamily: 'inherit',
+                        textAlign: 'left',
+                        cursor: 'pointer',
                         transition: 'all 0.2s ease',
-                        cursor: 'default',
                       }}
                       onMouseEnter={e => {
-                        (e.currentTarget as HTMLDivElement).style.background = 'rgba(0,242,254,0.06)';
-                        (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(0,242,254,0.2)';
+                        (e.currentTarget as HTMLButtonElement).style.background = 'rgba(0,242,254,0.06)';
+                        (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(0,242,254,0.25)';
                       }}
                       onMouseLeave={e => {
-                        (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.04)';
-                        (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(255,255,255,0.07)';
+                        (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.04)';
+                        (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.07)';
                       }}
                     >
                       {actor.profile_path ? (
@@ -806,6 +917,72 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                         <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>{actor.name}</div>
                         <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{actor.character}</div>
                       </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── По хронологии: предыдущая/следующая части франшизы ── */}
+            {timeline && (timeline.prev || timeline.next) && (
+              <div style={{ marginBottom: '1.5rem' }}>
+                <div style={{ fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'rgba(0,242,254,0.55)', marginBottom: '0.7rem' }}>
+                  По хронологии · {timeline.seriesName}
+                </div>
+                <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start' }}>
+                  {timeline.prev && (
+                    <TimelineTile
+                      label="Предыдущая часть"
+                      movie={timeline.prev}
+                      onClick={() => onSelectMovie?.(timeline.prev!)}
+                    />
+                  )}
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      borderRadius: '14px',
+                      border: '1px dashed rgba(255,255,255,0.12)',
+                      background: 'rgba(255,255,255,0.02)',
+                      padding: '0.9rem 1rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <div style={{ textAlign: 'center', minWidth: 0 }}>
+                      <div style={{ fontSize: '0.6rem', fontWeight: 800, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'rgba(110,168,254,0.85)', marginBottom: '4px' }}>
+                        Вы здесь
+                      </div>
+                      <div style={{ fontSize: '0.85rem', fontWeight: 800, color: '#EFF2F8', lineHeight: 1.3 }}>
+                        {movie.title || movie.name}
+                      </div>
+                      <div style={{ fontSize: '0.7rem', color: 'rgba(237,241,247,0.45)', marginTop: '3px' }}>
+                        {extractYear(movie.release_date || movie.first_air_date) || ''}
+                      </div>
+                    </div>
+                  </div>
+                  {timeline.next && (
+                    <TimelineTile
+                      label="Следующая часть"
+                      movie={timeline.next}
+                      onClick={() => onSelectMovie?.(timeline.next!)}
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* ── Похожие фильмы ── */}
+            {similar.length > 0 && (
+              <div style={{ marginBottom: '1.5rem' }}>
+                <div style={{ fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'rgba(240,242,248,0.3)', marginBottom: '0.7rem' }}>
+                  Похожие фильмы
+                </div>
+                <div style={{ display: 'flex', gap: '0.7rem', overflowX: 'auto', paddingBottom: '0.4rem' }} className="scrollbar-none">
+                  {similar.map((m, i) => (
+                    <div key={String(m.id)} style={{ width: '150px', flexShrink: 0 }}>
+                      <MovieCard movie={m} onClick={() => onSelectMovie?.(m)} index={i} />
                     </div>
                   ))}
                 </div>
@@ -1093,6 +1270,16 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
           </div>
         </div>
       </div>
+      {activePerson != null && (
+        <PersonModal
+          personId={activePerson}
+          onClose={() => setActivePerson(null)}
+          onSelectMovie={(m) => {
+            setActivePerson(null);
+            onSelectMovie?.(m);
+          }}
+        />
+      )}
       {pendingStream && (
         <div
           onClick={() => setPendingStream(null)}

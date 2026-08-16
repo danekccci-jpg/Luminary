@@ -231,6 +231,8 @@ export class TMDBService {
         media_type: mediaType,
         runtime: data.runtime,
         genres: data.genres,
+        // Франшиза (для хронологии «предыдущая/следующая часть»)
+        belongs_to_collection: data.belongs_to_collection || null,
         // Кадры (backdrops) из TMDB для галереи в модалке
         stills: (data.images?.backdrops || [])
           .slice(0, 8)
@@ -247,6 +249,138 @@ export class TMDBService {
       const found = this.getDemoCatalog().find((m) => m.id === id);
       return found || null;
     }
+  }
+
+  /** Страница актёра: биография + фильмография (append combined_credits).
+   *  Кэш 24ч — данные стабильны. */
+  public async getPerson(id: number): Promise<Person | null> {
+    return cachedFetch(
+      cacheKeys.person(id),
+      async () => {
+        try {
+          const res = await axios.get(`${BASE_URL}/person/${id}`, {
+            params: this.localeParams({ append_to_response: 'combined_credits' }),
+            timeout: 6000,
+          });
+          const data = res.data;
+          const credits: any[] = (data.combined_credits?.cast || []).filter(
+            (c: any) => c.media_type === 'movie' && c.id
+          );
+          return {
+            id: data.id,
+            name: data.name || 'Актёр',
+            biography: data.biography || '',
+            profile_path: data.profile_path || null,
+            birthday: data.birthday || undefined,
+            deathday: data.deathday || null,
+            place_of_birth: data.place_of_birth || null,
+            also_known_as: Array.isArray(data.also_known_as) ? data.also_known_as : undefined,
+            // Фильмография: только фильмы, дедуп по id, свежие — первыми
+            credits: this.dedupeMovies(
+              credits.map((c: any) => ({
+                ...c,
+                title: c.title || c.name || 'Без названия',
+                original_title: c.original_title || c.original_name,
+                release_date: c.release_date || c.first_air_date,
+                media_type: 'movie' as const,
+                character: c.character || '',
+              }))
+            ).sort((a, b) =>
+              String(b.release_date || '').localeCompare(String(a.release_date || ''))
+            ),
+          };
+        } catch (err) {
+          console.warn(`[TMDB] getPerson(${id}) failed:`, err);
+          return null;
+        }
+      },
+      24 * 60 * 60 * 1000
+    );
+  }
+
+  /** TMDB-коллекция (франшиза): части, отсортированные по дате релиза. */
+  public async getCollection(id: number): Promise<Movie[]> {
+    return cachedFetch(
+      cacheKeys.collection(id),
+      async () => {
+        try {
+          const res = await axios.get(`${BASE_URL}/collection/${id}`, {
+            params: this.localeParams({}),
+            timeout: 6000,
+          });
+          const parts: any[] = Array.isArray(res.data?.parts) ? res.data.parts : [];
+          return parts
+            .map((m: any) => ({
+              ...m,
+              title: m.title || m.name || 'Без названия',
+              original_title: m.original_title || m.original_name,
+              release_date: m.release_date || m.first_air_date,
+              media_type: 'movie' as const,
+            }))
+            .sort((a, b) =>
+              String(a.release_date || '').localeCompare(String(b.release_date || ''))
+            );
+        } catch (err) {
+          console.warn(`[TMDB] getCollection(${id}) failed:`, err);
+          return [];
+        }
+      },
+      24 * 60 * 60 * 1000
+    );
+  }
+
+  /** Похожие фильмы (TMDB /movie/{id}/similar). */
+  public async getSimilar(id: number): Promise<Movie[]> {
+    return cachedFetch(
+      cacheKeys.similar(id),
+      async () => {
+        try {
+          const res = await axios.get(`${BASE_URL}/movie/${id}/similar`, {
+            params: this.localeParams({ page: 1 }),
+            timeout: 6000,
+          });
+          const results: any[] = Array.isArray(res.data?.results) ? res.data.results : [];
+          return this.dedupeMovies(
+            results.map((m: any) => ({
+              ...m,
+              title: m.title || m.name || 'Без названия',
+              original_title: m.original_title || m.original_name,
+              release_date: m.release_date || m.first_air_date,
+              media_type: 'movie' as const,
+            }))
+          ).slice(0, 12);
+        } catch (err) {
+          console.warn(`[TMDB] getSimilar(${id}) failed:`, err);
+          return [];
+        }
+      }
+    );
+  }
+
+  /** Лёгкая карточка фильма — для соседей в хронологии (без credits/images). */
+  public async getMovieBrief(id: number): Promise<Movie | null> {
+    return cachedFetch(
+      cacheKeys.movieDetails(String(id)),
+      async () => {
+        try {
+          const res = await axios.get(`${BASE_URL}/movie/${id}`, {
+            params: this.localeParams({}),
+            timeout: 6000,
+          });
+          const d = res.data;
+          return {
+            ...d,
+            title: d.title || d.name || 'Без названия',
+            original_title: d.original_title,
+            release_date: d.release_date || d.first_air_date,
+            media_type: 'movie' as const,
+          };
+        } catch (err) {
+          console.warn(`[TMDB] getMovieBrief(${id}) failed:`, err);
+          return null;
+        }
+      }
+    );
   }
 
   private getDemoCatalog(): Movie[] {
