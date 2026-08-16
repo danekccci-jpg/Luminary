@@ -388,6 +388,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     delay: 0,         // сек, +позже / −раньше
   });
   const volumeHudTimer = useRef<NodeJS.Timeout | null>(null);
+  // Перемотка: всплывающий индикатор «−10 сек / +10 сек» на 2 секунды
+  const [seekHud, setSeekHud] = useState<{ delta: number; time: number } | null>(null);
+  const seekHudTimer = useRef<NodeJS.Timeout | null>(null);
 
   const showVolumeHud = (v: number) => {
     setVolumeHud(v);
@@ -579,10 +582,14 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       // Escape/Back теперь обрабатывает общий Back-стек (см. registerBackHandler)
       if (isBuffering || errorMsg || codecError) return;
       const target = e.target as HTMLElement;
-      // Фокус на нативных контролах (кнопка/слайдер/seek-бар) — не перехватываем:
-      // Space/Enter жмут кнопку, стрелки двигают фокус (spatial navigation WebView).
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON' || target.tagName === 'A')) return;
-      if (target && target.closest('[data-seekbar]')) return;
+      // Нативные контролы (кнопка/слайдер): Space/Enter и стрелки работают как
+      // в WebView (жмут кнопку / двигают фокус — spatial navigation). Глобальные
+      // хоткеи (F — fullscreen, M — mute и т.д.) работают всегда, даже если
+      // кнопка осталась в фокусе после клика.
+      const isNativeControl = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON' || target.tagName === 'A');
+      if (isNativeControl && (e.key === ' ' || e.key === 'Enter' || e.key.startsWith('Arrow'))) return;
+      // Seek-бар сам обрабатывает стрелки и Home/End (см. onKeyDown у бара)
+      if (target && target.closest('[data-seekbar]') && (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End')) return;
       switch (e.key) {
         case 'ArrowUp':
           e.preventDefault();
@@ -653,6 +660,14 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     const onLeave = () => setIsPip(false);
     document.addEventListener('leavepictureinpicture', onLeave);
     return () => document.removeEventListener('leavepictureinpicture', onLeave);
+  }, []);
+
+  // Синхронизация с реальным fullscreen-состоянием: выход через Escape/систему
+  // (и ошибочные запросы) не должны рассинхронизировать isFullscreen и кнопку.
+  useEffect(() => {
+    const onFs = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onFs);
+    return () => document.removeEventListener('fullscreenchange', onFs);
   }, []);
 
   const resetFilters = () => {
@@ -873,6 +888,16 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         torrentHash = addRes.data?.hash || 'demo-hash-12345';
         setHash(torrentHash);
 
+        // ── РАННИЙ PRELOAD: качание начинается СРАЗУ после add, не ждём
+        //    file_stats (для magnet метаданные качаются с пиров 5-15 секунд —
+        //    всё это время скорость висела бы на 0). Index=1 — дефолт; когда
+        //    file_stats придёт, statsInterval скорректирует URL при необходимости.
+        const earlyPreloadUrl = await torrServerService.getStreamUrl(torrentHash, 1, false).catch(() => '');
+        if (earlyPreloadUrl && !cancelled) {
+          preloadUrlRef.current = earlyPreloadUrl;
+          startPreload(earlyPreloadUrl);
+        }
+
         // Ждём метаданные торрента (file_stats пуст сразу после add) — до 10 сек.
         // Нужно, чтобы выбрать ВИДЕО-файл, а не субтитр (.srt первым в раздаче).
         for (let i = 0; i < 10 && !cancelled; i++) {
@@ -903,10 +928,14 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
         const preloadUrl =
           (await torrServerService.getStreamUrl(torrentHash, videoIndex, false).catch(() => null)) || currentUrl;
 
-        // ── Сразу открываем непрерывный поток: TorrServer начинает качать
-        //    незамедлительно, экран буферизации показывает реальную скорость ──
+        // ── Если ранний preload качает НЕ тот файл (index изменился после
+        //    file_stats) — перезапускаем с правильным URL; иначе не трогаем. ──
+        if (preloadUrlRef.current && preloadUrlRef.current !== preloadUrl) {
+          restartPreload(preloadUrl);
+        } else if (!preloadRef.current.controller) {
+          startPreload(preloadUrl);
+        }
         preloadUrlRef.current = preloadUrl;
-        startPreload(preloadUrl);
 
         // ── 1) Статистика торрента: кольцо буфера, скорость, пиры, контейнер ──
         statsInterval = setInterval(async () => {
@@ -1083,16 +1112,24 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
    * TorrServer MatriX НЕ качает данные, пока файл не востребован потоком —
    * прерывистые probe-запросы (Range 0-2MB) дают застревание на 0.0 MB/s.
    * Открытое соединение, читающее тело, заставляет сервер активно тянуть
-   * куски из пиров. Данные дропаются — они остаются в RAM-кэше TorrServer.
+   * куски из пиров. Данные дропаются — они остаются в кэше TorrServer.
+   *
+   * ВАЖНО: после прочтения одного чанка (250 MB) СРАЗУ открываем следующий —
+   * TorrServer качает весь фильм последовательно, gst/hls.js всегда берут
+   * сегменты из уже скачанного кэша (нет зависаний через N минут просмотра,
+   * когда буфер hls.js кончался, а данных в кэше не было).
    */
-  const startPreload = (url: string) => {
+  const CHUNK_BYTES = 256 * 1024 * 1024; // 256 MB на чанк
+
+  const startPreload = (url: string, startOffset: number = 0) => {
     if (!url || preloadRef.current.controller) return; // уже активен
     const controller = new AbortController();
     preloadRef.current.controller = controller;
-    (async () => {
+    const runChunk = async (offset: number) => {
       try {
+        const end = offset + CHUNK_BYTES - 1;
         const res = await fetch(url, {
-          headers: { Range: 'bytes=0-262144000' }, // предзагрузка до 250 MB
+          headers: { Range: `bytes=${offset}-${end}` },
           signal: controller.signal,
         });
         if (!res.body) return;
@@ -1102,10 +1139,13 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
           if (done) break;
         }
         try { reader.releaseLock(); } catch { /* ignore */ }
+        // Чанк прочитан полностью (данные в кэше TorrServer) → следующий
+        if (!controller.signal.aborted) runChunk(offset + CHUNK_BYTES);
       } catch {
         /* aborted / сетевая ошибка — не критично */
       }
-    })();
+    };
+    runChunk(startOffset);
   };
 
   const stopPreload = () => {
@@ -1113,17 +1153,14 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     preloadRef.current.controller = null;
   };
 
-  const restartPreload = (url: string) => {
+  const restartPreload = (url: string, startOffset: number = 0) => {
     stopPreload();
-    if (url) startPreload(url);
+    if (url) startPreload(url, startOffset);
   };
 
-  /** Когда буферизация завершена/ошибка — останавливаем фоновую предзагрузку
-   *  (видео-элемент продолжает качать поток сам). */
-  useEffect(() => {
-    if (!isBuffering || errorMsg) stopPreload();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isBuffering, errorMsg]);
+  /** Preload работает ВЕСЬ просмотр: TorrServer качает фильм последовательно,
+   *  gst/hls.js всегда имеют данные в кэше. Остановка — только при закрытии
+   *  плеера (cleanup в init-эффекте) или при смене раздачи. */
 
   /**
    * Авто-фоновый ретранскод AC3/DTS/E-AC3 → AAC через GST HLS TorrServer.
@@ -1393,6 +1430,12 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   // ── Back (пульт/Escape/Backspace): закрывает плеер (см. handleClose).
   // В TV-режиме Back из панели контролов сначала возвращает фокус на видео.
   useEffect(() => registerBackHandler(() => {
+    // В полноэкранном режиме Back/Escape сначала сворачивает его (стандарт
+    // плееров) — и только повторный Back закрывает плеер.
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+      return true;
+    }
     const root = containerRef.current;
     const active = document.activeElement as HTMLElement | null;
     if (tvMode && root && active && active !== root && root.contains(active)) {
@@ -1624,6 +1667,19 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     }, 3500);
   };
 
+  /**
+   * Кнопки после клика мышью не должны держать фокус: иначе пробел «жмёт»
+   * кнопку (например, fullscreen) вместо паузы, а F/M перестают работать
+   * (обработчик клавиш пропускает нажатия при фокусе на кнопке).
+   * e.detail > 0 — клик мышью; активация клавиатурой (пульт/пробел) не трогаем.
+   */
+  const handleContainerClickCapture = (e: React.MouseEvent) => {
+    if (e.detail > 0) {
+      const btn = (e.target as HTMLElement).closest('button');
+      btn?.blur();
+    }
+  };
+
   /** TV: ArrowUp/Down с видео → фокус в верхнюю/нижнюю панель контролов. */
   const focusControlsPanel = (which: 'top' | 'bottom') => {
     handleControlsPoke();
@@ -1650,20 +1706,28 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     if (videoRef.current) { videoRef.current.volume = val; setIsMuted(val === 0); }
   };
 
-  const toggleFullscreen = () => {
+  const toggleFullscreen = async () => {
     if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen();
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen();
-      setIsFullscreen(false);
+    try {
+      if (!document.fullscreenElement) {
+        await containerRef.current.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch {
+      // Полноэкранный режим отклонён (нет user-gesture и т.п.) — фактическое
+      // состояние синхронизирует fullscreenchange-листенер ниже.
     }
   };
 
   const skipSeconds = (sec: number) => {
-    if (!videoRef.current) return;
-    videoRef.current.currentTime = Math.max(0, Math.min(duration, videoRef.current.currentTime + sec));
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = Math.max(0, Math.min(duration, v.currentTime + sec));
+    // HUD «прогресс перемотки» на 2 сек (стрелки, кнопки ±10, seek-бар)
+    setSeekHud({ delta: sec, time: v.currentTime });
+    if (seekHudTimer.current) clearTimeout(seekHudTimer.current);
+    seekHudTimer.current = setTimeout(() => setSeekHud(null), 2000);
   };
 
   const formatTime = (sec: number) => {
@@ -1730,10 +1794,11 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     return () => document.removeEventListener('mousedown', onDoc);
   }, [showFilters]);
 
-  // Очистка при размонтировании: таймер превью + скрытый видео-элемент
+  // Очистка при размонтировании: таймеры HUD/превью + скрытый видео-элемент
   useEffect(() => {
     return () => {
       if (scrubPreviewTimer.current) clearTimeout(scrubPreviewTimer.current);
+      if (seekHudTimer.current) clearTimeout(seekHudTimer.current);
       captureVideoRef.current?.removeAttribute('src');
     };
   }, []);
@@ -1743,6 +1808,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       ref={containerRef}
       tabIndex={0}
       data-player-root
+      onClickCapture={handleContainerClickCapture}
       onMouseMove={handleControlsPoke}
       onPointerDown={handleControlsPoke}
       onKeyDown={handleControlsPoke}
@@ -2150,6 +2216,37 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                 />
               </div>
               {volumeHud === 0 ? <VolumeX size={18} color="#FF5470" /> : <Volume2 size={18} color="#00F2FE" />}
+            </div>
+          )}
+
+          {/* ── HUD: прогресс перемотки (−/+ сек) на 2 секунды ── */}
+          {seekHud !== null && (
+            <div
+              style={{
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -50%)',
+                zIndex: 55,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.6rem',
+                padding: '0.7rem 1.1rem',
+                borderRadius: '14px',
+                background: 'rgba(10,11,14,0.88)',
+                border: '1px solid rgba(0,242,254,0.25)',
+                boxShadow: '0 12px 40px rgba(0,0,0,0.6), 0 0 20px rgba(0,242,254,0.08)',
+                animation: 'scaleIn 0.15s cubic-bezier(0.16,1,0.3,1)',
+                pointerEvents: 'none',
+              }}
+            >
+              {seekHud.delta < 0 ? <SkipBack size={18} color="#00F2FE" /> : <SkipForward size={18} color="#00F2FE" />}
+              <span style={{ fontSize: '1.05rem', fontWeight: 800, color: '#fff', whiteSpace: 'nowrap' }}>
+                {seekHud.delta > 0 ? '+' : ''}{seekHud.delta} сек
+              </span>
+              <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'rgba(240,242,248,0.6)' }}>
+                {formatTime(seekHud.time)} / {formatTime(duration)}
+              </span>
             </div>
           )}
 

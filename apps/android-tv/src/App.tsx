@@ -237,6 +237,27 @@ export const App: React.FC = () => {
     applyTvModeClass(tvMode);
   }, [tvMode]);
 
+  // ── Автозапуск TorrServer (Android: нативный плагин; Desktop: Electron IPC) ──
+  useEffect(() => {
+    const startServer = async () => {
+      try {
+        const status = await torrServerService.getStatus();
+        if (!status.running) {
+          console.log('[App] TorrServer not running, starting...');
+          await torrServerService.startServer();
+          // Проверить что запустился
+          const check = await torrServerService.getStatus();
+          console.log('[App] TorrServer status after start:', check.running ? 'running' : 'failed');
+        } else {
+          console.log('[App] TorrServer already running on port', status.port);
+        }
+      } catch (err) {
+        console.warn('[App] TorrServer auto-start failed:', err);
+      }
+    };
+    startServer();
+  }, []);
+
   // ── Back (пульт / Escape / Backspace): закрывает верхний слой UI ──
   // Модалки и плеер регистрируют свои обработчики в стеке (registerBackHandler);
   // здесь только верхний необработанный случай — сброс активного поиска.

@@ -37,10 +37,38 @@ export class TorrServerService {
         if (hash) {
           this.prefetchMap.set(release.magnet, { hash, at: Date.now() });
           console.log(`[TorrServerService] prefetch ok: hash=${hash.slice(0,12)} (${release.title.slice(0,40)})`);
+          // ПРОГРЕВ: TorrServer не качает без читателя. Открываем /stream с
+          // Range 0-20MB — сервер немедленно ищет пиров (DHT/трекеры) и качает
+          // первые данные. К моменту клика «Смотреть» скорость уже высокая,
+          // а не растёт с нуля. Обрываем через 30с (данные остаются в кэше).
+          this.warmupStream(hash);
         }
       }
     } catch (err: any) {
       console.warn('[TorrServerService] prefetch failed:', err?.message);
+    }
+  }
+
+  /** Прогрев потока: открыть /stream (Range 0-20MB) на 30с — TorrServer
+   *  подключает пиров и качает первые данные ещё ДО клика «Смотреть». */
+  private async warmupStream(hash: string): Promise<void> {
+    try {
+      const url = await this.getStreamUrl(hash, 1, false);
+      if (!url) return;
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 30000);
+      const res = await fetch(url, {
+        headers: { Range: 'bytes=0-20971520' },
+        signal: controller.signal,
+      });
+      const reader = res.body?.getReader();
+      if (!reader) return;
+      while (!controller.signal.aborted) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+    } catch {
+      /* aborted / сеть — не критично: главное, TorrServer уже ищет пиров */
     }
   }
 

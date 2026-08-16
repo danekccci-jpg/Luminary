@@ -40,13 +40,13 @@ TorrServer MatriX (Go-бинарник, extraResources)
    → Если true: «already running» → spawn SKIPPED, статус сразу online.
 2. getOrDownloadBinary(): bundled extraResources → userData/bin (копия) → download.
 3. macOS: xattr -r -d com.apple.quarantine (снять Gatekeeper).
-4. Жёсткая очистка: killall -9 TorrServer; lsof -ti:8090 | xargs kill -9.
-5. УДАЛИТЬ torrserver_data/settings.json (сброс настроек).
+4. Жёсткая очистка: killall -9 TorrServer; lsof -ti:8090 (safeExecKill, никогда process.pid).
+5. УДАЛИТЬ torrserver_data/settings.json И settings.db (сброс настроек, в т.ч. stale TorrentDisconnectTimeout:30).
 6. ensureExecutable → fs.chmodSync(binPath, 0o755).
 7. spawn: --port 8090 --ip 0.0.0.0 --path <dataDir>  (0.0.0.0 ОБЯЗАТЕЛЬНО).
 8. Healthcheck: 20 × 500мс (10 сек) на /echo → ready.
-9. Сразу: configureServer(512, applyPeersPort=false)   ← БЕЗ смены P2P-порта.
-10. Через 20 сек: configureServer(512, applyPeersPort=true) ← порт 43211.
+9. Сразу: configureServer(1024, applyPeersPort=false)   ← БЕЗ смены P2P-порта.
+10. Через 20 сек: configureServer(1024, applyPeersPort=true) ← порт 43211.
 ```
 
 **ПОЧЕМУ нельзя менять:**
@@ -69,7 +69,7 @@ TorrServer MatriX (Go-бинарник, extraResources)
 | `EACCES` / `permission denied` | `chmod 755` бинарника |
 | `address already in use` / `bind` / `EADDRNOTAVAIL` | `killProcessOnPort(8090)` + `scheduleRestart('port-in-use')` |
 | `bboltdb` / `database is locked` / `another process` | kill на порту + `scheduleRestart('db-lock')` |
-| `bt client not connected` / `timeout connection get torrent info` | `scheduleRestart('bt-client-not-ready')` |
+| `bt client not connected` / `timeout connection get torrent info` | **ТОЛЬКО лог, НИКАКОГО рестарта** — временное состояние при add (клиент переподключается после rem/drop). Ретраит `addWithRetry` в PlayerModal. Рестарт здесь обрывал просмотр («зависает каждые 3-5 минут») |
 | `dht.*0 nodes` / `upnp.*error` / `nat.?pmp.*fail` | `applyNetworkSettings()` (DHT/UPnP/PeX on, порт 43211) |
 | `file write error` / `disk cache` | `applyRamCache()` (CacheSize 200MB, UseDisk:false) |
 
@@ -85,12 +85,14 @@ TorrServer MatriX (Go-бинарник, extraResources)
 
 **Неприкосновенные механизмы:**
 
-1. **Непрерывная предзагрузка** — `startPreload(url)`: `fetch(/stream, Range: bytes=0-262144000)` + **чтение тела в фоне** (дропается). Пока поток не читается, TorrServer **вообще не качает** данные (экран буферизации висит на 0.0 MB/s при живом рое «Пиры: 5/505»). Прерывистые probe-запросы (Range 0-2MB с отменой тела) НЕ заменяют непрерывное чтение.
-2. **`probeStream` Range = `bytes=0-2097151` (2 MB)** — не уменьшать до `bytes=0-1`: маленький Range не форсирует загрузку.
-3. **«Пропустить буферизацию»** — `handleSkipBuffering()`: НЕ монтирует пустой `<video>`, а ждёт HTTP 200/206 от потока (`streamReady`).
-4. **Ретрай add** — `addWithRetry(6, 3000)` + при упорном «BT client not connected» → `restartServer()` (IPC `torrserver:restart`) и повторный цикл. BT-клиент инициализируется ~20-30 сек после старта — ретраи обязательны.
-5. **Выбор видео-файла** — `pickVideoIndex()`: по расширению (mp4/mkv/avi/…) и наибольшему размеру, **НЕ index=1**. В раздачах первым файлом часто идёт `.srt` субтитр → `content-type: text/srt` → чёрный экран/зависание. Учитывать поздние метаданные (пересборка URL при появлении `file_stats`).
-6. **Zero-speed детектор**: рестарт торрента (`rem+add`, reconnect) на 5-й и 15-й секунде при 0 MB/s + `restartPreload()`.
+1. **Непрерывная предзагрузка ВСЁ время просмотра** — `startPreload(url, offset)`: чанки по 256 MB (`CHUNK_BYTES`), прочитал чанк → сразу следующий, до конца файла. Работает и ПОСЛЕ выхода из буферизации ( НЕ останавливать при `isBuffering=false` — раньше останавливали → TorrServer переставал качать → видео зависало через ~15 мин, когда буфер hls.js кончался). TorrServer не качает без читателя.
+2. **РАННИЙ preload** — стартует СРАЗУ после add (index=1), НЕ ждать file_stats (для magnet метаданные качаются 5-15с — иначе скорость висит на 0). При позднем file_stats: если index ≠ 1 → `restartPreload` с новым URL, иначе не трогать (guard `preloadRef.controller`).
+3. **`probeStream` Range = `bytes=0-2097151` (2 MB)** — не уменьшать до `bytes=0-1`: маленький Range не форсирует загрузку.
+4. **«Пропустить буферизацию»** — `handleSkipBuffering()`: НЕ монтирует пустой `<video>`, а ждёт HTTP 200/206 от потока (`streamReady`).
+5. **Ретрай add** — `addWithRetry(6, 3000)` + при упорном «BT client not connected» → `restartServer()` (IPC `torrserver:restart`) и повторный цикл. BT-клиент инициализируется ~20-30 сек после старта — ретраи обязательны. Перед add — `consumePrefetch(magnet)`: если префетч уже добавил торрент, hash берётся из кэша (без повторного add).
+6. **Выбор видео-файла** — `pickVideoIndex()`: по расширению (mp4/mkv/avi/…) и наибольшему размеру, **НЕ index=1**. В раздачах первым файлом часто идёт `.srt` субтитр → `content-type: text/srt` → чёрный экран/зависание. Учитывать поздние метаданные (пересборка URL при появлении `file_stats`).
+7. **Zero-speed детектор**: рестарт торрента (`rem+add`, reconnect) на 5-й и 15-й секунде при 0 MB/s + `restartPreload()`. Срабатывает максимум 2 раза за просмотр (restartedOnce/Twice).
+8. **Сетевая устойчивость**: `onNetworkChanged` (смена IP из main) + `navigator.onLine/offline` → `resetNetwork()` + `restartPreload`. HLS NETWORK_ERROR — exponential backoff 1.2→2.4→4.8с, затем fallback нативный /stream.
 
 **Регрессии при нарушении:** экран буферизации навсегда на 0.0 MB/s, чёрный экран, «субтитр вместо видео», бесконечное ожидание после «Смотреть».
 
@@ -192,4 +194,4 @@ TorrServer MatriX (Go-бинарник, extraResources)
 
 ---
 
-*Последнее обновление: 2026-08-05. Основано на фактическом коде и зафиксированных рецидивах в ходе разработки.*
+*Последнее обновление: 2026-08-16 (bt-client рестарт убран; preload непрерывный чанками + ранний старт + прогрев префетча; configureServer 1024MB/250 коннектов; TorrentDisconnectTimeout 86400 — 0 НЕ принимается; heartbeat 3 фейла × 3с; сетевая устойчивость resetNetwork). Сводка состояния проекта — STATE.md.*

@@ -54,21 +54,65 @@ const TS_BASE = 'http://127.0.0.1:8090';
 
 // ── Capacitor HTTP Bridge ──
 class CapacitorBridge implements BridgeAPI {
+  private plugin: any;
+
+  constructor() {
+    try {
+      const C = (window as any).Capacitor;
+      this.plugin = C?.Plugins?.TorrServer || null;
+    } catch { this.plugin = null; }
+  }
+
   private async tsFetch(path: string, opts?: RequestInit): Promise<any> {
     const res = await fetch(`${TS_BASE}${path}`, { ...opts, headers: { 'Content-Type': 'application/json', ...opts?.headers } });
     return res.json();
   }
 
   async getTorrServerStatus(): Promise<TorrServerStatusInfo> {
+    // Проверить через нативный плагин (запущен ли процесс)
+    if (this.plugin) {
+      try {
+        const r = await this.plugin.isRunning();
+        if (r.running) return { running: true, port: 8090, version: 'TorrServer' };
+      } catch { /* plugin unavailable */ }
+    }
+    // Fallback: проверить HTTP API
     try {
       const r = await this.tsFetch('/settings');
       return { running: true, port: 8090, version: r.Version || 'TorrServer' };
     } catch { return { running: false, port: 8090 }; }
   }
 
-  async startTorrServer() { return this.getTorrServerStatus(); }
-  async stopTorrServer() { return { running: false }; }
-  async restartTorrServer() { return this.getTorrServerStatus(); }
+  async startTorrServer(): Promise<TorrServerStatusInfo> {
+    // Запустить через нативный Capacitor Plugin
+    if (this.plugin) {
+      try {
+        console.log('[TorrServer] Starting via native plugin...');
+        await this.plugin.start();
+        // Poll until HTTP API responds (TorrServer запускается ~1-3 сек)
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          try { await this.tsFetch('/settings'); return { running: true, port: 8090, version: 'TorrServer' }; }
+          catch { /* not ready yet */ }
+        }
+        console.warn('[TorrServer] HTTP not ready after 10s, plugin started but TorrServer may be slow');
+      } catch (err) {
+        console.error('[TorrServer] Plugin start failed:', err);
+      }
+    }
+    return this.getTorrServerStatus();
+  }
+
+  async stopTorrServer(): Promise<{ running: boolean }> {
+    if (this.plugin) { try { await this.plugin.stop(); } catch { /* ignore */ } }
+    return { running: false };
+  }
+
+  async restartTorrServer(): Promise<TorrServerStatusInfo> {
+    await this.stopTorrServer();
+    await new Promise(r => setTimeout(r, 1000));
+    return this.startTorrServer();
+  }
   async configureTorrServer(ramCacheMB: number) {
     return this.tsFetch('/settings', { method: 'POST', body: JSON.stringify({ RamCache: ramCacheMB }) });
   }
