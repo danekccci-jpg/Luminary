@@ -15,6 +15,7 @@ import { EpisodeResumeDialog, findRelease } from './EpisodeResumeDialog';
 import { PersonModal } from './PersonModal';
 import { MovieCard } from './MovieCard';
 import { getTimelineForMovie, TimelineResult } from '../services/timeline';
+import { stripQualitySuffixes } from '../utils/cleanTitle';
 import { useFocusTrap, keyActivate } from '../utils/focus';
 import { registerBackHandler } from '../utils/tv';
 
@@ -83,6 +84,27 @@ const QUALITY_ORDER: Record<string, number> = { '4K': 0, '1080p': 1, '720p': 2, 
 
 function qualityRank(q: string): number {
   return QUALITY_ORDER[q] ?? 9;
+}
+
+/**
+ * Отсеять раздачи ДРУГИХ фильмов/частей франшизы по году в названии.
+ * Rutor/RuTracker ищут по подстроке («железный человек» → части 2, 3,
+ * «Мстители» и т.п.). Если в названии есть год, отличающийся от года фильма
+ * больше чем на ±2 (допуск на ремастеры/переиздания) — это другой фильм,
+ * отсеиваем. Раздачи без года в названии — оставляем (нечем проверить).
+ * Страховка: если после фильтра осталось <2 — возвращаем всё.
+ */
+function filterByYear(rels: TorrentRelease[], targetYear?: string): TorrentRelease[] {
+  if (!targetYear || rels.length <= 2) return rels;
+  const m = String(targetYear).match(/\d{4}/);
+  const target = m ? parseInt(m[0], 10) : NaN;
+  if (!Number.isFinite(target)) return rels;
+  const filtered = rels.filter((r) => {
+    const years = (r.title.match(/\b(19|20)\d{2}\b/g) || []).map(Number);
+    if (years.length === 0) return true;
+    return years.some((yy) => Math.abs(yy - target) <= 2);
+  });
+  return filtered.length >= 2 ? filtered : rels;
 }
 
 /** Плитка соседней части франшизы (предыдущая/следующая) для секции «По хронологии». */
@@ -185,7 +207,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     const src = details ?? movie;
     return {
       id: String(movie.id),
-      title: src.title || src.name || 'Без названия',
+      title: stripQualitySuffixes(src.title || src.name || 'Без названия'),
       poster: src.poster_path,
       year: src.year || (src.release_date || '').slice(0, 4),
       mediaType: src.media_type || 'movie',
@@ -342,7 +364,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
           .searchRutrackerLate(primaryQuery, year, orig)
           .then(({ releases: late }) => {
             if (cancelled || late.length === 0) return;
-            setReleases((prev) => mergeReleasesByHash(prev, late));
+            setReleases((prev) => filterByYear(mergeReleasesByHash(prev, late), year));
           })
           .catch(() => {});
       }
@@ -398,7 +420,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
           `[MovieDetailsModal] быстрый поиск: ${releases.length} раздач` +
             (releases.length === 0 ? ', error: ' + (error || '—') : '')
         );
-        setReleases((prev) => mergeReleasesByHash(releases, prev));
+        setReleases((prev) => filterByYear(mergeReleasesByHash(releases, prev), year));
         setSearchError(error || null);
         setIsScraping(false);
         if (error) {
@@ -493,7 +515,10 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     const nextRel = hasEp ? findRelease(releases, opts.season!, opts.episode! + 1) : null;
     onPlayTorrent({
       magnet: release.magnet,
-      title: `${movie.title} (${release.quality})`,
+      // Суффикс качества добавляем ОДИН раз: название из Истории/Избранного
+      // может уже содержать накопленные «(4K)» — срезаем их, иначе в плеере
+      // заголовок превращается в «Название (4K) (4K) (4K)…».
+      title: `${stripQualitySuffixes(movie.title || movie.name || '')} (${release.quality})`,
       poster: posterUrl,
       // .torrent-файл (rutracker) — надёжнее магнета для TorrServer
       torrentFile: release.torrentFile,
@@ -552,7 +577,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
       }
       onPlayTorrent({
         magnet: '',
-        title: `${movie.title} [VK ${v.quality}${v.dubbing ? ' · ' + v.dubbing : ''}]`,
+        title: `${stripQualitySuffixes(movie.title || movie.name || '')} [VK ${v.quality}${v.dubbing ? ' · ' + v.dubbing : ''}]`,
         poster: posterUrl,
         directUrl: url,
         directQuality: v.quality,
@@ -563,7 +588,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
     if (v.m3u8Url) {
       onPlayTorrent({
         magnet: '',
-        title: `${movie.title} [${card.sourceLabel} ${v.quality}${v.dubbing ? ' · ' + v.dubbing : ''}]`,
+        title: `${stripQualitySuffixes(movie.title || movie.name || '')} [${card.sourceLabel} ${v.quality}${v.dubbing ? ' · ' + v.dubbing : ''}]`,
         poster: posterUrl,
         directUrl: v.m3u8Url,
         directQuality: v.quality,
@@ -1261,7 +1286,7 @@ export const MovieDetailsModal: React.FC<MovieDetailsModalProps> = ({
                   const q = `${baseQ} S${String(s).padStart(2, '0')}`;
                   torrServerService.searchRutrackerLate(q, year).then(({ releases: late }) => {
                     if (!isMountedRef.current || late.length === 0) return;
-                    setReleases((prev) => mergeReleasesByHash(prev, late));
+                    setReleases((prev) => filterByYear(mergeReleasesByHash(prev, late), year));
                   }).catch(() => {});
                 }
               }}

@@ -12,6 +12,7 @@ import { MagnetInputModal } from './components/MagnetInputModal';
 import { Toaster } from './components/Toaster';
 import { extractYear } from './utils/year';
 import { clearMetaCache } from './services/cache';
+import { stripQualitySuffixes } from './utils/cleanTitle';
 import { Movie, TorrServerStatusInfo, UserSettings } from './types';
 import { tmdbService, TMDB_GENRES } from './services/tmdb';
 import { torrServerService } from './services/torrserver';
@@ -128,7 +129,9 @@ function libItemToMovie(item: LibraryItem): Movie {
   const numId = Number(item.id);
   return {
     id: Number.isFinite(numId) && String(numId) === item.id ? numId : (item.id as any),
-    title: item.title,
+    // Суффиксы качества «(4K)» из старых записей истории срезаем — они
+    // накапливались при каждом просмотре («Название (4K) (4K)…»).
+    title: stripQualitySuffixes(item.title),
     original_title: item.title,
     // Описание/рейтинг сохраняются в библиотеку при добавлении (libItem),
     // чтобы карточка/модалка не показывали пустоту до TMDB-обогащения.
@@ -549,7 +552,7 @@ export const App: React.FC = () => {
                           onKeyDown={(e) => keyActivate(e, () => setSelectedMovie(libItemToMovie(item)))}
                           tabIndex={0}
                           role="button"
-                          aria-label={item.title}
+                          aria-label={stripQualitySuffixes(item.title)}
                           style={{
                             display: 'flex',
                             alignItems: 'center',
@@ -577,7 +580,7 @@ export const App: React.FC = () => {
                           />
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {item.title}
+                              {stripQualitySuffixes(item.title)}
                             </div>
                             <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
                               {item.year || ''} · просмотрено {new Date(item.updatedAt).toLocaleDateString()}
@@ -714,7 +717,7 @@ export const App: React.FC = () => {
           onProgressSave={(cur: number, dur: number) => {
             if (activeStream.mediaId) {
               library.saveProgress(
-                { id: activeStream.mediaId, title: activeStream.title, poster: activeStream.poster, year: activeStream.year, mediaType: activeStream.mediaType, season: activeStream.season, episode: activeStream.episode },
+                { id: activeStream.mediaId, title: stripQualitySuffixes(activeStream.title), poster: activeStream.poster, year: activeStream.year, mediaType: activeStream.mediaType, season: activeStream.season, episode: activeStream.episode },
                 cur, dur
               );
               refreshLibrary();
@@ -734,7 +737,7 @@ export const App: React.FC = () => {
           onProgressSave={(cur: number, dur: number) => {
             if (activeStream.mediaId) {
               library.saveProgress(
-                { id: activeStream.mediaId, title: activeStream.title, poster: activeStream.poster, year: activeStream.year, mediaType: activeStream.mediaType, season: activeStream.season, episode: activeStream.episode },
+                { id: activeStream.mediaId, title: stripQualitySuffixes(activeStream.title), poster: activeStream.poster, year: activeStream.year, mediaType: activeStream.mediaType, season: activeStream.season, episode: activeStream.episode },
                 cur, dur
               );
               refreshLibrary();
@@ -765,7 +768,7 @@ export const App: React.FC = () => {
               library.saveProgress(
                 {
                   id: activeStream.mediaId,
-                  title: activeStream.title,
+                  title: stripQualitySuffixes(activeStream.title),
                   poster: activeStream.poster,
                   year: activeStream.year,
                   mediaType: activeStream.mediaType,

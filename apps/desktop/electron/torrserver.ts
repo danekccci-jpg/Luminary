@@ -751,11 +751,30 @@ export class TorrServerManager {
         // Сразу: безопасная часть конфига (БЕЗ смены P2P-порта — ранняя смена
         // ломает инициализацию BT-клиента → 500 «BT client not connected»).
         await this.configureServer(1024, false);
-        // Через 20 сек: фиксированный P2P-порт 43211 + полный конфиг,
-        // когда BT-клиент полностью инициализирован.
-        setTimeout(() => {
-          this.configureServer(1024, true).catch(() => {});
-        }, 20000);
+        // Через 20 сек: фиксированный P2P-порт 43211 + полный конфиг, когда
+        // BT-клиент полностью инициализирован.
+        // ВАЖНО: смена критичных настроек (порт) вызывает «drop all torrents» —
+        // торренты и кэш обнуляются. Если пользователь уже СМОТРИТ фильм в это
+        // окно (первые ~20 сек после старта), просмотр обрывался: скорость 0 +
+        // «Ошибка вещания». Применяем порт только когда активных торрентов нет.
+        let applied = false;
+        for (let attempt = 0; attempt < 3 && !applied; attempt++) {
+          await new Promise((r) => setTimeout(r, 20000));
+          try {
+            const list = await this.apiRequest('list', {});
+            const hasTorrents = Array.isArray(list) && list.some((t) => t && (t.Hash || t.hash));
+            if (!hasTorrents) {
+              await this.configureServer(1024, true);
+              applied = true;
+              console.log('[TorrServer] P2P-port 43211 applied (no active torrents)');
+            } else {
+              console.log('[TorrServer] Active torrents — P2P-port change deferred (avoid drop-all)');
+            }
+          } catch {
+            // API недоступен — пробуем в следующей итерации
+          }
+        }
+        if (!applied) console.warn('[TorrServer] P2P-port 43211 not applied — keeping random port');
         return { running: true, port: this.port, binaryPath: binPath };
       }
 
@@ -998,7 +1017,10 @@ export class TorrServerManager {
     return await this.apiRequest('add', {
       link: `file://${filePath}`,
       title: title || 'Movie Stream',
-      save_to_db: false,
+      // save_to_db:true — торрент переживает рестарт сервера. При false раздачи
+      // (в первую очередь rutracker .torrent) терялись при рестарте → скорость 0
+      // и «Ошибка вещания» (торрента больше нет, прелоад не может качать).
+      save_to_db: true,
     });
   }
 
