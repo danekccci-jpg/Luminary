@@ -132,7 +132,7 @@ function libItemToMovie(item: LibraryItem): Movie {
     // Суффиксы качества «(4K)» из старых записей истории срезаем — они
     // накапливались при каждом просмотре («Название (4K) (4K)…»).
     title: stripQualitySuffixes(item.title),
-    original_title: item.title,
+    original_title: stripQualitySuffixes(item.title),
     // Описание/рейтинг сохраняются в библиотеку при добавлении (libItem),
     // чтобы карточка/модалка не показывали пустоту до TMDB-обогащения.
     overview: item.overview || '',
