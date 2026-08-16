@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import './styles/index.css';
+import './styles/touch.css';
 
 // ── Capacitor shim: подменяем window.electronAPI на HTTP-адаптер
 //    чтобы ВЕСЬ существующий код (сервисы + компоненты) работал без правок ──
