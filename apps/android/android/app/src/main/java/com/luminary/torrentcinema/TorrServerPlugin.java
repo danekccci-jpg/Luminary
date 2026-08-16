@@ -4,7 +4,7 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
-import android.content.Context;
+import android.content.Intent;
 import android.os.Build;
 import android.util.Log;
 
@@ -19,14 +19,9 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.File;
 
 /**
- * Capacitor plugin для запуска TorrServer (Go-бинарник) на Android.
- *
- * TorrServer упакован как native library (libtorrserver.so) в APK.
- * Android автоматически извлекает его в nativeLibraryDir при установке:
- *   /data/app/<package>/lib/arm64/libtorrserver.so
- *
- * Это позволяет обойти ограничение Android 10+ (W^X): нельзя выполнять
- * бинарники из /data/data/*/files/, но МОЖНО из nativeLibraryDir.
+ * Capacitor plugin to run TorrServer (Go binary) on Android.
+ * TorrServer is packaged as libtorrserver.so in jniLibs/arm64-v8a/.
+ * Android extracts it to nativeLibraryDir (executable) during install.
  */
 @CapacitorPlugin(name = "TorrServer")
 public class TorrServerPlugin extends Plugin {
@@ -54,8 +49,6 @@ public class TorrServerPlugin extends Plugin {
         super.handleOnDestroy();
     }
 
-    // ── Plugin Methods ──
-
     @PluginMethod
     public void start(PluginCall call) {
         if (isProcessRunning()) {
@@ -67,11 +60,11 @@ public class TorrServerPlugin extends Plugin {
             File binary = getNativeBinary();
             if (binary == null || !binary.exists()) {
                 String nativeDir = getContext().getApplicationInfo().nativeLibraryDir;
-                call.reject("TorrServer binary not found. Expected: " + nativeDir + "/" + LIB_NAME);
+                call.reject("TorrServer binary not found at: " + nativeDir + "/" + LIB_NAME);
                 return;
             }
 
-            Log.i(TAG, "Starting TorrServer from: " + binary.getAbsolutePath());
+            Log.i(TAG, "Starting TorrServer: " + binary.getAbsolutePath());
             startForeground();
             runBinary(binary);
             call.resolve(makeResult(true, "started"));
@@ -112,26 +105,17 @@ public class TorrServerPlugin extends Plugin {
         call.resolve(r);
     }
 
-    // ── Native Binary Access ──
-
-    /**
-     * TorrServer упакован как libtorrserver.so в APK (jniLibs/arm64-v8a/).
-     * Android автоматически извлекает его в nativeLibraryDir при установке.
-     * Этот каталог исполняемый — можно запускать ProcessBuilder.
-     */
     private File getNativeBinary() {
         try {
             String nativeDir = getContext().getApplicationInfo().nativeLibraryDir;
             File binary = new File(nativeDir, LIB_NAME);
-            Log.i(TAG, "Native binary path: " + binary.getAbsolutePath() + " (exists=" + binary.exists() + ")");
+            Log.i(TAG, "Native lib: " + binary.getAbsolutePath() + " exists=" + binary.exists());
             return binary;
         } catch (Exception e) {
             Log.e(TAG, "getNativeBinary failed", e);
             return null;
         }
     }
-
-    // ── Process Management ──
 
     private void runBinary(File binary) {
         try {
@@ -150,15 +134,11 @@ public class TorrServerPlugin extends Plugin {
             pid = getProcessPid(process);
             Log.i(TAG, "TorrServer started, pid=" + pid + ", port=" + PORT);
 
-            // Читаем stdout в фоне (чтобы процесс не завис)
             new Thread(() -> {
                 try {
                     java.io.InputStream is = process.getInputStream();
                     byte[] buf = new byte[1024];
-                    int n;
-                    while ((n = is.read(buf)) != -1) {
-                        // Можно логировать вывод TorrServer
-                    }
+                    while (is.read(buf) != -1) { }
                 } catch (Exception ignored) {}
             }).start();
         } catch (Exception e) {
@@ -174,29 +154,26 @@ public class TorrServerPlugin extends Plugin {
             pid = -1;
             Log.i(TAG, "TorrServer stopped");
         }
-        stopForeground();
+        stopForegroundNotification();
     }
 
     private boolean isProcessRunning() {
         if (process == null) return false;
         try {
-            process.exitValue(); // если не бросил — процесс жив
+            process.exitValue();
             return false;
         } catch (IllegalThreadStateException e) {
-            return true; // процесс ещё работает
+            return true;
         }
     }
 
     private int getProcessPid(Process p) {
         try {
-            // Process.pid() доступен с API 26
             return (int) p.getClass().getMethod("pid").invoke(p);
         } catch (Exception e) {
             return -1;
         }
     }
-
-    // ── Foreground Notification ──
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -215,7 +192,7 @@ public class TorrServerPlugin extends Plugin {
 
             Notification notification = new NotificationCompat.Builder(getContext(), CHANNEL_ID)
                 .setContentTitle("Luminary")
-                .setContentText("TorrServer работает")
+                .setContentText("TorrServer running")
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
                 .setContentIntent(pi)
                 .setOngoing(true)
@@ -228,7 +205,7 @@ public class TorrServerPlugin extends Plugin {
         }
     }
 
-    private void stopForeground() {
+    private void stopForegroundNotification() {
         try {
             NotificationManager nm = getContext().getSystemService(NotificationManager.class);
             if (nm != null) nm.cancel(NOTIFICATION_ID);
