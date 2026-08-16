@@ -83,12 +83,12 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npx vite build
-      - name: Fetch TorrServer Android binary
+      - name: Fetch TorrServer binary as native library
         run: |
-          mkdir -p android/app/src/main/assets/torrserver
-          curl -sL -o android/app/src/main/assets/torrserver/TorrServer-android-arm64 \
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          curl -sL -o android/app/src/main/jniLibs/arm64-v8a/libtorrserver.so \
             "https://github.com/YouROK/TorrServer/releases/latest/download/TorrServer-android-arm64"
-          chmod +x android/app/src/main/assets/torrserver/TorrServer-android-arm64
+          chmod +x android/app/src/main/jniLibs/arm64-v8a/libtorrserver.so
       - run: npx cap sync android
       - name: Generate signing keystore
         run: |
@@ -129,12 +129,12 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npx vite build
-      - name: Fetch TorrServer Android binary
+      - name: Fetch TorrServer binary as native library
         run: |
-          mkdir -p android/app/src/main/assets/torrserver
-          curl -sL -o android/app/src/main/assets/torrserver/TorrServer-android-arm64 \
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          curl -sL -o android/app/src/main/jniLibs/arm64-v8a/libtorrserver.so \
             "https://github.com/YouROK/TorrServer/releases/latest/download/TorrServer-android-arm64"
-          chmod +x android/app/src/main/assets/torrserver/TorrServer-android-arm64
+          chmod +x android/app/src/main/jniLibs/arm64-v8a/libtorrserver.so
       - run: npx cap sync android
       - name: Generate signing keystore
         run: |

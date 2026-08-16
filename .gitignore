@@ -51,8 +51,9 @@ apps/android/node_modules/
 *.apk
 *.aab
 
-# ── TorrServer binaries в Android assets (скачиваются fetch-torrserver.js) ──
+# ── TorrServer binaries (скачиваются CI) ──
 **/assets/torrserver/TorrServer-*
+**/jniLibs/*/libtorrserver.so
 
 # ── Android signing keystore (генерируется автоматически) ──
 **/release-key.jks

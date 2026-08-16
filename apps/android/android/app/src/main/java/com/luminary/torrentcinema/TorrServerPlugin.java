@@ -5,7 +5,6 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
-import android.content.Intent;
 import android.os.Build;
 import android.util.Log;
 
@@ -18,35 +17,32 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
 
 /**
  * Capacitor plugin для запуска TorrServer (Go-бинарник) на Android.
  *
- * Бинарник лежит в APK assets/torrserver/TorrServer-android-arm64.
- * При первом запуске извлекается в context.getFilesDir()/torrserver/.
- * Запускается как foreground service (.Notification) для стабильности.
+ * TorrServer упакован как native library (libtorrserver.so) в APK.
+ * Android автоматически извлекает его в nativeLibraryDir при установке:
+ *   /data/app/<package>/lib/arm64/libtorrserver.so
+ *
+ * Это позволяет обойти ограничение Android 10+ (W^X): нельзя выполнять
+ * бинарники из /data/data/*/files/, но МОЖНО из nativeLibraryDir.
  */
 @CapacitorPlugin(name = "TorrServer")
 public class TorrServerPlugin extends Plugin {
 
     private static final String TAG = "TorrServerPlugin";
     private static final String CHANNEL_ID = "torrserver_channel";
-    private static final String BINARY_NAME = "TorrServer-android-arm64";
+    private static final String LIB_NAME = "libtorrserver.so";
     private static final int NOTIFICATION_ID = 9001;
     private static final int PORT = 8090;
 
     private Process process;
     private int pid = -1;
 
-    // ── Lifecycle ──
-
     @Override
     public void load() {
         createNotificationChannel();
-        // Проверяем, запущен ли уже TorrServer (при перезагрузке WebView)
         if (isProcessRunning()) {
             Log.i(TAG, "TorrServer already running (pid=" + pid + ")");
         }
@@ -68,12 +64,14 @@ public class TorrServerPlugin extends Plugin {
         }
 
         try {
-            File binary = extractBinary();
-            if (binary == null) {
-                call.reject("Failed to extract TorrServer binary");
+            File binary = getNativeBinary();
+            if (binary == null || !binary.exists()) {
+                String nativeDir = getContext().getApplicationInfo().nativeLibraryDir;
+                call.reject("TorrServer binary not found. Expected: " + nativeDir + "/" + LIB_NAME);
                 return;
             }
 
+            Log.i(TAG, "Starting TorrServer from: " + binary.getAbsolutePath());
             startForeground();
             runBinary(binary);
             call.resolve(makeResult(true, "started"));
@@ -105,66 +103,62 @@ public class TorrServerPlugin extends Plugin {
         call.resolve(r);
     }
 
-    // ── Binary Extraction ──
-
-    private File extractBinary() {
-        File targetDir = new File(getContext().getFilesDir(), "torrserver");
-        File target = new File(targetDir, BINARY_NAME);
-
-        // Если уже извлечён — пропускаем
-        if (target.exists() && target.length() > 1_000_000) {
-            setExecutable(target);
-            return target;
-        }
-
-        targetDir.mkdirs();
-
-        try {
-            // Копируем из assets
-            try (InputStream in = getContext().getAssets().open("torrserver/" + BINARY_NAME);
-                 OutputStream out = new FileOutputStream(target)) {
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) != -1) {
-                    out.write(buf, 0, n);
-                }
-            }
-            setExecutable(target);
-            Log.i(TAG, "Binary extracted: " + target.getAbsolutePath() + " (" + target.length() + " bytes)");
-            return target;
-        } catch (Exception e) {
-            Log.e(TAG, "extractBinary failed", e);
-            return null;
-        }
+    @PluginMethod
+    public void getBinaryPath(PluginCall call) {
+        File binary = getNativeBinary();
+        JSObject r = new JSObject();
+        r.put("path", binary != null ? binary.getAbsolutePath() : null);
+        r.put("exists", binary != null && binary.exists());
+        call.resolve(r);
     }
 
-    private void setExecutable(File f) {
-        f.setExecutable(true, false);
-        f.setReadable(true, false);
+    // ── Native Binary Access ──
+
+    /**
+     * TorrServer упакован как libtorrserver.so в APK (jniLibs/arm64-v8a/).
+     * Android автоматически извлекает его в nativeLibraryDir при установке.
+     * Этот каталог исполняемый — можно запускать ProcessBuilder.
+     */
+    private File getNativeBinary() {
+        try {
+            String nativeDir = getContext().getApplicationInfo().nativeLibraryDir;
+            File binary = new File(nativeDir, LIB_NAME);
+            Log.i(TAG, "Native binary path: " + binary.getAbsolutePath() + " (exists=" + binary.exists() + ")");
+            return binary;
+        } catch (Exception e) {
+            Log.e(TAG, "getNativeBinary failed", e);
+            return null;
+        }
     }
 
     // ── Process Management ──
 
     private void runBinary(File binary) {
         try {
+            File dataDir = new File(getContext().getFilesDir(), "torrserver_data");
+            dataDir.mkdirs();
+
             ProcessBuilder pb = new ProcessBuilder(
                 binary.getAbsolutePath(),
                 "--port", String.valueOf(PORT),
                 "--ip", "0.0.0.0",
-                "--path", new File(getContext().getFilesDir(), "torrserver_data").getAbsolutePath()
+                "--path", dataDir.getAbsolutePath()
             );
             pb.directory(binary.getParentFile());
             pb.redirectErrorStream(true);
             process = pb.start();
             pid = getProcessPid(process);
-            Log.i(TAG, "TorrServer started, pid=" + pid);
+            Log.i(TAG, "TorrServer started, pid=" + pid + ", port=" + PORT);
 
             // Читаем stdout в фоне (чтобы процесс не завис)
             new Thread(() -> {
                 try {
-                    InputStream is = process.getInputStream();
+                    java.io.InputStream is = process.getInputStream();
                     byte[] buf = new byte[1024];
-                    while (is.read(buf) != -1) { /* drain */ }
+                    int n;
+                    while ((n = is.read(buf)) != -1) {
+                        // Можно логировать вывод TorrServer
+                    }
                 } catch (Exception ignored) {}
             }).start();
         } catch (Exception e) {
@@ -202,7 +196,7 @@ public class TorrServerPlugin extends Plugin {
         }
     }
 
-    // ── Foreground Service (Notification) ──
+    // ── Foreground Notification ──
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -214,29 +208,31 @@ public class TorrServerPlugin extends Plugin {
     }
 
     private void startForeground() {
-        Intent intent = new Intent(getContext(), MainActivity.class);
-        intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent pi = PendingIntent.getActivity(getContext(), 0, intent, PendingIntent.FLAG_IMMUTABLE);
+        try {
+            Intent intent = new Intent(getContext(), MainActivity.class);
+            intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            PendingIntent pi = PendingIntent.getActivity(getContext(), 0, intent, PendingIntent.FLAG_IMMUTABLE);
 
-        Notification notification = new NotificationCompat.Builder(getContext(), CHANNEL_ID)
-            .setContentTitle("Luminary")
-            .setContentText("TorrServer работает")
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .setContentIntent(pi)
-            .setOngoing(true)
-            .build();
+            Notification notification = new NotificationCompat.Builder(getContext(), CHANNEL_ID)
+                .setContentTitle("Luminary")
+                .setContentText("TorrServer работает")
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentIntent(pi)
+                .setOngoing(true)
+                .build();
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = getContext().getSystemService(NotificationManager.class);
             if (nm != null) nm.notify(NOTIFICATION_ID, notification);
+        } catch (Exception e) {
+            Log.e(TAG, "startForeground failed", e);
         }
     }
 
     private void stopForeground() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        try {
             NotificationManager nm = getContext().getSystemService(NotificationManager.class);
             if (nm != null) nm.cancel(NOTIFICATION_ID);
-        }
+        } catch (Exception ignored) {}
     }
 
     private JSObject makeResult(boolean running, String message) {
