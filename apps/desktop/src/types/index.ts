@@ -24,6 +24,32 @@ export interface Movie {
   season_count?: number;
   episode_count?: number;
   year?: string;
+  /** TMDB-коллекция (франшиза): предыдущая/следующая части по хронологии. */
+  belongs_to_collection?: {
+    id: number;
+    name: string;
+    poster_path: string | null;
+    backdrop_path: string | null;
+  } | null;
+}
+
+/** Актёр: страница с биографией и фильмографией (TMDB /person/{id}). */
+export interface Person {
+  id: number;
+  name: string;
+  biography: string;
+  profile_path: string | null;
+  birthday?: string;
+  deathday?: string | null;
+  place_of_birth?: string | null;
+  also_known_as?: string[];
+  /** Фильмография (combined_credits → cast), только фильмы. */
+  credits?: PersonCredit[];
+}
+
+/** Запись фильмографии актёра: Movie + роль. */
+export interface PersonCredit extends Movie {
+  character?: string;
 }
 
 /** Прямой онлайн-плеер с HDRezka / Filmix (для блока «Смотреть») */

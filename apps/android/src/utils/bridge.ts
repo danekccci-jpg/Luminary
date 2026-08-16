@@ -142,7 +142,61 @@ class CapacitorBridge implements BridgeAPI {
     if (fileIndex != null) url += `?index=${fileIndex}`;
     return url;
   }
-  async searchTorrents() { return { success: false, releases: [], error: 'Use JacRed pool directly' }; }
+  async searchTorrents(query: string, year?: string, jackettUrl?: string, jackettApiKey?: string, imdbId?: string) {
+    // ── Android: прямой HTTP-поиск (Torrentio + Cinemeta) ──
+    try {
+      const releases: any[] = [];
+      // 1) Resolve IMDB через Cinemeta (по названию)
+      let resolvedId = imdbId || '';
+      if (!resolvedId) {
+        try {
+          const cinemeta = await fetch(
+            `https://v3-cinemeta.strem.io/catalog/movie/top/search=${encodeURIComponent(query)}.json`,
+            { signal: AbortSignal.timeout(5000) }
+          ).then(r => r.json());
+          resolvedId = cinemeta?.metas?.[0]?.imdb_id || '';
+        } catch { /* cinemeta недоступен */ }
+      }
+      // 2) Torrentio — список раздач для IMDB id
+      if (resolvedId) {
+        try {
+          const data = await fetch(
+            `https://torrentio.strem.fun/stream/movie/${encodeURIComponent(resolvedId)}.json`,
+            { signal: AbortSignal.timeout(8000) }
+          ).then(r => r.json());
+          const streams: any[] = data?.streams || [];
+          const seen = new Set<string>();
+          for (const s of streams) {
+            if (!s?.infoHash || seen.has(s.infoHash)) continue;
+            seen.add(s.infoHash);
+            const quality = s.name?.match(/(4K|2160p|1080p|720p|480p)/i)?.[1]?.toUpperCase() || '1080p';
+            const tags = s.name?.match(/\[([^\]]+)\]/g)?.map((t: string) => t.slice(1, -1)).filter((t: string) => !/^\d+p$/i.test(t) && !/^4k$/i.test(t)).slice(0, 4) || [];
+            releases.push({
+              id: `torrentio-${s.infoHash.slice(0, 12)}`,
+              title: `${query} ${year || ''} [${quality}] ${s.name || ''}`.trim(),
+              quality,
+              tags,
+              dubbing: '',
+              size: s.size || 0,
+              sizeBytes: s.size || 0,
+              seeders: s.seeders || 0,
+              leechers: 0,
+              magnet: `magnet:?xt=urn:btih:${s.infoHash}&dn=${encodeURIComponent(query)}`,
+              source: 'Torrentio',
+              videoCodec: '',
+              audioCodec: '',
+              stabilityScore: 70,
+              stabilityLabel: 'Хорошая',
+              requiredMbps: 10,
+            });
+          }
+        } catch { /* torrentio недоступен */ }
+      }
+      return { success: true, releases, error: releases.length ? undefined : 'Нет раздач в Torrentio' };
+    } catch (err: any) {
+      return { success: false, releases: [], error: String(err?.message || err) };
+    }
+  }
   async openExternal(url: string) { window.open(url, '_blank'); }
   async getPlatformInfo() { return { platform: 'android', arch: 'arm64' }; }
   async catalogSearch(q: string) { return { success: true, items: [], error: 'Catalog proxy not available on Android' }; }
@@ -166,7 +220,63 @@ class CapacitorBridge implements BridgeAPI {
   async rutrackerHideLogin() { return { ok: true }; }
   async rutrackerSearch() { return { success: false, releases: [] }; }
   onTorrServerStatusChanged() { return () => {}; }
-  async searchOnlineStreams() { return { success: true, streams: [] }; }
+  async searchOnlineStreams(kinopoiskId?: number | string, tmdbId?: number | string, title?: string, year?: string, kodikToken?: string) {
+    // ── Android: прямой HTTP-поиск (KinoBox API — бесплатный, без токена) ──
+    try {
+      const streams: any[] = [];
+      const kpId = kinopoiskId || '';
+      // 1) KinoBox: /api/players?kinopoiskId=...
+      if (kpId) {
+        try {
+          const players = await fetch(
+            `https://kinobox.tv/api/players?kinopoiskId=${encodeURIComponent(String(kpId))}`,
+            { signal: AbortSignal.timeout(6000) }
+          ).then(r => r.json());
+          if (Array.isArray(players)) {
+            for (const p of players) {
+              if (!p?.player?.sources) continue;
+              for (const src of p.player.sources) {
+                const quality = (src.quality || '1080p').toString().toUpperCase();
+                streams.push({
+                  id: `kinobox-${p.name || 'player'}-${quality}`,
+                  source: p.name || 'KinoBox',
+                  quality,
+                  translation: src.translation || 'Оригинал',
+                  m3u8Url: src.src || undefined,
+                  iframeUrl: src.iframe || undefined,
+                  referer: 'https://kinobox.tv/',
+                });
+              }
+            }
+          }
+        } catch { /* kinobox недоступен */ }
+      }
+      // 2) Kodik (если задан токен)
+      if (kodikToken && title) {
+        try {
+          const kodik = await fetch(
+            `https://kodikapi.com/search?token=${encodeURIComponent(kodikToken)}&title=${encodeURIComponent(title)}&year=${year || ''}`,
+            { signal: AbortSignal.timeout(6000) }
+          ).then(r => r.json());
+          const items = kodik?.results?.movies || [];
+          for (const item of items.slice(0, 5)) {
+            streams.push({
+              id: `kodik-${item.id || Math.random()}`,
+              source: 'Kodik',
+              quality: '1080p',
+              translation: item.translation?.title || 'Оригинал',
+              m3u8Url: undefined,
+              iframeUrl: item.link ? `https://kodik.info${item.link}` : undefined,
+              referer: 'https://kodik.info/',
+            });
+          }
+        } catch { /* kodik недоступен */ }
+      }
+      return { success: true, streams };
+    } catch (err: any) {
+      return { success: false, streams: [], error: String(err?.message || err) };
+    }
+  }
   async setOnlineStreamReferer() { return { ok: true }; }
   async clearOnlineStreamReferer() { return { ok: true }; }
 }

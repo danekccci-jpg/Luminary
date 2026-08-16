@@ -164,6 +164,12 @@ export const cacheKeys = {
   search: (query: string) => `search:${query.toLowerCase().trim()}`,
   movieDetails: (id: string) => `details:${id}`,
   onlineStreams: (title: string, year?: string) => `streams:${title}:${year || ''}`,
+  /** Страница актёра (биография + фильмография) — TTL 24ч. */
+  person: (id: number) => `person:${id}`,
+  /** TMDB-коллекция (части франшизы) — TTL 24ч. */
+  collection: (id: number) => `collection:${id}`,
+  /** Похожие фильмы — TTL 6ч. */
+  similar: (id: number) => `similar:${id}`,
 };
 
 /** Полная очистка кеша метаданных (IndexedDB) — вызывается при старте приложения,

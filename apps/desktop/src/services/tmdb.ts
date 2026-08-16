@@ -1,5 +1,6 @@
 import axios from 'axios';
-import { Movie } from '../types';
+import { Movie, Person } from '../types';
+import { cachedFetch, cacheKeys } from './cache';
 
 // Public read-only TMDB v3 key (Lampa-style). Users can override in Settings.
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
