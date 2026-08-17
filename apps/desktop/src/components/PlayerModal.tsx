@@ -308,6 +308,22 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   /** Последний preload URL — нужен для перезапуска preload при смене сети. */
   const preloadUrlRef = useRef<string>('');
 
+  // ── Система самовосстановления потока (stall detector + recover levels) ──
+  /** Счётчик попыток восстановления за сессию (сброс при новом фильме). */
+  const recoverAttemptsRef = useRef(0);
+  /** Время последней попытки — анти-спам (пауза между уровнями). */
+  const lastRecoverAtRef = useRef(0);
+  /** Последняя зафиксированная позиция (для стопор-детектора). */
+  const lastStallTimeRef = useRef(0);
+  /** Когда началось «waiting» (буфер кончился) — детект застревания. */
+  const waitingSinceRef = useRef(0);
+  /** Текущий URL потока (для пересоздания hls при восстановлении). */
+  const streamUrlRef = useRef('');
+  /** Время последней проверки стопор-детектора. */
+  const lastStallCheckAtRef = useRef(0);
+  /** Ссылка на актуальную recoverStream (вызов из эффектов без старых замыканий). */
+  const recoverStreamRef = useRef<(level?: number) => void>(() => {});
+
   const [streamUrl, setStreamUrl]       = useState('');
   const [hash, setHash]                 = useState('');
   const [isBuffering, setIsBuffering]   = useState(true);
@@ -1009,10 +1025,19 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             probeOk = true;
             setStreamReady(true);
           } else if (probeAttempts >= MAX_PROBE_ATTEMPTS) {
-            // Поток так и не ответил — стоп
-            stillBuffering = false;
-            setIsBuffering(false);
-            setErrorMsg('TorrServer не ответил на поток. Проверьте, что TorrServer запущен (статус Online), и попробуйте снова.');
+            // Поток не ответил — НЕ сдаёмся сразу: пробуем восстановить поток
+            // (reconnect → пересоздание hls → resetNetwork) и продолжаем ждать.
+            // Ошибка показывается только после исчерпания попыток восстановления.
+            if (recoverAttemptsRef.current < 5) {
+              const lvl = Math.min(4, recoverAttemptsRef.current + 1);
+              recoverStreamRef.current(lvl);
+              probeAttempts = 0; // ещё один цикл проб (recoverStream сам паузит)
+              console.log(`[Player] probe timeout — recovering (level ${lvl})`);
+            } else {
+              stillBuffering = false;
+              setIsBuffering(false);
+              setErrorMsg('TorrServer не ответил на поток. Проверьте, что TorrServer запущен (статус Online), и попробуйте снова.');
+            }
           }
         }, 1500);
 
@@ -1073,6 +1098,131 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hash]);
+
+  // ── Восстановление после рестарта TorrServer (краш при смене сети/паника):
+  //    сервер поднялся → ждём готовности торрента (восстановлен из БД) →
+  //    пересобираем stream URL и перезапускаем preload. Просмотр продолжается
+  //    без ручного перезапуска раздачи.
+  useEffect(() => {
+    if (!hash) return;
+    let wasDown = false;
+    let active = true;
+    let timer: NodeJS.Timeout | null = null;
+    const unsub = torrServerService.onStatusChanged((st) => {
+      if (st?.running === false) wasDown = true;
+      else if (st?.running === true && wasDown) {
+        wasDown = false;
+        console.log('[Player] TorrServer restarted — restoring stream');
+        timer = setTimeout(() => {
+          (async () => {
+            // Ждём, пока торрент (из БД) станет активным — клиент инициализируется
+            for (let i = 0; i < 45; i++) {
+              try {
+                const r = await torrServerService.getTorrentStats(hash);
+                if (r.success && Array.isArray(r.data?.file_stats) && r.data!.file_stats!.length > 0) break;
+              } catch { /* retry */ }
+              await new Promise((res) => setTimeout(res, 1000));
+            }
+            if (!active) return;
+            const idx = videoIndexRef.current ?? 1;
+            const url = await torrServerService.getStreamUrl(hash, idx, needTranscode).catch(() => null);
+            // Принудительно ПЕРЕСОЗДАЁМ hls.js/видео: gst-сессия после краша
+            // сервера мертва, старый hls висит на мёртвом манифесте. Сброс
+            // через пустой URL триггерит размонтирование → повторный mount
+            // с новым URL пересоздаёт Hls и запрашивает свежий манифест.
+            if (url) {
+              setStreamUrl('');
+              setTimeout(() => {
+                if (active) setStreamUrl(url);
+              }, 300);
+            }
+            const pl = preloadUrlRef.current;
+            if (pl) restartPreload(pl);
+            console.log('[Player] Stream restored after TorrServer restart');
+          })();
+        }, 6000);
+      }
+    });
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+      unsub();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hash]);
+
+  // ── ЕДИНАЯ ТОЧКА ВОССТАНОВЛЕНИЯ ПОТОКА ──
+  // Уровни (от простого к полному пересозданию), применяются по нарастающей:
+  //  1. restartPreload           — данные снова качаются из пиров
+  //  2. reconnect (rem+add)      — новые трекеры/DHT
+  //  3. пересоздать streamUrl    — hls.js монтируется заново
+  //  4. resetNetwork + пересоздать поток — полный сброс сети TorrServer
+  const recoverStream = async (level: number = 1) => {
+    const now = Date.now();
+    const minGap = 8000 * level; // пауза между уровнями растёт (8с, 16с, …)
+    if (now - lastRecoverAtRef.current < minGap) return;
+    if (recoverAttemptsRef.current >= 5) return; // 5 попыток за сессию — сдаёмся
+    lastRecoverAtRef.current = now;
+    recoverAttemptsRef.current++;
+    console.log(`[Player] recoverStream level=${level} (attempt ${recoverAttemptsRef.current})`);
+    const pl = preloadUrlRef.current;
+    if (level <= 1) {
+      if (pl) restartPreload(pl);
+    } else if (level === 2) {
+      if (hash && magnet) torrServerService.reconnect(hash, magnet).catch(() => {});
+      setTimeout(() => { if (pl) restartPreload(pl); }, 4000);
+    } else {
+      const url = streamUrlRef.current;
+      if (level >= 4) torrServerService.resetNetwork().catch(() => {});
+      if (url) {
+        setStreamUrl('');
+        setTimeout(() => { if (url) setStreamUrl(url); }, level >= 4 ? 500 : 300);
+      }
+      if (pl) setTimeout(() => restartPreload(pl), level >= 4 ? 3000 : 0);
+    }
+  };
+  recoverStreamRef.current = recoverStream;
+
+  // Сброс счётчика попыток при новом фильме
+  useEffect(() => {
+    recoverAttemptsRef.current = 0;
+    lastRecoverAtRef.current = 0;
+  }, [magnet]);
+
+  // Синхронизация streamUrlRef (нужен recoverStream для пересоздания hls)
+  useEffect(() => {
+    streamUrlRef.current = streamUrl;
+  }, [streamUrl]);
+
+  // ── Стопор-детектор: видео встало (currentTime не растёт, readyState низкий) ──
+  //    Порог 9с (3 интервала) и готовность < 2 — чтобы НЕ дёргать восстановление
+  //    на кратковременных просадках gst-транскода (4K Remux грузит CPU) и НЕ
+  //    «выбивать в буферизацию» после паузы/перемотки. Пока видео играет — ничего.
+  useEffect(() => {
+    if (!hash || !streamUrl) return;
+    let stallIntervals = 0;
+    const iv = setInterval(() => {
+      const v = videoRef.current;
+      if (!v || v.paused || v.ended || errorMsg || codecError) return;
+      const t = v.currentTime;
+      const prevTime = lastStallTimeRef.current;
+      if (t === prevTime) {
+        stallIntervals++;
+      } else {
+        stallIntervals = 0;
+      }
+      lastStallTimeRef.current = t;
+      // currentTime не двигается ≥9с И нет данных для декодирования (readyState<2)
+      if (stallIntervals >= 3 && v.readyState < 2) {
+        stallIntervals = 0;
+        const lvl = Math.min(4, recoverAttemptsRef.current + 1);
+        console.log(`[Player] stall detected (${stallIntervals + 3}с, readyState=${v.readyState}) — recovering level ${lvl}`);
+        recoverStreamRef.current(lvl);
+      }
+    }, 3000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hash, streamUrl, errorMsg, codecError]);
 
   // ── navigator.onLine/offline: моментальная реакция на потерю сети ──
   useEffect(() => {
@@ -1394,6 +1544,10 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       clearTimer();
       // Видео пошло (возможно, медленно после буферизации) — снять ошибочный оверлей
       if (codecError) setCodecError(false);
+      // Поток восстановился после сбоя — снимаем «Ошибку вещания»/временные ошибки
+      if (errorMsg) setErrorMsg('');
+      // Восстановление успешно — сброс счётчика попыток для будущих сбоев
+      recoverAttemptsRef.current = 0;
     };
 
     video.addEventListener('playing', onPlaying);

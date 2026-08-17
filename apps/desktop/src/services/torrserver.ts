@@ -25,9 +25,19 @@ export class TorrServerService {
    * раздач — чтобы «Смотреть» было мгновенным при клике.
    * Ошибки игнорируются (сервер может быть не запущен).
    */
+  /** Время последнего add от префетча — throttle против шторма (см. prefetch). */
+  private lastPrefetchAddAt = 0;
+  private static PREFETCH_THROTTLE_MS = 1500;
+
   public async prefetch(release: TorrentRelease): Promise<void> {
     if (this.prefetchMap.has(release.magnet)) return; // уже префетчено
     this.cleanPrefetch();
+    // ЗАЩИТА ОТ ШТОРМА ADD: некоторые пути вызывают prefetch пачками (например,
+    // повторные быстрые поиски/мёржи при открытой модалке). Один add раз в 1.5с —
+    // лишние пропускаем (hash останется в prefetchMap от ближайшего успешного).
+    const now = Date.now();
+    if (now - this.lastPrefetchAddAt < TorrServerService.PREFETCH_THROTTLE_MS) return;
+    this.lastPrefetchAddAt = now;
     try {
       const res = release.torrentFile
         ? await this.addTorrentFile(release.torrentFile, release.title)
@@ -37,10 +47,8 @@ export class TorrServerService {
         if (hash) {
           this.prefetchMap.set(release.magnet, { hash, at: Date.now() });
           console.log(`[TorrServerService] prefetch ok: hash=${hash.slice(0,12)} (${release.title.slice(0,40)})`);
-          // ПРОГРЕВ: TorrServer не качает без читателя. Открываем /stream с
-          // Range 0-20MB — сервер немедленно ищет пиров (DHT/трекеры) и качает
-          // первые данные. К моменту клика «Смотреть» скорость уже высокая,
-          // а не растёт с нуля. Обрываем через 30с (данные остаются в кэше).
+          // ПРОГРЕВ: TorrServer не качает без читателя. Открываем /stream —
+          // сервер немедленно ищет пиров (DHT/трекеры) и качает первые данные.
           this.warmupStream(hash);
         }
       }
@@ -49,26 +57,35 @@ export class TorrServerService {
     }
   }
 
-  /** Прогрев потока: открыть /stream (Range 0-20MB) на 30с — TorrServer
-   *  подключает пиров и качает первые данные ещё ДО клика «Смотреть». */
+  /** Прогрев потока: открыть /stream и качать циклами (45с → пауза 3 мин),
+   *  пока фильм открыт в списке раздач. TorrServer подключает пиров и держит
+   *  их «тёплыми» ещё ДО клика «Смотреть» — после клика скорость стартует
+   *  сразу, а не с нуля (сценарий «долго открыт фильм в фоне»). */
   private async warmupStream(hash: string): Promise<void> {
-    try {
-      const url = await this.getStreamUrl(hash, 1, false);
-      if (!url) return;
+    const url = await this.getStreamUrl(hash, 1, false).catch(() => null);
+    if (!url) return;
+    const cycles = 4; // ~15 минут тёплого качания (45с + 3 мин пауза) × 4
+    for (let cycle = 0; cycle < cycles; cycle++) {
+      if (cycle > 0) await new Promise((r) => setTimeout(r, 3 * 60 * 1000));
       const controller = new AbortController();
-      setTimeout(() => controller.abort(), 30000);
-      const res = await fetch(url, {
-        headers: { Range: 'bytes=0-20971520' },
-        signal: controller.signal,
-      });
-      const reader = res.body?.getReader();
-      if (!reader) return;
-      while (!controller.signal.aborted) {
-        const { done } = await reader.read();
-        if (done) break;
+      const timer = setTimeout(() => controller.abort(), 45000);
+      try {
+        const res = await fetch(url, {
+          headers: { Range: 'bytes=0-20971520' },
+          signal: controller.signal,
+        });
+        const reader = res.body?.getReader();
+        if (reader) {
+          while (!controller.signal.aborted) {
+            const { done } = await reader.read();
+            if (done) break;
+          }
+          try { reader.releaseLock(); } catch { /* ignore */ }
+        }
+      } catch {
+        /* aborted / сеть — не критично: главное, TorrServer уже ищет пиров */
       }
-    } catch {
-      /* aborted / сеть — не критично: главное, TorrServer уже ищет пиров */
+      clearTimeout(timer);
     }
   }
 
@@ -102,6 +119,15 @@ export class TorrServerService {
     const bridge = getBridge();
     if ('onNetworkChanged' in bridge && typeof (bridge as any).onNetworkChanged === 'function') {
       return (bridge as any).onNetworkChanged(callback);
+    }
+    return () => {};
+  }
+
+  /** Подписка на смену статуса TorrServer (running/starting/error). */
+  public onStatusChanged(callback: (status: TorrServerStatusInfo) => void): () => void {
+    const bridge = getBridge();
+    if ('onTorrServerStatusChanged' in bridge && typeof (bridge as any).onTorrServerStatusChanged === 'function') {
+      return (bridge as any).onTorrServerStatusChanged(callback);
     }
     return () => {};
   }

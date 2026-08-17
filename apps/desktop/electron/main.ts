@@ -233,6 +233,11 @@ async function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       webSecurity: false,
+      // Приложение часто живёт в фоне (не воспроизводит). backgroundThrottling
+      // по умолчанию тормозит setInterval/requestAnimationFrame рендерера в
+      // фоновом окне → preload/stats/hls.js замирают → после возврата скорость
+      // долго стоит на 0, пока таймеры «просыпаются». Отключаем throttling.
+      backgroundThrottling: false,
     },
   });
 
