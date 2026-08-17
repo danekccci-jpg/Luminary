@@ -3,6 +3,9 @@ import { searchJacRed, mergeReleasesByHash, getJacredStatus } from './scrapers/j
 import { getBridge } from '../utils/bridge';
 
 export class TorrServerService {
+  private reconnectInFlight = new Map<string, Promise<any>>();
+  private resetNetworkInFlight: Promise<void> | null = null;
+
   /** Кэш префетча: magnet → { hash, at }. При открытии фильма тихо add
    *  лучшей раздачи, чтобы «Смотреть» стало мгновенным. hash берётся из
    *  addTorrentFile/addMagnet ответа и переиспользуется в PlayerModal. */
@@ -107,8 +110,16 @@ export class TorrServerService {
   /** Полный сброс сети: пере-анонс DHT/трекеров + reconfigure.
    *  Вызывается при смене IP/списке сети. */
   public async resetNetwork(): Promise<void> {
-    // No HTTP equivalent — skip on non-Electron
-    try { await (getBridge() as any).resetTorrServerNetwork?.(); } catch { /* ignore */ }
+    if (this.resetNetworkInFlight) return this.resetNetworkInFlight;
+    const operation = (async () => {
+      try { await (getBridge() as any).resetTorrServerNetwork?.(); } catch { /* ignore */ }
+    })();
+    this.resetNetworkInFlight = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.resetNetworkInFlight === operation) this.resetNetworkInFlight = null;
+    }
   }
 
   /**
@@ -175,8 +186,19 @@ export class TorrServerService {
 
   /** Переподключение к трекерам/DHT — при пирах>0 и скорости 0.0 MB/s. */
   public async reconnect(hash: string, magnet: string) {
-    try { return await getBridge().reconnectTorrServer(hash, magnet); }
-    catch { return { success: true }; }
+    if (!hash) return { success: false };
+    const existing = this.reconnectInFlight.get(hash);
+    if (existing) return existing;
+    const operation = (async () => {
+      try { return await getBridge().reconnectTorrServer(hash, magnet); }
+      catch { return { success: true }; }
+    })();
+    this.reconnectInFlight.set(hash, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.reconnectInFlight.get(hash) === operation) this.reconnectInFlight.delete(hash);
+    }
   }
 
   /** Логи TorrServer (последние N строк) — для панели отладки в настройках. */
