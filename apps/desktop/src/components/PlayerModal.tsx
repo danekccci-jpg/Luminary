@@ -1649,9 +1649,17 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   };
 
   const togglePlay = () => {
-    if (!videoRef.current) return;
-    if (isPlaying) { videoRef.current.pause(); setIsPlaying(false); }
-    else { videoRef.current.play(); setIsPlaying(true); }
+    const video = videoRef.current;
+    if (!video) return;
+    const playbackNotStarted = video.currentTime === 0 && video.readyState < 2;
+    if (isPlaying && !playbackNotStarted) {
+      video.pause();
+      return;
+    }
+    const playPromise = video.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => setIsPlaying(false));
+    }
   };
 
   // ── Клик по видео: одиночный — Play/Pause, двойной — Fullscreen.
