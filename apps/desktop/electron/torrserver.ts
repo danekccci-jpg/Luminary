@@ -116,6 +116,7 @@ export class TorrServerManager {
   private lastRestartAt = 0;
   private appliedNetworkFix = false;
   private appliedRamCache = false;
+  private lastTorrentAddAt = 0;
   private lastStartError = '';
   private lastStartErrorLog = '';
 
@@ -170,6 +171,14 @@ export class TorrServerManager {
   /** Последние N строк лога — для IPC torrserver:get-logs. */
   public getLogs(lines: number = 100): string[] {
     return this.logBuffer.slice(-Math.max(1, Math.min(lines, LOG_BUFFER_MAX)));
+  }
+
+  private isTorrentBusy(torrent: any): boolean {
+    if (!torrent) return false;
+    const speed = Number(torrent.DownloadSpeed ?? torrent.download_speed ?? 0);
+    const peers = Number(torrent.ActivePeers ?? torrent.active_peers ?? 0);
+    const stat = Number(torrent.Stat ?? torrent.stat ?? 0);
+    return speed > 0 || peers > 0 || stat === 2 || stat === 3;
   }
 
   /**
@@ -275,10 +284,12 @@ export class TorrServerManager {
     this.appliedNetworkFix = true;
     console.log('[TorrServer] P2P issue in logs — resetting network: DHT/UPnP on');
     try {
+      const current = await this.settingsRequest('get');
       const list = await this.apiRequest('list', {});
       const torrents = Array.isArray(list) ? list : [];
-      const hasActiveTorrents = torrents.some((torrent) => torrent && (torrent.Hash || torrent.hash));
+      const hasActiveTorrents = torrents.some((torrent) => this.isTorrentBusy(torrent));
       const settings: Record<string, unknown> = {
+        ...(current && typeof current === 'object' ? current : {}),
         DisableDHT: false,
         DisableUPNP: false,
         DisablePEX: false,
@@ -298,7 +309,9 @@ export class TorrServerManager {
     this.appliedRamCache = true;
     console.log('[TorrServer] Disk cache error in logs — switching to pure RAM cache (200 MB)');
     try {
+      const current = await this.settingsRequest('get');
       await this.settingsRequest('set', {
+        ...(current && typeof current === 'object' ? current : {}),
         CacheSize: 209715200, // ~200 MB
         UseDisk: false,
         TorrentsSavePath: '',
@@ -767,13 +780,14 @@ export class TorrServerManager {
           await new Promise((r) => setTimeout(r, 20000));
           try {
             const list = await this.apiRequest('list', {});
-            const hasTorrents = Array.isArray(list) && list.some((t) => t && (t.Hash || t.hash));
-            if (!hasTorrents) {
+            const hasTorrents = Array.isArray(list) && list.some((t) => this.isTorrentBusy(t));
+            const addQuiet = Date.now() - this.lastTorrentAddAt > 30000;
+            if (!hasTorrents && addQuiet) {
               await this.configureServer(1024, true);
               applied = true;
               console.log('[TorrServer] P2P-port 43211 applied (no active torrents)');
             } else {
-              console.log('[TorrServer] Active torrents — P2P-port change deferred (avoid drop-all)');
+              console.log('[TorrServer] Active/recent torrents — P2P-port change deferred (avoid drop-all)');
             }
           } catch {
             // API недоступен — пробуем в следующей итерации
@@ -822,8 +836,8 @@ export class TorrServerManager {
     const cacheSizeBytes = safeMB * 1024 * 1024;
     try {
       const current = await this.settingsRequest('get');
-      const sets: Record<string, unknown> = {
-        ...(current && typeof current === 'object' ? current : {}),
+      const currentSettings = current && typeof current === 'object' ? current as Record<string, unknown> : {};
+      const desired: Record<string, unknown> = {
         // ── Критический набор для macOS (P2P-скорость 0.0 MB/s fix) ──
         //    + оптимизация для быстрых каналов (600+ Мбит)
         CacheSize: cacheSizeBytes,          // буфер в RAM
@@ -861,9 +875,14 @@ export class TorrServerManager {
         StoreSettingsInJson: false,
       };
       if (applyPeersPort) {
-        sets.PeersListenPort = 43211;       // фиксированный торрент-порт (после инициализации клиента)
+        desired.PeersListenPort = 43211;       // фиксированный торрент-порт (после инициализации клиента)
       }
-      return await this.settingsRequest('set', sets);
+      const changed = Object.entries(desired).some(([key, value]) => currentSettings[key] !== value);
+      if (!changed) {
+        console.log('[TorrServer] Configuration already applied — skip /settings set');
+        return current;
+      }
+      return await this.settingsRequest('set', { ...currentSettings, ...desired });
     } catch (e: any) {
       console.warn('[TorrServer] Configure warning:', e.message);
     }
@@ -910,7 +929,7 @@ export class TorrServerManager {
     try {
       const list = await this.apiRequest('list', {});
       const torrents: any[] = Array.isArray(list) ? list : [];
-      hasActiveTorrents = torrents.some((t) => t && (t.Hash || t.hash));
+      hasActiveTorrents = torrents.some((t) => this.isTorrentBusy(t));
       for (const t of torrents) {
         const hash = t.Hash || t.hash;
         const link = t.Link || t.link || t.magnet || '';
@@ -1037,6 +1056,7 @@ export class TorrServerManager {
   }
 
   public async apiRequest(action: string, payload: any = {}): Promise<any> {
+    if (action === 'add') this.lastTorrentAddAt = Date.now();
     const postData = JSON.stringify({ action, ...payload });
 
     return new Promise((resolve, reject) => {
