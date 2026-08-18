@@ -310,10 +310,19 @@ export class TorrServerService {
         signal: controller.signal,
       });
       if (!(res.status === 200 || res.status === 206)) return false;
-      // Читаем тело полностью: именно это заставляет TorrServer довести
-      // целевой диапазон до кэша, а не только открыть HTTP-соединение.
-      await res.arrayBuffer();
-      return true;
+      // Читаем диапазон потоково: именно это заставляет TorrServer довести
+      // целевой piece до кэша, но не позволяет серверу, проигнорировавшему
+      // Range и вернувшему 200, случайно отдать в память весь фильм.
+      const reader = res.body?.getReader();
+      if (!reader) return false;
+      let received = 0;
+      while (received < length) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value?.byteLength || 0;
+      }
+      try { await reader.cancel(); } catch { /* ignore */ }
+      return received >= Math.min(length, 1024 * 1024);
     } catch {
       return false;
     } finally {
