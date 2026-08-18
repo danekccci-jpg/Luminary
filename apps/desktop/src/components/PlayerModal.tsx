@@ -330,6 +330,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const videoFileSizeRef = useRef(0);
   /** При пересоздании HLS сохраняем, была ли сессия на паузе. */
   const pendingResumePlayRef = useRef<boolean | null>(null);
+  /** Номер подготовки resume-диапазона: устаревший loadedmetadata не должен
+   * запускать seek/play после того, как поток уже был пересоздан. */
+  const resumeWarmupSeqRef = useRef(0);
   /** Ссылка на актуальную recoverStream (вызов из эффектов без старых замыканий). */
   const recoverStreamRef = useRef<(level?: number) => void>(() => {});
 
@@ -1506,6 +1509,18 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             }
           }
         }
+
+        // Hls.js подключает MediaSource после монтирования <video>, поэтому
+        // HTML autoplay уже мог отработать слишком рано. Для обычного старта
+        // запускаем воспроизведение прямо после разбора manifest. Resume с
+        // середины намеренно ждёт handleVideoMetadata: там сначала прогревается
+        // нужный диапазон файла, чтобы GST не получил неготовый дальний сегмент.
+        const hasResumeHint =
+          (Number.isFinite(startPosition) && Number(startPosition) > 5) ||
+          seekOnLoadRef.current != null;
+        if (!hasResumeHint && pendingResumePlayRef.current !== false) {
+          video.play().catch(() => {});
+        }
       });
       // Текущий уровень (для кнопки качества): срабатывает при ручном выборе и авто
       hls.on(Hls.Events.LEVEL_SWITCHED, (_evt, data) => {
@@ -1697,18 +1712,40 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       // При продолжении с середины нельзя оставлять фонового reader на 0-м
       // байте: он конкурирует с запросом seek и вымывает нужный диапазон из
       // приоритета TorrServer.
+      const shouldPlay = pendingResumePlayRef.current !== false;
+      pendingResumePlayRef.current = null;
+      const seq = ++resumeWarmupSeqRef.current;
+      // HLS может начать воспроизведение сразу после MANIFEST_PARSED. Для
+      // resume сначала останавливаем его, прогреваем нужный piece, и только
+      // затем выполняем seek/play — иначе GST получает дальний сегмент раньше
+      // TorrServer и застревает на «segment is not ready».
+      video.pause();
       if (videoFileSizeRef.current > 0 && preloadUrlRef.current) {
         const offset = Math.max(0, Math.floor(videoFileSizeRef.current * (resumeTo / video.duration)));
         restartPreload(preloadUrlRef.current, offset);
+        void torrServerService
+          .warmStreamRange(preloadUrlRef.current, offset)
+          .then((warmed) => {
+            if (seq !== resumeWarmupSeqRef.current || !videoRef.current) return;
+            video.currentTime = resumeTo!;
+            console.log(`[Player] Resume to ${Math.round(resumeTo!)}s${warmed ? ' (range warmed)' : ' (range warmup timeout)'}`);
+            if (shouldPlay) video.play().catch(() => {});
+          });
+      } else {
+        video.currentTime = resumeTo;
+        console.log(`[Player] Resume to ${Math.round(resumeTo)}s`);
+        if (shouldPlay) video.play().catch(() => {});
       }
-      video.currentTime = resumeTo;
-      console.log(`[Player] Resume to ${Math.round(resumeTo)}s`);
-    }
-    if (pendingResumePlayRef.current !== null) {
+    } else if (pendingResumePlayRef.current !== null) {
       const shouldPlay = pendingResumePlayRef.current;
       pendingResumePlayRef.current = null;
       if (shouldPlay) video.play().catch(() => {});
       else video.pause();
+    } else if (video.autoplay) {
+      // Нативный <video> обычно запускается сам, но после HLS/MSE-подключения
+      // autoplay уже был обработан до появления источника. Явный запуск здесь
+      // устраняет состояние «preload завершён, видео стоит на паузе».
+      video.play().catch(() => {});
     }
   };
 

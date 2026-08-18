@@ -286,6 +286,41 @@ export class TorrServerService {
     }
   }
 
+  /**
+   * Прогреть конкретный диапазон файла перед resume-seek.
+   * HLS/GStreamer может запросить сегмент далеко от начала раздачи раньше,
+   * чем TorrServer успеет получить соответствующий piece от пиров. Простого
+   * probe с Range=0 недостаточно: сервер отвечает, но дальний сегмент остаётся
+   * неготовым и HLS застревает в паузе.
+   */
+  public async warmStreamRange(
+    url: string,
+    start: number,
+    length = 8 * 1024 * 1024,
+    timeoutMs = 30000
+  ): Promise<boolean> {
+    if (!url || !Number.isFinite(start) || start < 0) return false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const end = Math.max(start, Math.floor(start + Math.max(1, length) - 1));
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Range: `bytes=${Math.floor(start)}-${end}` },
+        signal: controller.signal,
+      });
+      if (!(res.status === 200 || res.status === 206)) return false;
+      // Читаем тело полностью: именно это заставляет TorrServer довести
+      // целевой диапазон до кэша, а не только открыть HTTP-соединение.
+      await res.arrayBuffer();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   public async searchTorrents(
     query: string,
     year?: string,
