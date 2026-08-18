@@ -852,9 +852,10 @@ export class TorrServerManager {
         UseDisk: true,
         TorrentsSavePath: this.diskCacheDir,
         RemoveCacheOnDrop: true,
-        ConnectionsLimit: 150,              // 250 → 150: паники anacrolix
-        //   (deleteAllRequests/acceptLimitClearer) — гонки при массе одновременных
-        //   соединений + сетевых флаках. 150 пиров достаточно для 37-52 MB/s.
+        ConnectionsLimit: 150,              // высокий предел без перегрузки anacrolix
+        //   TorrServer по умолчанию ограничивает соединения 25; 150 оставляет
+        //   запас для раздач с 100+ пирами, но не возвращает прежние паники
+        //   anacrolix при агрессивном лимите 250.
         ClientsStatLimit: 30,
         TorrentDisconnectTimeout: 86400,     // 24 часа (TorrServer НЕ принимает 0 —
         //   приводит к дефолту30; 86400 = бесконечность на практике для десктопа)
@@ -869,6 +870,7 @@ export class TorrServerManager {
         //   («can't assign requested address» / «no route to host») → UDP-ошибки
         //   → ПАНИКА anacrolix (acceptLimitClearer) → краш сервера посреди просмотра.
         //   IPv4-пула достаточно для высокой скорости (37-52 MB/s проверено).
+        ResponsiveMode: true,                // не ждать завершения куска перед выдачей данных
         // Настройки НЕ пишем в settings.json: сохранённый PeersListenPort
         // ломает BT-клиент при следующем старте. Конфиг применяется через
         // API при каждом запуске, поэтому файл не нужен.

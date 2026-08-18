@@ -321,6 +321,15 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const streamUrlRef = useRef('');
   /** Время последней проверки стопор-детектора. */
   const lastStallCheckAtRef = useRef(0);
+  /** Последняя валидная позиция — сохраняем её и при паузе/ошибке, не только по X. */
+  const playbackPositionRef = useRef({ current: 0, duration: 0 });
+  const lastProgressSaveAtRef = useRef(0);
+  /** Не применять startPosition повторно после повторного loadedmetadata. */
+  const resumeAppliedRef = useRef(false);
+  /** Размер выбранного видеофайла — нужен для запуска preload около resume-позиции. */
+  const videoFileSizeRef = useRef(0);
+  /** При пересоздании HLS сохраняем, была ли сессия на паузе. */
+  const pendingResumePlayRef = useRef<boolean | null>(null);
   /** Ссылка на актуальную recoverStream (вызов из эффектов без старых замыканий). */
   const recoverStreamRef = useRef<(level?: number) => void>(() => {});
 
@@ -739,6 +748,10 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   // Init torrent: предзагрузка + проверка HTTP 200 потока перед монтированием <video>
   useEffect(() => {
     gstTriedRef.current = false; // новая сессия — снова можно пробовать gst-ретраскод
+    resumeAppliedRef.current = false;
+    videoFileSizeRef.current = 0;
+    seekOnLoadRef.current = null;
+    pendingResumePlayRef.current = null;
     let statsInterval: NodeJS.Timeout | null = null;
     let probeInterval: NodeJS.Timeout | null = null;
     let cancelled = false;
@@ -924,7 +937,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             if (files.length > 0) {
               videoIndex = pickVideoIndex(files);
               videoIndexRef.current = videoIndex;
-              const m = (files[0].path || '').match(/\.([a-z0-9]{2,4})$/i);
+              const selectedFile = files[videoIndex - 1] || files[0];
+              videoFileSizeRef.current = Number(selectedFile.length) || 0;
+              const m = (selectedFile.path || '').match(/\.([a-z0-9]{2,4})$/i);
               if (m) { detectedExt = m[1].toLowerCase(); setContainerExt(detectedExt); }
               break;
             }
@@ -963,7 +978,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
               setStats(st);
               // Определяем контейнер по расширению первого файла (mkv/mp4/ts)
               if (!detectedExt && st.file_stats?.length) {
-                const m = (st.file_stats[0].path || '').match(/\.([a-z0-9]{2,4})$/i);
+                const selectedFile = st.file_stats[(videoIndexRef.current || 1) - 1] || st.file_stats[0];
+                videoFileSizeRef.current = Number(selectedFile.length) || videoFileSizeRef.current;
+                const m = (selectedFile.path || '').match(/\.([a-z0-9]{2,4})$/i);
                 if (m) { detectedExt = m[1].toLowerCase(); setContainerExt(detectedExt); }
                 // Метаданные пришли поздно — выбираем видео-файл и пересобираем URL
                 if (!videoIndex && st.file_stats.length > 0) {
@@ -983,7 +1000,12 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
                   }
                 }
               }
-              const loaded = Number.isFinite(st.loaded_size) ? Math.max(0, st.loaded_size) : 0;
+              // loaded_size — общий объём завершённых кусков, а для экрана
+              // предзагрузки важен именно последовательный read-ahead.
+              const preloaded = Number.isFinite(st.preloaded_bytes)
+                ? Number(st.preloaded_bytes)
+                : Number(st.loaded_size);
+              const loaded = Number.isFinite(preloaded) ? Math.max(0, preloaded) : 0;
               const pct = clampPct((loaded / Math.max(1, PREBUFFER_BYTES)) * 100);
               setBufPercent(pct);
               // ── macOS P2P-фикс: скорость 0.0 MB/s → рестарт торрента (rem+add) ──
@@ -991,15 +1013,16 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
               // Если не помогло, повторный рестарт на 15-й секунде.
               const elapsedSec = (Date.now() - startTs) / 1000;
               const speedZero = !Number.isFinite(st.download_speed) || st.download_speed === 0;
-              if (speedZero && elapsedSec >= 5 && !restartedOnce) {
+              const hasTorrentInfo = Array.isArray(st.file_stats) && st.file_stats.length > 0;
+              if (hasTorrentInfo && speedZero && elapsedSec >= 8 && !restartedOnce) {
                 restartedOnce = true;
-                console.warn(`[Player] DownloadSpeed=0 for 5s — forcing torrent restart (rem+add) to re-announce DHT/trackers`);
+                console.warn(`[Player] DownloadSpeed=0 for 8s after metadata — forcing torrent restart (rem+add) to re-announce DHT/trackers`);
                 torrServerService.reconnect(torrentHash, magnet).catch(() => {});
                 // После пересоздания торрента переоткрываем предзагрузочный поток
                 setTimeout(() => restartPreload(preloadUrl), 4000);
-              } else if (speedZero && elapsedSec >= 15 && !restartedTwice) {
+              } else if (hasTorrentInfo && speedZero && elapsedSec >= 20 && !restartedTwice) {
                 restartedTwice = true;
-                console.warn('[Player] Still 0 MB/s — second torrent restart (rem+add)');
+                console.warn('[Player] Still 0 MB/s after metadata — second torrent restart (rem+add)');
                 torrServerService.reconnect(torrentHash, magnet).catch(() => {});
                 setTimeout(() => restartPreload(preloadUrl), 4000);
               }
@@ -1131,6 +1154,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             // через пустой URL триггерит размонтирование → повторный mount
             // с новым URL пересоздаёт Hls и запрашивает свежий манифест.
             if (url) {
+              preservePlaybackStateForReload();
               setStreamUrl('');
               setTimeout(() => {
                 if (active) setStreamUrl(url);
@@ -1175,6 +1199,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       const url = streamUrlRef.current;
       if (level >= 4) torrServerService.resetNetwork().catch(() => {});
       if (url) {
+        preservePlaybackStateForReload();
         setStreamUrl('');
         setTimeout(() => { if (url) setStreamUrl(url); }, level >= 4 ? 500 : 300);
       }
@@ -1308,6 +1333,30 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     if (url) startPreload(url, startOffset);
   };
 
+  /** Сохранять прогресс не только при закрытии: ошибка/краш/перезапуск
+   * потока не должны съедать последнюю позицию просмотра. */
+  const savePlaybackProgress = (force = false) => {
+    const video = videoRef.current;
+    if (!onProgressSave || !video) return;
+    const current = Number(video.currentTime);
+    const total = Number(video.duration);
+    if (!Number.isFinite(current) || current <= 0 || !Number.isFinite(total) || total <= 0) return;
+    playbackPositionRef.current = { current, duration: total };
+    const now = Date.now();
+    if (!force && now - lastProgressSaveAtRef.current < 8000) return;
+    lastProgressSaveAtRef.current = now;
+    onProgressSave(current, total);
+  };
+
+  const preservePlaybackStateForReload = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    const current = Number(video.currentTime);
+    if (Number.isFinite(current) && current > 0) seekOnLoadRef.current = current;
+    pendingResumePlayRef.current = !video.paused;
+    savePlaybackProgress(true);
+  };
+
   /** Preload работает ВЕСЬ просмотр: TorrServer качает фильм последовательно,
    *  gst/hls.js всегда имеют данные в кэше. Остановка — только при закрытии
    *  плеера (cleanup в init-эффекте) или при смене раздачи. */
@@ -1332,6 +1381,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     const gstUrl = await torrServerService.getStreamUrl(hash, videoIndexRef.current, true).catch(() => null);
     if (!gstUrl || gstUrl === streamUrl) return false;
     console.warn('[Player] AC3/DTS/HEVC — фоновая перекодировка в AAC (GST HLS), повторная попытка…');
+    preservePlaybackStateForReload();
     setStreamUrl(gstUrl);
     restartPreload(gstUrl);
     return true;
@@ -1339,6 +1389,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
   /** onError на <video>: кодек/контейнер не поддерживается Chromium. */
   const handleVideoError = async () => {
+    savePlaybackProgress(true);
     const err = videoRef.current?.error;
     const code = err?.code ?? -1;
     // MEDIA_ERR_DECODE (3) / MEDIA_ERR_SRC_NOT_SUPPORTED (4) — кодек/контейнер:
@@ -1522,6 +1573,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       .then((plainUrl) => {
         if (plainUrl && plainUrl !== streamUrl && hlsRef.current) {
           console.warn('[Player] gst HLS недоступен — авто-откат на нативный /stream');
+          preservePlaybackStateForReload();
           setStreamUrl(plainUrl);
         }
       })
@@ -1571,9 +1623,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
   const handleClose = () => {
     // Сохранить прогресс в историю (если видео играло)
-    if (onProgressSave && videoRef.current && !isBuffering) {
-      onProgressSave(videoRef.current.currentTime || 0, videoRef.current.duration || 0);
-    }
+    savePlaybackProgress(true);
     destroyHls();
     // НЕ дропаем кэш торрента: при повторном открытии этого фильма TorrServer
     // уже содержит метаданные/буфер — «Смотреть» станет мгновенным.
@@ -1602,9 +1652,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
   /** Видео завершилось — end-screen (авто-следующее для сериалов в UI каталога). */
   const handleEnded = () => {
-    if (onProgressSave && videoRef.current) {
-      onProgressSave(videoRef.current.duration || 0, videoRef.current.duration || 0);
-    }
+    savePlaybackProgress(true);
     setIsEnded(true);
     setShowControls(true);
   };
@@ -1614,6 +1662,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     if (!video) return;
     setCurrentTime(video.currentTime);
     setDuration(video.duration || 0);
+    playbackPositionRef.current = { current: video.currentTime, duration: video.duration || 0 };
+    savePlaybackProgress();
     if (video.buffered.length > 0) {
       setBuffered(video.buffered.end(video.buffered.length - 1));
     }
@@ -1639,12 +1689,26 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     if (seekOnLoadRef.current != null && seekOnLoadRef.current > 0) {
       resumeTo = seekOnLoadRef.current;
       seekOnLoadRef.current = null;
-    } else if (startPosition && startPosition > 5 && video.duration && startPosition < video.duration - 10) {
+    } else if (!resumeAppliedRef.current && startPosition && startPosition > 5 && video.duration && startPosition < video.duration - 10) {
       resumeTo = startPosition;
     }
     if (resumeTo != null && video.duration && resumeTo < video.duration - 1) {
+      resumeAppliedRef.current = true;
+      // При продолжении с середины нельзя оставлять фонового reader на 0-м
+      // байте: он конкурирует с запросом seek и вымывает нужный диапазон из
+      // приоритета TorrServer.
+      if (videoFileSizeRef.current > 0 && preloadUrlRef.current) {
+        const offset = Math.max(0, Math.floor(videoFileSizeRef.current * (resumeTo / video.duration)));
+        restartPreload(preloadUrlRef.current, offset);
+      }
       video.currentTime = resumeTo;
       console.log(`[Player] Resume to ${Math.round(resumeTo)}s`);
+    }
+    if (pendingResumePlayRef.current !== null) {
+      const shouldPlay = pendingResumePlayRef.current;
+      pendingResumePlayRef.current = null;
+      if (shouldPlay) video.play().catch(() => {});
+      else video.pause();
     }
   };
 
@@ -2214,8 +2278,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
               <div>
                 <div style={{ fontSize: '0.62rem', color: 'rgba(181,123,255,0.6)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Пиры</div>
                 <div style={{ fontSize: '1.15rem', fontWeight: 900, color: '#fff', lineHeight: 1, marginTop: '2px' }}>
-                  {stats?.active_peers || 12}
-                  <span style={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>/{stats?.total_peers || 48}</span>
+                  {stats ? stats.active_peers : '—'}
+                  <span style={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>/{stats ? stats.total_peers : '—'}</span>
                 </div>
               </div>
             </div>
@@ -2295,7 +2359,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             onError={handleVideoError}
             onPlay={() => setIsPlaying(true)}
             onPlaying={() => setOnlineLoading(false)}
-            onPause={() => setIsPlaying(false)}
+            onPause={() => { setIsPlaying(false); savePlaybackProgress(true); }}
+            onWaiting={() => savePlaybackProgress(true)}
             onTimeUpdate={handleTimeUpdate}
             onEnded={handleEnded}
             onClick={handleVideoClick}

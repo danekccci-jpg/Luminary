@@ -157,6 +157,9 @@ export interface TorrServerStats {
   stat_string: string;
   torrent_size: number;
   loaded_size: number;
+  /** Байты, которые TorrServer подготовил именно для последовательного чтения. */
+  preloaded_bytes?: number;
+  preload_size?: number;
   download_speed: number;
   upload_speed: number;
   active_peers: number;

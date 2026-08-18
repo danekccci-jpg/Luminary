@@ -124,7 +124,8 @@ class CapacitorBridge implements BridgeAPI {
   }
   async getTorrServerTorrent(hash: string) {
     const r = await this.tsFetch('/torrents', { method: 'POST', body: JSON.stringify({ Hashes: [hash], Action: 0 }) });
-    return { success: true, data: r };
+    // TorrServer Action=0 returns an array for a single requested hash.
+    return { success: true, data: Array.isArray(r) ? r[0] : r };
   }
   async removeTorrServerTorrent(hash: string) {
     return this.tsFetch('/torrents', { method: 'POST', body: JSON.stringify({ Hashes: [hash], Action: 1 }) });

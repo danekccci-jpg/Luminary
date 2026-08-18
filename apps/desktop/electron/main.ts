@@ -644,8 +644,13 @@ function setupIPC() {
 
   ipcMain.handle('torrserver:get', async (_, { hash }) => {
     try {
-      const res = await torrServer.apiRequest('get', { hash });
-      return { success: true, data: res };
+      const response = await torrServer.apiRequest('get', { hash });
+      // TorrServer returns the result of Action=0 as an array, even when a
+      // single hash was requested.  The renderer consumes one TorrentStatus;
+      // passing the array through makes file_stats and all live counters look
+      // empty and causes PlayerModal to fall back to the wrong file/index.
+      const data = Array.isArray(response) ? response[0] : response;
+      return data ? { success: true, data } : { success: false, error: 'Torrent not found' };
     } catch (err: any) {
       return { success: false, error: err.message };
     }

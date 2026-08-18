@@ -2,6 +2,15 @@ import { TorrServerStatusInfo, TorrentRelease, TorrServerStats } from '../types'
 import { searchJacRed, mergeReleasesByHash, getJacredStatus } from './scrapers/jacred';
 import { getBridge } from '../utils/bridge';
 
+/** TorrServer Action=0 historically returned either an object or a one-item
+ * array. Normalize both shapes at the renderer boundary. */
+function normalizeTorrentResponse(response: any): any {
+  const payload = response?.data ?? response;
+  const data = Array.isArray(payload) ? payload[0] : payload;
+  if (!data || typeof data !== 'object') return response;
+  return { ...(response && typeof response === 'object' ? response : {}), success: response?.success !== false, data };
+}
+
 export class TorrServerService {
   private reconnectInFlight = new Map<string, Promise<any>>();
   private resetNetworkInFlight: Promise<void> | null = null;
@@ -223,23 +232,11 @@ export class TorrServerService {
 
   public async getTorrentStats(hash: string): Promise<{ success: boolean; data?: TorrServerStats; error?: string }> {
     try {
-      return await getBridge().getTorrServerTorrent(hash);
-    } catch {
-      return {
-        success: true,
-        data: {
-          hash,
-          title: 'Demo Stream',
-          stat: 2,
-          stat_string: 'Streaming',
-          torrent_size: 4500000000,
-          loaded_size: 4500000000,
-          download_speed: 6200000,
-          upload_speed: 120000,
-          active_peers: 24,
-          total_peers: 89,
-        },
-      };
+      return normalizeTorrentResponse(await getBridge().getTorrServerTorrent(hash));
+    } catch (err: any) {
+      // Не подменять недоступную статистику вымышленными пирами/скоростью:
+      // это скрывает реальное состояние TorrServer и мешает диагностике.
+      return { success: false, error: err?.message || 'Не удалось получить статистику TorrServer' };
     }
   }
 
