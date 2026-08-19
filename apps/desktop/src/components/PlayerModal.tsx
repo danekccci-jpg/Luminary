@@ -335,6 +335,11 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const resumeWarmupSeqRef = useRef(0);
   /** Ссылка на актуальную recoverStream (вызов из эффектов без старых замыканий). */
   const recoverStreamRef = useRef<(level?: number) => void>(() => {});
+  /** Прогрев диапазона resume должен завершиться до ручного play по пробелу. */
+  const resumeWarmupInFlightRef = useRef(false);
+  const pendingManualPlayRef = useRef(false);
+  /** Отложенное восстановление после реального waiting во время воспроизведения. */
+  const waitingRecoveryTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const [streamUrl, setStreamUrl]       = useState('');
   const [hash, setHash]                 = useState('');
@@ -610,6 +615,16 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       // Escape/Back теперь обрабатывает общий Back-стек (см. registerBackHandler)
       if (isBuffering || errorMsg || codecError) return;
       const target = e.target as HTMLElement;
+      // Пробел в плеере всегда означает play/pause. При фокусе на кнопке
+      // браузер раньше активировал кнопку вместо video.play(), а при resume
+      // мог запускать MSE до окончания прогрева дальнего диапазона.
+      if (e.key === ' ' || e.key === 'Spacebar') {
+        if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA') return;
+        e.preventDefault();
+        e.stopPropagation();
+        togglePlay();
+        return;
+      }
       // Нативные контролы (кнопка/слайдер): Space/Enter и стрелки работают как
       // в WebView (жмут кнопку / двигают фокус — spatial navigation). Глобальные
       // хоткеи (F — fullscreen, M — mute и т.д.) работают всегда, даже если
@@ -641,10 +656,6 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
           break;
         case 'Enter':
           // OK на пульте = play/pause (как клик по видео)
-          e.preventDefault();
-          togglePlay();
-          break;
-        case ' ':
           e.preventDefault();
           togglePlay();
           break;
@@ -766,8 +777,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     let detectedExt = '';
     let videoIndex: number | undefined;
     const startTs = Date.now();   // начало буферизации
-    let restartedOnce = false;    // рестарт на 5-й сек при 0 MB/s
-    let restartedTwice = false;   // повторный рестарт на 15-й сек
+    let zeroSpeedLogged = false;  // не спамить лог при нулевой скорости
 
     const clampPct = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
@@ -1011,23 +1021,17 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
               const loaded = Number.isFinite(preloaded) ? Math.max(0, preloaded) : 0;
               const pct = clampPct((loaded / Math.max(1, PREBUFFER_BYTES)) * 100);
               setBufPercent(pct);
-              // ── macOS P2P-фикс: скорость 0.0 MB/s → рестарт торрента (rem+add) ──
-              // Через 5 сек после начала буферизации при 0 MB/s — сброс пиров.
-              // Если не помогло, повторный рестарт на 15-й секунде.
+              // ── Не пересоздаём активный torrent при нулевой скорости ──
+              // rem+add закрывает torrstor.Cache под живым reader'ом. В MatriX
+              // это приводит к "unexpected error hashing piece" и иногда к
+              // fatal concurrent map read/write внутри anacrolix. Reader уже
+              // запущен preload'ом; оставляем torrent и ждём его peers.
               const elapsedSec = (Date.now() - startTs) / 1000;
               const speedZero = !Number.isFinite(st.download_speed) || st.download_speed === 0;
               const hasTorrentInfo = Array.isArray(st.file_stats) && st.file_stats.length > 0;
-              if (hasTorrentInfo && speedZero && elapsedSec >= 8 && !restartedOnce) {
-                restartedOnce = true;
-                console.warn(`[Player] DownloadSpeed=0 for 8s after metadata — forcing torrent restart (rem+add) to re-announce DHT/trackers`);
-                torrServerService.reconnect(torrentHash, magnet).catch(() => {});
-                // После пересоздания торрента переоткрываем предзагрузочный поток
-                setTimeout(() => restartPreload(preloadUrl), 4000);
-              } else if (hasTorrentInfo && speedZero && elapsedSec >= 20 && !restartedTwice) {
-                restartedTwice = true;
-                console.warn('[Player] Still 0 MB/s after metadata — second torrent restart (rem+add)');
-                torrServerService.reconnect(torrentHash, magnet).catch(() => {});
-                setTimeout(() => restartPreload(preloadUrl), 4000);
+              if (hasTorrentInfo && speedZero && elapsedSec >= 8 && !zeroSpeedLogged) {
+                zeroSpeedLogged = true;
+                console.warn('[Player] DownloadSpeed=0 after metadata — keeping active torrent intact (no rem+add)');
               }
               // Выходим из буферизации только при подтверждённом потоке
               // + (достаточно данных ИЛИ пользователь нажал «Пропустить»)
@@ -1101,7 +1105,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     if (!hash) return;
     const unsub = torrServerService.onNetworkChanged(() => {
       console.log('[Player] Network changed — resetting connections');
-      // 1) Пере-анонс DHT/трекеров через TorrServer (rem+add активного торрента)
+      // 1) Проверка сетевой конфигурации без rem+add активного торрента.
       torrServerService.resetNetwork().catch(() => {});
       // 2) Перезапуск preload через4с (даём DHT пересобраться)
       setTimeout(() => {
@@ -1181,9 +1185,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   // ── ЕДИНАЯ ТОЧКА ВОССТАНОВЛЕНИЯ ПОТОКА ──
   // Уровни (от простого к полному пересозданию), применяются по нарастающей:
   //  1. restartPreload           — данные снова качаются из пиров
-  //  2. reconnect (rem+add)      — новые трекеры/DHT
+  //  2. startLoad + restartPreload — не трогая активный torrent/cache
   //  3. пересоздать streamUrl    — hls.js монтируется заново
-  //  4. resetNetwork + пересоздать поток — полный сброс сети TorrServer
+  //  4. пересоздать поток — без rem+add под живым reader
   const recoverStream = async (level: number = 1) => {
     const now = Date.now();
     const minGap = 8000 * level; // пауза между уровнями растёт (8с, 16с, …)
@@ -1196,17 +1200,18 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     if (level <= 1) {
       if (pl) restartPreload(pl);
     } else if (level === 2) {
-      if (hash && magnet) torrServerService.reconnect(hash, magnet).catch(() => {});
-      setTimeout(() => { if (pl) restartPreload(pl); }, 4000);
+      // Не делать rem+add под живым video/preload reader: это закрывает
+      // torrstor.Cache и является триггером падения anacrolix в MatriX.
+      hlsRef.current?.startLoad();
+      if (pl) restartPreload(pl);
     } else {
       const url = streamUrlRef.current;
-      if (level >= 4) torrServerService.resetNetwork().catch(() => {});
       if (url) {
         preservePlaybackStateForReload();
         setStreamUrl('');
-        setTimeout(() => { if (url) setStreamUrl(url); }, level >= 4 ? 500 : 300);
+        setTimeout(() => { if (url) setStreamUrl(url); }, 300);
       }
-      if (pl) setTimeout(() => restartPreload(pl), level >= 4 ? 3000 : 0);
+      if (pl) restartPreload(pl);
     }
   };
   recoverStreamRef.current = recoverStream;
@@ -1242,9 +1247,10 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       lastStallTimeRef.current = t;
       // currentTime не двигается ≥9с И нет данных для декодирования (readyState<2)
       if (stallIntervals >= 3 && v.readyState < 2) {
+        const stalledFor = stallIntervals * 3;
         stallIntervals = 0;
         const lvl = Math.min(4, recoverAttemptsRef.current + 1);
-        console.log(`[Player] stall detected (${stallIntervals + 3}с, readyState=${v.readyState}) — recovering level ${lvl}`);
+        console.log(`[Player] stall detected (${stalledFor}с, readyState=${v.readyState}) — recovering level ${lvl}`);
         recoverStreamRef.current(lvl);
       }
     }, 3000);
@@ -1263,7 +1269,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     const goOnline = () => {
       if (recovered) return;
       recovered = true;
-      console.log('[Player] Network back online — resetting TorrServer');
+      console.log('[Player] Network back online — refreshing stream readers');
       torrServerService.resetNetwork().catch(() => {});
       setTimeout(() => {
         const url = preloadUrlRef.current;
@@ -1715,6 +1721,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       const shouldPlay = pendingResumePlayRef.current !== false;
       pendingResumePlayRef.current = null;
       const seq = ++resumeWarmupSeqRef.current;
+      resumeWarmupInFlightRef.current = true;
       // HLS может начать воспроизведение сразу после MANIFEST_PARSED. Для
       // resume сначала останавливаем его, прогреваем нужный piece, и только
       // затем выполняем seek/play — иначе GST получает дальний сегмент раньше
@@ -1730,11 +1737,21 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             video.currentTime = resumeTo!;
             console.log(`[Player] Resume to ${Math.round(resumeTo!)}s${warmed ? ' (range warmed)' : ' (range warmup timeout)'}`);
             if (shouldPlay) video.play().catch(() => {});
+          })
+          .finally(() => {
+            if (seq !== resumeWarmupSeqRef.current) return;
+            resumeWarmupInFlightRef.current = false;
+            const manualPlayRequested = pendingManualPlayRef.current;
+            pendingManualPlayRef.current = false;
+            if (manualPlayRequested && videoRef.current?.paused) {
+              videoRef.current.play().catch(() => setIsPlaying(false));
+            }
           });
       } else {
         video.currentTime = resumeTo;
         console.log(`[Player] Resume to ${Math.round(resumeTo)}s`);
         if (shouldPlay) video.play().catch(() => {});
+        resumeWarmupInFlightRef.current = false;
       }
     } else if (pendingResumePlayRef.current !== null) {
       const shouldPlay = pendingResumePlayRef.current;
@@ -1752,15 +1769,47 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const togglePlay = () => {
     const video = videoRef.current;
     if (!video) return;
-    const playbackNotStarted = video.currentTime === 0 && video.readyState < 2;
-    if (isPlaying && !playbackNotStarted) {
+    if (resumeWarmupInFlightRef.current) {
+      pendingManualPlayRef.current = true;
+      return;
+    }
+    if (!video.paused) {
       video.pause();
+      return;
+    }
+    if (video.readyState < 2 && hlsRef.current) {
+      pendingManualPlayRef.current = true;
+      hlsRef.current.startLoad();
       return;
     }
     const playPromise = video.play();
     if (playPromise && typeof playPromise.catch === 'function') {
       playPromise.catch(() => setIsPlaying(false));
     }
+  };
+
+  const handleVideoPlaying = () => {
+    if (waitingRecoveryTimerRef.current) {
+      clearTimeout(waitingRecoveryTimerRef.current);
+      waitingRecoveryTimerRef.current = null;
+    }
+    setIsPlaying(true);
+    setOnlineLoading(false);
+  };
+
+  const handleVideoWaiting = () => {
+    savePlaybackProgress(true);
+    const video = videoRef.current;
+    // waiting после явной паузы — штатное состояние, восстановление не нужно.
+    if (!video || video.paused || video.ended || waitingRecoveryTimerRef.current) return;
+    const stalledAt = video.currentTime;
+    waitingRecoveryTimerRef.current = setTimeout(() => {
+      waitingRecoveryTimerRef.current = null;
+      const current = videoRef.current;
+      if (!current || current.paused || current.ended || current.currentTime !== stalledAt) return;
+      hlsRef.current?.startLoad();
+      recoverStreamRef.current(1);
+    }, 3500);
   };
 
   // ── Клик по видео: одиночный — Play/Pause, двойной — Fullscreen.
@@ -2062,6 +2111,7 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     return () => {
       if (scrubPreviewTimer.current) clearTimeout(scrubPreviewTimer.current);
       if (seekHudTimer.current) clearTimeout(seekHudTimer.current);
+      if (waitingRecoveryTimerRef.current) clearTimeout(waitingRecoveryTimerRef.current);
       captureVideoRef.current?.removeAttribute('src');
     };
   }, []);
@@ -2395,9 +2445,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             onLoadedMetadata={handleVideoMetadata}
             onError={handleVideoError}
             onPlay={() => setIsPlaying(true)}
-            onPlaying={() => setOnlineLoading(false)}
+            onPlaying={handleVideoPlaying}
             onPause={() => { setIsPlaying(false); savePlaybackProgress(true); }}
-            onWaiting={() => savePlaybackProgress(true)}
+            onWaiting={handleVideoWaiting}
             onTimeUpdate={handleTimeUpdate}
             onEnded={handleEnded}
             onClick={handleVideoClick}

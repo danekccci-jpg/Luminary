@@ -918,35 +918,30 @@ export class TorrServerManager {
   }
 
   /**
-   * Полный сброс сети TorrServer: вызывается при смене IP/WiFi.
-   * 1) Пере-анонс активного торрента (reconnectTorrent) — принудительно
-   *    обновляет DHT-таблицу и переподключает пиры к новому интерфейсу.
-   * 2) Повторное применение конфигурации — DHT/UPnP/PeersListenPort
-   *    могут быть сброшены при смене сетевого стека.
+   * Сброс сетевых настроек TorrServer при смене IP/WiFi.
+   *
+   * Нельзя делать rem+add активной раздачи под живым stream reader:
+   * MatriX закрывает torrstor.Cache, после чего в anacrolix возможна
+   * concurrent map read/write panic. Во время просмотра оставляем torrent
+   * и его cache нетронутыми; конфигурацию применяем только когда активных
+   * readers нет.
    */
   public async resetNetwork(): Promise<void> {
-    console.log('[TorrServer] Network reset: re-announcing torrents + reconfiguring...');
-    let hasActiveTorrents = true;
-    // 1) Пере-анонс: получаем список активных торрентов и reconnect
+    console.log('[TorrServer] Network reset requested — preserving active torrent readers');
     try {
       const list = await this.apiRequest('list', {});
       const torrents: any[] = Array.isArray(list) ? list : [];
-      hasActiveTorrents = torrents.some((t) => this.isTorrentBusy(t));
-      for (const t of torrents) {
-        const hash = t.Hash || t.hash;
-        const link = t.Link || t.link || t.magnet || '';
-        if (hash) {
-          await this.reconnectTorrent(hash, link);
-          console.log(`[TorrServer] Network reset: re-announced ${hash.slice(0, 12)}`);
-        }
+      if (torrents.some((t) => this.isTorrentBusy(t))) {
+        console.log('[TorrServer] Network reset deferred — active torrent reader detected');
+        return;
       }
     } catch (e: any) {
       console.warn('[TorrServer] Network reset list warning:', e.message);
     }
-    // 2) Повторная конфигурация — DHT/UPnP/PeersListenPort
+    // Меняем настройки только без активных readers.
     try {
-      await this.configureServer(1024, !hasActiveTorrents);
-      console.log(`[TorrServer] Network reset: configuration reapplied${hasActiveTorrents ? ' (P2P port deferred: active torrents)' : ''}`);
+      await this.configureServer(1024, true);
+      console.log('[TorrServer] Network reset: configuration reapplied');
     } catch (e: any) {
       console.warn('[TorrServer] Network reset reconfigure warning:', e.message);
     }
