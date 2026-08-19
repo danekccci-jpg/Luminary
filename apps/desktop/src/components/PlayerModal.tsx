@@ -342,6 +342,9 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const waitingRecoveryTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const [streamUrl, setStreamUrl]       = useState('');
+  /** Отдельный plain /stream для кадрового превью. Для GST/HLS он не совпадает
+   * с основным URL: превью не должно перематывать и пересоздавать основной HLS. */
+  const [previewStreamUrl, setPreviewStreamUrl] = useState('');
   const [hash, setHash]                 = useState('');
   const [isBuffering, setIsBuffering]   = useState(true);
   const [bufferPercent, setBufPercent]  = useState(0);
@@ -1831,7 +1834,11 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
       togglePlay();
     }, 260);
   };
-  const handleVideoDoubleClick = () => {
+  const handleVideoDoubleClick = (e: React.MouseEvent<HTMLElement>) => {
+    const target = e.target as HTMLElement;
+    // Double-click должен работать только по пустой области видео. События
+    // от кнопок, таймлайна и всей панели управления не меняют fullscreen.
+    if (target.closest('button, input, a, [data-player-controls], [data-seekbar], [role="button"]')) return;
     if (singleClickTimer.current) {
       window.clearTimeout(singleClickTimer.current);
       singleClickTimer.current = null;
@@ -1856,9 +1863,10 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const time = ratio * duration;
     setScrubHover({ x: Math.max(0, e.clientX - rect.left), time });
-    // Превью кадра: отложенный захват (нативные потоки), чтобы не спамить seek
+    // Превью кадра: отложенный захват отдельного /stream, чтобы не спамить seek
+    // и не вмешиваться в основной HLS/GST-поток.
     if (scrubPreviewTimer.current) clearTimeout(scrubPreviewTimer.current);
-    if (nativeStream) {
+    if (previewStreamUrl) {
       scrubPreviewTimer.current = setTimeout(() => capturePreviewFrame(time), 200);
     }
   };
@@ -2020,6 +2028,12 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
 
   const toggleFullscreen = async () => {
     if (!containerRef.current) return;
+    // F не должен оставлять фокус на seek-bar: Chromium тогда рисует вокруг
+    // таймлайна активную рамку поверх fullscreen-плеера.
+    const seekBar = progressRef.current;
+    if (document.activeElement === seekBar) {
+      seekBar?.blur();
+    }
     try {
       if (!document.fullscreenElement) {
         await containerRef.current.requestFullscreen();
@@ -2055,34 +2069,63 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
   const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0;
   const speedMb = stats?.download_speed ? (stats.download_speed / (1024 * 1024)).toFixed(1) : '0.0';
 
-  /** Нативный поток (не HLS) — только для него доступно превью кадров. */
-  const nativeStream =
-    !!streamUrl &&
-    !isOnline &&
-    !streamUrl.includes('.m3u8') &&
-    !streamUrl.includes('/gst/') &&
-    !streamUrl.includes('hls=true');
-
   /** Текущее качество (онлайн): фактический уровень → ярлык из источника. */
   const currentQualityLabel = useMemo(() => {
     const lv = hlsLevels.find((l) => l.index === currentLevel)?.label;
     return lv || directQuality || 'Авто';
   }, [hlsLevels, currentLevel, directQuality]);
 
-  // Скрытый видео-элемент для превью кадров: подключаем к нативному /stream
+  // Для GST/HLS основной поток нельзя перематывать ради тултипа. Получаем
+  // отдельный plain /stream того же файла; Chromium покажет кадр, если умеет
+  // декодировать исходный контейнер/кодек. Если нет — останется только время.
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!streamUrl || isOnline) {
+      setPreviewStreamUrl('');
+      return () => { cancelled = true; };
+    }
+
+    const isGstStream = streamUrl.includes('/gst/') || streamUrl.includes('.m3u8') || streamUrl.includes('hls=true');
+    if (!isGstStream) {
+      setPreviewStreamUrl(streamUrl);
+      return () => { cancelled = true; };
+    }
+
+    // Пока plain URL для нового GST-потока ещё запрашивается, не показываем
+    // кадр от предыдущего файла/сессии.
+    setPreviewStreamUrl('');
+    const index = videoIndexRef.current;
+    if (!hash || !streamReady || !index) {
+      setPreviewStreamUrl('');
+      return () => { cancelled = true; };
+    }
+
+    torrServerService.getStreamUrl(hash, index, false)
+      .then((url) => {
+        if (!cancelled) setPreviewStreamUrl(url || '');
+      })
+      .catch(() => {
+        if (!cancelled) setPreviewStreamUrl('');
+      });
+
+    return () => { cancelled = true; };
+  }, [hash, isOnline, streamReady, streamUrl]);
+
+  // Скрытый видео-элемент для превью кадров: подключаем к отдельному /stream
   useEffect(() => {
     const cv = captureVideoRef.current;
     if (!cv) return;
-    if (!nativeStream) {
+    if (!previewStreamUrl) {
       cv.removeAttribute('src');
       try { cv.load(); } catch { /* ignore */ }
       return;
     }
-    cv.src = streamUrl;
+    cv.src = previewStreamUrl;
     cv.preload = 'metadata';
     try { cv.load(); } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [streamUrl, streamReady]);
+  }, [previewStreamUrl]);
 
   // Закрытие меню качества по клику вне него
   useEffect(() => {
@@ -2455,8 +2498,8 @@ export const PlayerModal: React.FC<PlayerModalProps> = ({
             style={{ width: '100%', height: '100%', cursor: showControls ? 'default' : 'none', ...objectFitStyle }}
           />
 
-          {/* Скрытый видео-элемент + canvas: превью кадров для нативных потоков
-              (не участвует в воспроизведении — только seek к точке наведения) */}
+          {/* Скрытый видео-элемент + canvas: превью кадров через отдельный
+              /stream (не участвует в воспроизведении — только seek к наведению) */}
           <video
             ref={captureVideoRef}
             muted
